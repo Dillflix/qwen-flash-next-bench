@@ -28,6 +28,7 @@ import socket
 import statistics
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -38,7 +39,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -1022,6 +1023,63 @@ def sha256_file(path: pathlib.Path) -> str | None:
     return digest.hexdigest()
 
 
+def archive_results(run_dir: pathlib.Path, output: pathlib.Path | None = None) -> pathlib.Path:
+    """Create one portable archive containing the complete run and an integrity manifest."""
+    run_dir = run_dir.resolve()
+    if not run_dir.is_dir():
+        raise ValueError(f"run directory does not exist: {run_dir}")
+    if not (run_dir / "manifest.json").is_file():
+        raise ValueError(f"run directory has no manifest.json: {run_dir}")
+    output = output.resolve() if output else run_dir.with_name(run_dir.name + ".tar.gz")
+    if output == run_dir or output.is_relative_to(run_dir):
+        raise ValueError("archive output must be outside the run directory")
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    payload_files = sorted(
+        path for path in run_dir.rglob("*")
+        if path.is_file() and not path.is_symlink() and path.name != "archive-manifest.json"
+    )
+    payload = []
+    total_bytes = 0
+    for path in payload_files:
+        size = path.stat().st_size
+        total_bytes += size
+        payload.append({
+            "path": path.relative_to(run_dir).as_posix(),
+            "size_bytes": size,
+            "sha256": sha256_file(path),
+        })
+    archive_manifest = {
+        "schema": 1,
+        "created_at": utc_now(),
+        "harness_version": VERSION,
+        "run": run_dir.name,
+        "payload_file_count": len(payload),
+        "payload_total_bytes": total_bytes,
+        "payload": payload,
+    }
+    atomic_json(run_dir / "archive-manifest.json", archive_manifest)
+    files_to_add = sorted(
+        path for path in run_dir.rglob("*") if path.is_file() and not path.is_symlink()
+    )
+
+    temporary = output.with_name(output.name + ".tmp")
+    try:
+        with tarfile.open(temporary, mode="w:gz", compresslevel=6) as archive:
+            for path in files_to_add:
+                archive.add(path, arcname=(pathlib.Path(run_dir.name) / path.relative_to(run_dir)).as_posix())
+        temporary.replace(output)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    digest = sha256_file(output)
+    assert digest is not None
+    output.with_name(output.name + ".sha256").write_text(
+        f"{digest}  {output.name}\n", encoding="ascii",
+    )
+    return output
+
+
 def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
     server = pathlib.Path(str(config.get("variables", {}).get("hip_server", "")))
     build_root = server.parent.parent if server.name else pathlib.Path()
@@ -1757,7 +1815,11 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
         signal.signal(signal.SIGINT, old_sigint)
         signal.signal(signal.SIGTERM, old_sigterm)
     summarize(run_dir, config, experiments)
+    print(f"Packaging complete run {run_dir.name}...", flush=True)
+    archive_path = archive_results(run_dir)
     print(f"\nResults: {run_dir}")
+    print(f"Archive: {archive_path}")
+    print(f"Checksum: {archive_path}.sha256")
     return run_dir
 
 
@@ -2044,6 +2106,16 @@ def execute_rocm_audit(args: argparse.Namespace) -> pathlib.Path:
     return output
 
 
+def execute_archive(args: argparse.Namespace) -> pathlib.Path:
+    run_dir = pathlib.Path(args.run_dir).resolve()
+    output = pathlib.Path(args.output).resolve() if args.output else None
+    print(f"Packaging {run_dir}...", flush=True)
+    archive = archive_results(run_dir, output)
+    print(f"Archive: {archive}")
+    print(f"Checksum: {archive}.sha256")
+    return archive
+
+
 def self_test() -> None:
     parsed = parse_link_status("LnkSta: Speed 16GT/s, Width x4\n")
     assert parsed == {"speed": "16GT/s", "width": "x4", "speed_gt_s": 16.0, "width_lanes": 4}
@@ -2176,6 +2248,21 @@ def self_test() -> None:
         assert "Residency and capacity telemetry" in rendered
         assert "True concurrent-request throughput" in rendered
         assert (summary_root / "concurrency.csv").is_file()
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        archive_root = pathlib.Path(raw_tmp)
+        archived_run = archive_root / "example-run"
+        archived_run.mkdir()
+        atomic_json(archived_run / "manifest.json", {"run_id": "example-run"})
+        (archived_run / "sample.txt").write_text("payload\n", encoding="utf-8")
+        archive_path = archive_results(archived_run)
+        assert archive_path == archive_root / "example-run.tar.gz"
+        assert archive_path.is_file()
+        assert archive_path.with_name(archive_path.name + ".sha256").is_file()
+        with tarfile.open(archive_path, "r:gz") as archive:
+            members = {member.name for member in archive.getmembers()}
+        assert "example-run/manifest.json" in members
+        assert "example-run/archive-manifest.json" in members
+        assert "example-run/sample.txt" in members
     inherited = resolve_experiment_inheritance([
         {"name": "base", "args": ["a"], "env": {"X": "1"}},
         {"name": "child", "extends": "base", "args_append": ["b"], "env": {"Y": "2"}},
@@ -2241,6 +2328,10 @@ def build_parser() -> argparse.ArgumentParser:
     rocm.add_argument("--run-ops", action="store_true")
     rocm.add_argument("--timeout", type=float, default=600.0, help="timeout per filtered backend-op test")
 
+    archive = sub.add_parser("archive", help="package a complete or partial run as one .tar.gz plus SHA-256")
+    archive.add_argument("run_dir")
+    archive.add_argument("--output", help="output .tar.gz path; defaults beside the run directory")
+
     sub.add_parser("self-test", help="run parser and aggregation unit checks")
     return parser
 
@@ -2256,6 +2347,8 @@ def main() -> int:
             summarize(pathlib.Path(args.run_dir).resolve())
         elif args.command == "rocm-audit":
             execute_rocm_audit(args)
+        elif args.command == "archive":
+            execute_archive(args)
         elif args.command == "self-test":
             self_test()
         return 0
