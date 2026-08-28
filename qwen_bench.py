@@ -36,7 +36,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -937,7 +937,7 @@ def probe_row(
     content = str(response.get("content", ""))
     timing = extract_timing(response)
     predicted_n = timing.get("predicted_n")
-    degenerate = not isinstance(predicted_n, (int, float)) or predicted_n < n_predict * 0.5
+    degenerate = not isinstance(predicted_n, (int, float)) or predicted_n < n_predict * 0.95
     return {
         "schema": 1,
         "status": "ok",
@@ -965,7 +965,7 @@ def probe_row(
 def completed_keys(results_path: pathlib.Path) -> set[tuple[int, str, str, int]]:
     keys: set[tuple[int, str, str, int]] = set()
     for row in read_jsonl(results_path):
-        if row.get("status") == "ok":
+        if row.get("status") == "ok" and not row.get("degenerate"):
             keys.add((int(row["round"]), str(row["experiment"]), str(row["workload"]), int(row["requested_depth_tokens"])))
     return keys
 
@@ -1000,6 +1000,8 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
     host = str(defaults.get("host", "127.0.0.1"))
     port = int(defaults.get("port", 8189))
     base_url = f"http://{host}:{port}"
+    effective_request = dict(defaults.get("request", {}))
+    effective_request.update(tier.get("request", {}))
     manifest = {
         "schema": 1,
         "harness_version": VERSION,
@@ -1010,6 +1012,7 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
         "tier": tier,
         "experiments": experiments,
         "commands": {item["name"]: server_command(config, tier, item) for item in experiments},
+        "request": effective_request,
         "argv": sys.argv,
     }
     atomic_json(run_dir / "manifest.json", manifest)
@@ -1028,8 +1031,7 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
     n_predict = int(tier.get("n_predict", 128))
     request_timeout_s = float(tier.get("request_timeout_s", defaults.get("request_timeout_s", 900)))
     warmups = int(tier.get("warmups", 1))
-    extra_request = dict(defaults.get("request", {}))
-    extra_request.update(tier.get("request", {}))
+    extra_request = effective_request
     stop_event = threading.Event()
 
     def handle_signal(signum: int, _frame: Any) -> None:
@@ -1111,10 +1113,15 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                         prompt_n = row["timing"].get("prompt_n")
                         prompt_ms = row["timing"].get("prompt_ms")
                         draft = row["timing"].get("draft_acceptance")
-                        status_parts = [
+                        predicted_n = row["timing"].get("predicted_n")
+                        status_parts: list[str] = []
+                        if row["degenerate"]:
+                            actual = int(predicted_n) if isinstance(predicted_n, (int, float)) else "unknown"
+                            status_parts.append(f"INVALID short decode ({actual}/{n_predict} tokens)")
+                        status_parts.append(
                             f"decode {speed:.2f} tok/s"
                             if isinstance(speed, (int, float)) else "decode unavailable"
-                        ]
+                        )
                         if isinstance(prefill, (int, float)):
                             prefill_text = f"prefill {prefill:.2f} tok/s"
                             if isinstance(prompt_n, (int, float)) and isinstance(prompt_ms, (int, float)):
@@ -1366,6 +1373,16 @@ def self_test() -> None:
         "--spec-draft-n-max", "2", "--spec-draft-n-max", "4",
     ])
     assert canonical == ["--jinja", "--cache-type-k", "f16", "--spec-draft-n-max", "4"]
+    short = probe_row(
+        "self-test", {"name": "test", "backend": "cpu"}, 0, "code", 0, 128,
+        {"content": "", "timings": {"predicted_n": 0}}, 1.0, None, {},
+    )
+    full = probe_row(
+        "self-test", {"name": "test", "backend": "cpu"}, 0, "code", 0, 128,
+        {"content": "x", "timings": {"predicted_n": 128}}, 1.0, None, {},
+    )
+    assert short["degenerate"] is True
+    assert full["degenerate"] is False
     bw = parse_pcie_bw("100 200 256\n")
     assert bw["pcie_rx_est_bytes_s"] == 25_600 and bw["pcie_tx_est_bytes_s"] == 51_200
     expanded = expand_tree({"x": "{root}/file"}, {"root": "/tmp"})

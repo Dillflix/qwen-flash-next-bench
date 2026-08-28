@@ -46,6 +46,7 @@
       "--jinja"
     ],
     "request": {
+      "ignore_eos": true,
       "top_k": 1,
       "min_p": 0.0,
       "top_p": 1.0

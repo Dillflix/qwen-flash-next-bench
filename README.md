@@ -18,7 +18,14 @@ For every measured completion the harness records:
 - the observed speed and width of PCIe bridge `c5:00.0` during the request;
 - the exact server command, environment-specific device listing, git revision, OS, PCI, Vulkan, ROCm, and AMD SMI diagnostics.
 
-Warm-ups are excluded. Measured runs use temperature zero, `top_k=1`, `cache_prompt=false`, and a fixed seed. Experiment order rotates between rounds to reduce temperature/order bias. Each completed probe is appended and flushed to JSONL immediately, so an interrupted multi-hour sweep can be resumed.
+Warm-ups are excluded. Measured throughput runs use temperature zero, `top_k=1`,
+`cache_prompt=false`, `ignore_eos=true`, and a fixed seed. Ignoring EOS is required
+for fixed-length decode timing: otherwise naturally short JSON/code answers report
+zero or incomparable throughput. A response producing less than 95% of the requested
+tokens is marked invalid, excluded from summaries, and retried when a run is resumed.
+Experiment order rotates between rounds to reduce temperature/order bias. Each
+completed probe is appended and flushed to JSONL immediately, so an interrupted
+multi-hour sweep can be resumed.
 
 ## Install on the Fedora host
 
