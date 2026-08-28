@@ -337,29 +337,26 @@
       "startup_timeout_s": 600,
       "request_timeout_s": 900
     },
-    "vulkan-ubatch-large": {
-      "description": "Follow-up ubatch 4096/8192 test on the winning 82/18 F16-KV target, dGPU MTP n=4, p-min 0.75 placement.",
+    "vulkan-ubatch-32k": {
+      "description": "Long-prompt ubatch 2048/4096 decision on the winning 82/18 F16-KV target, dGPU MTP n=4, p-min 0.75 placement.",
       "experiments": [
-        "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub4096",
-        "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub8192"
+        "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub2048",
+        "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub4096"
       ],
       "workloads": [
-        "code",
-        "json",
-        "prose"
+        "code"
       ],
       "depths": [
-        4096,
-        16384
+        32768
       ],
-      "ctx_size": 32768,
+      "ctx_size": 65536,
       "n_predict": 512,
       "warmups": 1,
-      "warmup_depth": 16384,
-      "rounds": 1,
+      "warmup_depth": 4096,
+      "rounds": 2,
       "settle_seconds": 2,
-      "startup_timeout_s": 600,
-      "request_timeout_s": 900
+      "startup_timeout_s": 900,
+      "request_timeout_s": 1200
     },
     "vulkan-ple-ssd": {
       "description": "Mmap/CPU PLE residency A/B on the 82/18 F16-KV, dGPU-MTP n=4, p-min 0.75, ubatch-2048 placement.",
@@ -1168,17 +1165,6 @@
         "4096",
         "--ubatch-size",
         "4096"
-      ]
-    },
-    {
-      "name": "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub8192",
-      "description": "Winning 82/18 F16-KV, dGPU-MTP n=4 p-min 0.75 placement with batch and ubatch 8192.",
-      "extends": "layer_82_18_vk_mtp_n4_f16kv_dgpu",
-      "args_append": [
-        "--batch-size",
-        "8192",
-        "--ubatch-size",
-        "8192"
       ]
     },
     {

@@ -196,18 +196,21 @@ device, prompts, 16K warm-up, and 512-token output are otherwise identical. The
 ubatch sweep is not multiplied across the MTP parameter candidates, and the tier
 does not repeat device-placement or layer-ratio tests.
 
-If ubatch 2048 materially improves prefill on the target host, continue upward
-without repeating the completed sweep:
+Ubatches above 2048 require a matching logical batch size. The measured 8192 cell
+lost the Vulkan device and is no longer defined. To decide whether 4096's larger
+batch can pay off only at much longer prompts, compare 2048 and 4096 directly at
+approximately 32K requested depth:
 
 ```bash
-python3 qwen_bench.py preflight --tier vulkan-ubatch-large
-./run-bench.sh --tier vulkan-ubatch-large
+python3 qwen_bench.py preflight --tier vulkan-ubatch-32k
+./run-bench.sh --tier vulkan-ubatch-32k
 ```
 
-This runs only ubatch 4096 and 8192 on the n=4/p-min-0.75 winner. Both experiments
-set `--batch-size` equal to `--ubatch-size`, because llama.cpp's default logical
-batch ceiling is 2048. A load or allocation failure is valid capacity-boundary
-data; fail-fast remains off so the 8192 cell still runs if 4096 fails, or vice versa.
+The server context is 65536 so the actual tokenized prompt plus 512 forced output
+tokens fits safely. One code workload, two rounds, a 4K excluded warm-up, and
+rotated experiment order isolate the ubatch decision without rerunning the earlier
+workload matrix. The 4096 cell explicitly sets both batch and ubatch to 4096; the
+2048 control uses llama.cpp's 2048 logical batch with ubatch 2048.
 
 ### PLE n-gram mmap/SSD residency
 
