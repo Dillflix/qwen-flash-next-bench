@@ -118,6 +118,21 @@ to prune the three-round placement, tuning, KV, and context tiers; do not run ev
 loser at long context. Completed probes can be resumed with the run directory as
 described below.
 
+### Focused F16 KV and MTP screen
+
+To test only KV precision and MTP on the representative 88/12 Vulkan placement:
+
+```bash
+python3 qwen_bench.py preflight --tier vulkan-kv-mtp
+./run-bench.sh --tier vulkan-kv-mtp
+```
+
+This is a one-round 2×4 factorial: Q8 and F16 KV, each with MTP disabled and with
+draft windows n=2, n=3, and n=4. The Q8/no-MTP cell is retained as the comparison
+baseline. All eight cells use the same three workloads, base/~4K/~16K prompt
+depths, 32K context, and 128-token generation length. It excludes every unrelated
+placement, row, wave32, and ubatch experiment.
+
 Bring up ROCm 10 separately before running a large cross-backend matrix:
 
 ```bash

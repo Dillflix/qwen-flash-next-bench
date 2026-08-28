@@ -255,6 +255,36 @@
       "startup_timeout_s": 600,
       "request_timeout_s": 600
     },
+    "vulkan-kv-mtp": {
+      "description": "Focused Q8/F16 KV by MTP off/n2/n3/n4 factorial on the representative 88/12 Vulkan placement.",
+      "experiments": [
+        "layer_88_12_vk_no_mtp",
+        "layer_88_12_vk_f16kv_no_mtp",
+        "layer_88_12_vk_mtp_n2",
+        "layer_88_12_vk_mtp_n3",
+        "layer_88_12_vk_mtp_n4",
+        "layer_88_12_vk_mtp_n2_f16kv",
+        "layer_88_12_vk_mtp_n3_f16kv",
+        "layer_88_12_vk_mtp_n4_f16kv"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        0,
+        4096,
+        16384
+      ],
+      "ctx_size": 32768,
+      "n_predict": 128,
+      "warmups": 1,
+      "rounds": 1,
+      "settle_seconds": 2,
+      "startup_timeout_s": 600,
+      "request_timeout_s": 600
+    },
     "rocm-smoke": {
       "description": "One-pass ROCm 10 controls and heterogeneous placement bring-up.",
       "experiments": [
@@ -543,6 +573,28 @@
       "args_append": [
         "--spec-draft-n-max",
         "4"
+      ]
+    },
+    {
+      "name": "layer_88_12_vk_mtp_n2_f16kv",
+      "description": "Representative 88/12 MTP n=2 placement with F16 target K/V cache.",
+      "extends": "layer_88_12_vk_mtp_n2",
+      "args_append": [
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
+      ]
+    },
+    {
+      "name": "layer_88_12_vk_mtp_n3_f16kv",
+      "description": "Representative 88/12 MTP n=3 placement with F16 target K/V cache.",
+      "extends": "layer_88_12_vk_mtp_n3",
+      "args_append": [
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
       ]
     },
     {
