@@ -36,7 +36,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -401,13 +401,45 @@ def http_json(method: str, url: str, payload: dict[str, Any] | None, timeout: fl
         return exc.code, decoded
 
 
-def process_rss_bytes(pid: int) -> int | None:
+def process_metrics(pid: int) -> dict[str, int]:
+    result: dict[str, int] = {}
     try:
-        text = pathlib.Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+        status = pathlib.Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
     except OSError:
-        return None
-    match = re.search(r"^VmRSS:\s+(\d+)\s+kB", text, re.MULTILINE)
-    return int(match.group(1)) * 1024 if match else None
+        status = ""
+    for proc_name, result_name in {
+        "VmRSS": "rss_bytes",
+        "RssAnon": "rss_anon_bytes",
+        "RssFile": "rss_file_bytes",
+        "RssShmem": "rss_shmem_bytes",
+    }.items():
+        match = re.search(rf"^{proc_name}:\s+(\d+)\s+kB", status, re.MULTILINE)
+        if match:
+            result[result_name] = int(match.group(1)) * 1024
+
+    try:
+        io_text = pathlib.Path(f"/proc/{pid}/io").read_text(encoding="utf-8")
+    except OSError:
+        io_text = ""
+    for proc_name, result_name in {
+        "rchar": "rchar_bytes",
+        "read_bytes": "read_bytes",
+    }.items():
+        match = re.search(rf"^{proc_name}:\s+(\d+)$", io_text, re.MULTILINE)
+        if match:
+            result[result_name] = int(match.group(1))
+
+    try:
+        stat = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii").strip()
+        # comm (field 2) is parenthesized and may contain spaces. Fields after
+        # the final ')' begin at field 3 (state); minflt and majflt are 10/12.
+        tail = stat[stat.rfind(")") + 2:].split()
+        if len(tail) > 9:
+            result["minor_faults"] = int(tail[7])
+            result["major_faults"] = int(tail[9])
+    except (OSError, ValueError):
+        pass
+    return result
 
 
 def meminfo() -> dict[str, int]:
@@ -548,10 +580,12 @@ class TelemetrySampler:
         return {}
 
     def _sample(self) -> dict[str, Any]:
+        process = process_metrics(self.pid)
         sample: dict[str, Any] = {
             "ts": utc_now(),
             "monotonic_s": time.monotonic(),
-            "pid_rss_bytes": process_rss_bytes(self.pid),
+            "pid_rss_bytes": process.get("rss_bytes"),
+            "process": process,
             "host": meminfo(),
             "gpus": {},
             "pcie": self._pcie(),
@@ -591,12 +625,16 @@ def aggregate_telemetry(samples: list[dict[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {"samples": len(samples), "gpus": {}}
     gpu_values: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     rss: list[float] = []
+    process_values: dict[str, list[float]] = defaultdict(list)
     available: list[float] = []
     link_speeds: list[float] = []
     link_widths: list[float] = []
     for sample in samples:
         if isinstance(sample.get("pid_rss_bytes"), (int, float)):
             rss.append(float(sample["pid_rss_bytes"]))
+        for field, value in sample.get("process", {}).items():
+            if isinstance(value, (int, float)):
+                process_values[field].append(float(value))
         host_available = sample.get("host", {}).get("MemAvailable")
         if isinstance(host_available, (int, float)):
             available.append(float(host_available))
@@ -615,6 +653,14 @@ def aggregate_telemetry(samples: list[dict[str, Any]]) -> dict[str, Any]:
             link_widths.append(float(pcie["width_lanes"]))
     if rss:
         result["pid_rss_max_bytes"] = int(max(rss))
+    for field in ("rss_anon_bytes", "rss_file_bytes", "rss_shmem_bytes"):
+        values = process_values.get(field, [])
+        if values:
+            result[f"pid_{field.removesuffix('_bytes')}_max_bytes"] = int(max(values))
+    for field in ("rchar_bytes", "read_bytes", "minor_faults", "major_faults"):
+        values = process_values.get(field, [])
+        if values:
+            result[f"pid_{field}_delta"] = int(max(values) - min(values))
     if available:
         result["mem_available_min_bytes"] = int(min(available))
     for bdf, fields in gpu_values.items():
@@ -1210,8 +1256,20 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         gpu_pcie_tx: dict[str, list[float]] = defaultdict(list)
         link_width: list[float] = []
         link_speed: list[float] = []
+        rss_file: list[float] = []
+        rss_anon: list[float] = []
+        storage_read: list[float] = []
+        major_faults: list[float] = []
         for row in rows:
             telemetry = row.get("telemetry", {})
+            if isinstance(telemetry.get("pid_rss_file_max_bytes"), (int, float)):
+                rss_file.append(float(telemetry["pid_rss_file_max_bytes"]))
+            if isinstance(telemetry.get("pid_rss_anon_max_bytes"), (int, float)):
+                rss_anon.append(float(telemetry["pid_rss_anon_max_bytes"]))
+            if isinstance(telemetry.get("pid_read_bytes_delta"), (int, float)):
+                storage_read.append(float(telemetry["pid_read_bytes_delta"]))
+            if isinstance(telemetry.get("pid_major_faults_delta"), (int, float)):
+                major_faults.append(float(telemetry["pid_major_faults_delta"]))
             for bdf, gpu in telemetry.get("gpus", {}).items():
                 if isinstance(gpu.get("busy_mean_percent"), (int, float)):
                     gpu_busy[bdf].append(float(gpu["busy_mean_percent"]))
@@ -1246,6 +1304,10 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             "baseline_output_match": (sum(matches) / len(matches)) if matches else None,
             "pcie_speed_gt_s_max": max(link_speed, default=None),
             "pcie_width_lanes_max": max(link_width, default=None),
+            "rss_file_max_gib_median": median_or_none(value / 1024**3 for value in rss_file),
+            "rss_anon_max_gib_median": median_or_none(value / 1024**3 for value in rss_anon),
+            "storage_read_gib_median": median_or_none(value / 1024**3 for value in storage_read),
+            "major_faults_median": median_or_none(major_faults),
             "gpu_busy_mean": json.dumps({bdf: round(statistics.fmean(vals), 2) for bdf, vals in gpu_busy.items()}, sort_keys=True),
             "gpu_vram_max_gib": json.dumps({bdf: round(max(vals) / 1024**3, 2) for bdf, vals in gpu_vram.items()}, sort_keys=True),
             "gpu_power_mean_w": json.dumps({bdf: round(statistics.fmean(vals), 2) for bdf, vals in gpu_power.items()}, sort_keys=True),
@@ -1317,8 +1379,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         md.append(f"| {row['experiment']} | {row['cells']} | {decode_speedup} | {prefill_speedup} | {balanced} | {match} | {accept} |\n")
     md.extend([
         "\n## Per-workload results\n\n",
-        "| Experiment | Workload | Requested depth | Prompt n | Samples | Decode tok/s | Prefill tok/s | Prefill ms | MTP accept | Hash match | PCIe |\n",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "| Experiment | Workload | Requested depth | Prompt n | Samples | Decode tok/s | Prefill tok/s | Prefill ms | MTP accept | Hash match | File RSS GiB | Storage read GiB | Major faults | PCIe |\n",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     ])
     ranked = sorted(summary_rows, key=lambda row: row["decode_tok_s_median"] or -1, reverse=True)
     for row in ranked:
@@ -1329,7 +1391,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             pcie = f"{row['pcie_speed_gt_s_max']:g} GT/s x{int(row['pcie_width_lanes_max'] or 0)}"
         md.append(
             f"| {row['experiment']} | {row['workload']} | {row['depth_tokens_requested']} | {fmt(row['prefill_tokens_median'], 0)} | {row['samples']} | "
-            f"{fmt(row['decode_tok_s_median'])} | {fmt(row['prompt_tok_s_median'])} | {fmt(row['prefill_ms_median'])} | {accept} | {match} | {pcie} |\n"
+            f"{fmt(row['decode_tok_s_median'])} | {fmt(row['prompt_tok_s_median'])} | {fmt(row['prefill_ms_median'])} | {accept} | {match} | "
+            f"{fmt(row['rss_file_max_gib_median'])} | {fmt(row['storage_read_gib_median'])} | {fmt(row['major_faults_median'], 0)} | {pcie} |\n"
         )
     failures = [row for row in results if row.get("status") not in SUCCESS_STATES]
     if failures:
@@ -1394,12 +1457,33 @@ def self_test() -> None:
     aggregate = aggregate_telemetry([
         {
             "pid_rss_bytes": 10,
+            "process": {
+                "rss_file_bytes": 20,
+                "rss_anon_bytes": 30,
+                "read_bytes": 100,
+                "major_faults": 4,
+            },
             "host": {"MemAvailable": 100},
             "gpus": {"0000:01:00.0": {"gpu_busy_percent": 50, "vram_used_bytes": 20, "gtt_used_bytes": 2}},
             "pcie": {"speed_gt_s": 16.0, "width_lanes": 4},
-        }
+        },
+        {
+            "pid_rss_bytes": 12,
+            "process": {
+                "rss_file_bytes": 25,
+                "rss_anon_bytes": 35,
+                "read_bytes": 140,
+                "major_faults": 7,
+            },
+            "host": {"MemAvailable": 90},
+            "gpus": {},
+            "pcie": {},
+        },
     ])
     assert aggregate["gpus"]["0000:01:00.0"]["vram_used_max_bytes"] == 20
+    assert aggregate["pid_rss_file_max_bytes"] == 25
+    assert aggregate["pid_read_bytes_delta"] == 40
+    assert aggregate["pid_major_faults_delta"] == 3
     inherited = resolve_experiment_inheritance([
         {"name": "base", "args": ["a"], "env": {"X": "1"}},
         {"name": "child", "extends": "base", "args_append": ["b"], "env": {"Y": "2"}},

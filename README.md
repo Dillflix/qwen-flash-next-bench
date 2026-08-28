@@ -15,6 +15,7 @@ For every measured completion the harness records:
 - per-DRM-device busy percentage, peak VRAM/GTT use, temperature, and power when exposed by sysfs;
 - AMDGPU PCIe receive/send message counters and a max-payload-size bandwidth estimate;
 - process RSS and minimum host `MemAvailable`;
+- process anonymous/file-backed RSS, storage-read bytes, and major/minor page faults;
 - the observed speed and width of PCIe bridge `c5:00.0` during the request;
 - the exact server command, environment-specific device listing, git revision, OS, PCI, Vulkan, ROCm, and AMD SMI diagnostics.
 
@@ -207,6 +208,31 @@ This runs only ubatch 4096 and 8192 on the n=4/p-min-0.75 winner. Both experimen
 set `--batch-size` equal to `--ubatch-size`, because llama.cpp's default logical
 batch ceiling is 2048. A load or allocation failure is valid capacity-boundary
 data; fail-fast remains off so the 8192 cell still runs if 4096 fails, or vice versa.
+
+### PLE n-gram mmap/SSD residency
+
+`--load-mode mmap` is already the harness default, but `=CPU` alone does not prove
+that the n-gram table is being served from SSD rather than resident RAM. The exact
+tensor name also differs between the original joined GGUF and this repository's
+Vulkan-compatible PLE16 file. Run the three-cell residency test:
+
+```bash
+python3 qwen_bench.py preflight --tier vulkan-ple-ssd
+./run-bench.sh --tier vulkan-ple-ssd
+```
+
+The control uses PLE16 automatic placement. Candidate one applies
+`^ple_ngram_embd\.[0-9]+\.weight$=CPU` to all PLE16 shards. Candidate two uses the
+original joined GGUF with `^per_layer_token_embd\.weight$=CPU`, which should also
+bypass Vulkan's per-buffer size limit if the override matches before allocation.
+Everything else stays at 82/18, F16 KV, dGPU MTP n=4, p-min 0.75, and ubatch 2048.
+
+Two rotated rounds measure one code workload at approximately 4K and 16K depth.
+The summary includes file-backed versus anonymous process RSS, storage bytes read,
+and major page faults alongside prefill/decode. File-backed RSS is reclaimable;
+nonzero storage reads and major faults demonstrate actual backing-store traffic.
+Page-cache temperature still affects the absolute I/O figures, so compare both
+rounds rather than treating a warm-cache zero as proof that no SSD mapping exists.
 
 ### Focused 7900 XT prefill screen
 
