@@ -157,7 +157,7 @@ python3 qwen_bench.py preflight --tier vulkan-prefill
 ```
 
 This screen keeps Q8 KV and disables MTP everywhere. It compares APU-only against
-one representative contiguous split, the component/expert split, reverse layers,
+one maximum-known-to-load 82/18 contiguous split, the component/expert split, reverse layers,
 and both row modes. These are structurally distinct; neighboring layer ratios are
 not repeated. One fixed code prompt is measured at approximately 4K and 16K depth.
 Each server first processes the same 16K prompt as an excluded warm-up, preventing
