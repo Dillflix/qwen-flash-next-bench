@@ -127,11 +127,16 @@ python3 qwen_bench.py preflight --tier vulkan-kv-mtp
 ./run-bench.sh --tier vulkan-kv-mtp
 ```
 
-This is a one-round 2×4 factorial: Q8 and F16 KV, each with MTP disabled and with
-draft windows n=2, n=3, and n=4. The Q8/no-MTP cell is retained as the comparison
-baseline. All eight cells use the same three workloads, base/~4K/~16K prompt
-depths, 32K context, and 128-token generation length. It excludes every unrelated
-placement, row, wave32, and ubatch experiment.
+This runs exactly three configurations: the entire target model on the iGPU with
+F16 KV; the entire target model on the iGPU with Q8 MTP n=4 on the 7900 XT; and
+the entire target model on the iGPU with both F16 KV and Q8 MTP n=4 on the 7900 XT.
+There is no repeated Q8/no-MTP control and no target-model layer split.
+
+The MTP commands use `--device Vulkan1,Vulkan0 --tensor-split 1,0`: device-list
+index 0 is the iGPU, so 100% of target weights remain there. Layer scheduling is
+enabled only to keep Vulkan0 registered for `--spec-draft-device Vulkan0`; Vulkan0
+is the 7900 XT and receives only the draft sidecar. All three configurations use
+the same workloads, base/~4K/~16K prompt depths, 32K context, and 128-token output.
 
 Bring up ROCm 10 separately before running a large cross-backend matrix:
 

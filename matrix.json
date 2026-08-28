@@ -256,16 +256,11 @@
       "request_timeout_s": 600
     },
     "vulkan-kv-mtp": {
-      "description": "Focused Q8/F16 KV by MTP off/n2/n3/n4 factorial on the representative 88/12 Vulkan placement.",
+      "description": "Focused iGPU-only target tests: F16 KV, dGPU MTP n=4, and F16 KV plus dGPU MTP n=4.",
       "experiments": [
-        "layer_88_12_vk_no_mtp",
-        "layer_88_12_vk_f16kv_no_mtp",
-        "layer_88_12_vk_mtp_n2",
-        "layer_88_12_vk_mtp_n3",
-        "layer_88_12_vk_mtp_n4",
-        "layer_88_12_vk_mtp_n2_f16kv",
-        "layer_88_12_vk_mtp_n3_f16kv",
-        "layer_88_12_vk_mtp_n4_f16kv"
+        "apu_vk_f16kv_no_mtp",
+        "apu_vk_mtp_n4",
+        "apu_vk_mtp_n4_f16kv"
       ],
       "workloads": [
         "code",
@@ -941,6 +936,59 @@
         "0",
         "--split-mode",
         "none"
+      ]
+    },
+    {
+      "name": "apu_vk_f16kv_no_mtp",
+      "description": "Entire target model on the iGPU with F16 K/V cache and no MTP.",
+      "extends": "apu_vk_no_mtp",
+      "baseline": false,
+      "args_append": [
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
+      ]
+    },
+    {
+      "name": "apu_vk_mtp_n4",
+      "description": "Entire target model on the iGPU with the Q8 MTP sidecar on the 7900 XT.",
+      "backend": "vulkan",
+      "baseline": false,
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan1,Vulkan0",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "1,0",
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "Vulkan0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "4",
+        "--spec-draft-p-min",
+        "0.75"
+      ]
+    },
+    {
+      "name": "apu_vk_mtp_n4_f16kv",
+      "description": "Entire target model on the iGPU with F16 K/V cache and the Q8 MTP sidecar on the 7900 XT.",
+      "extends": "apu_vk_mtp_n4",
+      "args_append": [
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
       ]
     },
     {
