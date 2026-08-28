@@ -4,6 +4,7 @@
     "repo": "/srv/llm/src/llama-qwen4exp",
     "model_dir": "/srv/llm/models/qwen-flash-next",
     "model_ple16": "{model_dir}/Qwen3.8-Flash-Next-Q4_0-ROCmFP4-STRIX-PLE16.gguf",
+    "model_h1": "{model_dir}/Qwen3.8-Flash-Next-H1-ROCmFP4-STRIX-PLE16.gguf",
     "model_joined": "{model_dir}/Qwen3.8-Flash-Next-Q4_0-ROCmFP4-STRIX.gguf",
     "mtp": "{model_dir}/mtp-Qwen3.8-Flash-Next-Q8_0.gguf",
     "vulkan_server": "{repo}/build-vulkan/bin/llama-server",
@@ -351,6 +352,32 @@
         "code"
       ],
       "depths": [
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 512,
+      "warmups": 1,
+      "warmup_depth": 4096,
+      "rounds": 2,
+      "settle_seconds": 2,
+      "startup_timeout_s": 900,
+      "request_timeout_s": 1200
+    },
+    "vulkan-quant-h1": {
+      "description": "Matched current-versus-H1 quant comparison at the winning 82/18 F16-KV, dGPU-MTP n=4, p-min 0.75, ubatch-2048 placement.",
+      "cache_state": "hot",
+      "experiments": [
+        "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub2048",
+        "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub2048_h1"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        4096,
+        16384,
         32768
       ],
       "ctx_size": 65536,
@@ -1185,6 +1212,12 @@
         "--ubatch-size",
         "2048"
       ]
+    },
+    {
+      "name": "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub2048_h1",
+      "description": "H1 quant at the winning 82/18 F16-KV target placement with Q8 MTP on the 7900 XT and ubatch 2048.",
+      "extends": "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub2048",
+      "model": "{model_h1}"
     },
     {
       "name": "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu",

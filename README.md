@@ -56,7 +56,9 @@ The checked-in paths assume:
 /srv/llm/models/qwen-flash-next/mtp-Qwen3.8-Flash-Next-Q8_0.gguf
 ```
 
-If any path differs, edit only the `variables` block at the top of `matrix.json`. No Python packages are required.
+If any path differs, edit only the `variables` block at the top of `matrix.json`.
+No Python packages are required for the benchmark runner. The conversion step below
+uses the Python environment already required by `convert_hf_to_gguf.py`.
 
 ## First run
 
@@ -74,6 +76,108 @@ The smoke run loads two model placements, performs one excluded warm-up on each,
 If a server cannot load, its complete log is retained under `logs/`. The normal behavior is to record the failure and continue to the next experiment; `--fail-fast` is useful during bring-up.
 
 Large HIP model starts can take several minutes. While waiting for `/health`, the runner prints a heartbeat every 30 seconds with elapsed time, log size, and the latest non-empty server-log line. The default startup timeout is 1200 seconds (20 minutes).
+
+## Build the H1 low-risk quant
+
+H1 changes precision where quality is most likely to benefit while retaining the
+fork's fast Vulkan ROCmFP4 kernels on all large compute-heavy matrices:
+
+| Tensor family | H1 type | Performance intent |
+| --- | --- | --- |
+| split PLE table | Q8_0 | mmap-compatible 50.66 GiB table; no extra requantization |
+| routed expert gate/up/down | Q4_0_ROCMFP4_FAST (type 101) | preserve the current fast expert kernels and traffic reduction |
+| shared expert gate/up/down | Q4_0_ROCMFP4 (type 100) | dual-scale quality protection with essentially the same patched Vulkan kernel path |
+| attention and linear attention | Q4_0_ROCMFP4_STRIX mixture | type 100 K/V plus type 101 for the remaining large matrices |
+| MoE routers and QSA indexer Q/K | Q8_0 | spend bits only on small, routing-sensitive projections |
+| token embedding | BF16 | maximum-fidelity token lookup |
+| LM head | Q8_0 | protect the final logits without imposing Q8 on the transformer trunk |
+| one-dimensional norms and biases | F32 | preserved automatically by the quantizer |
+| MTP | existing Q8_0 sidecar | held fixed on the RX 7900 XT; not rebuilt in H1 |
+
+The exact selective rules are in `quantization/h1.tensor-types.txt`. The base preset
+is `Q4_0_ROCMFP4_STRIX`; do **not** add `--pure`, because pure mode suppresses the
+preset mixture. The workflow also deliberately omits `--allow-requantize`: H1 must
+not be made from the current FP4 GGUF.
+
+### 1. Stream a quantization source
+
+Activate the existing conversion environment, update this repository, and run:
+
+```bash
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+chmod +x run-quant.sh
+python3 qwen_quant.py self-test
+./run-quant.sh preflight --phase convert
+./run-quant.sh convert
+```
+
+The default source is the official `Qwen/Qwen3.8-Flash-Next-FP8` release. The fork
+reads its safetensors remotely, dequantizes ordinary tensors into a split BF16 GGUF,
+and applies the FP8 PLE table's scalar scale before writing its 16 heads directly as
+Q8_0. This is a BF16 *intermediate derived from the official FP8 checkpoint*, not a
+claim that it came from the larger original BF16 checkpoint. This route is selected
+because the fork's bounded-memory PLE conversion is specifically validated for that
+release; pointing it at the plain BF16 repository currently bypasses that tested
+scale path.
+
+The source is expected to occupy roughly 300+ GiB, the temporary PLE map can reach
+about 51 GiB during conversion, and H1 adds roughly another 125 GiB while it is being
+written. The conversion preflight therefore requires 500 GiB free by default so the
+source does not strand the subsequent quantization. Override the threshold only
+after accounting for all three filesystems and temporary paths. Remote mode does not
+cache the weight shards locally, but it does cache configuration/tokenizer files.
+
+### 2. Generate the importance matrix
+
+Use a representative, redistributable plain-text calibration corpus containing the
+actual mix of code, JSON, technical prose, and reasoning prompts this machine will
+serve. A few benchmark prompts are not enough; the default collects 200 chunks.
+
+```bash
+./run-quant.sh preflight --phase imatrix \
+  --calibration-file /srv/llm/models/qwen-flash-next/calibration/h1-corpus.txt
+
+./run-quant.sh imatrix \
+  --calibration-file /srv/llm/models/qwen-flash-next/calibration/h1-corpus.txt
+```
+
+The matrix is collected with the current known-working PLE16 model at the measured
+82/18 Vulkan placement. That makes the calibration run fit this host and captures
+real routed-expert activations. It is an approximation to the release-weight
+activations, but is preferable to spending a full quantization run with no matrix.
+The quantizer refuses to proceed without it unless `--allow-no-imatrix` is explicitly
+passed.
+
+### 3. Plan, build, and verify H1
+
+```bash
+./run-quant.sh preflight --phase quantize
+./run-quant.sh dry-run
+./run-quant.sh quantize
+./run-quant.sh verify
+```
+
+The dry run prints every final tensor decision and the estimated file size. The
+build uses the fork's 512 MiB row bands and streamed GGUF writes, so the 128 GiB host
+does not need to materialize the BF16 model or the 51.2B PLE tensor in memory. Every
+action writes its exact command, llama.cpp revision, log, and exit status below
+`/srv/llm/models/qwen-flash-next/h1-build/`. Verification checks the five selective
+families, token embedding, LM head, norms/biases, attention type mixture, absence of
+embedded MTP tensors, and importance-matrix provenance.
+
+### 4. Compare performance without changing placement
+
+```bash
+python3 qwen_bench.py preflight --tier vulkan-quant-h1
+./run-bench.sh --tier vulkan-quant-h1
+```
+
+This tier compares the current model with H1 at the identical 82/18 target split,
+F16 KV, Q8 MTP on the 7900 XT, n=4, p-min 0.75, and ubatch 2048. It measures code,
+JSON, and prose at approximately 4K, 16K, and 32K prompt depth, including both
+prefill and fixed-length decode. Different output hashes are expected between two
+quants; inspect saved responses and use a separate perplexity/task evaluation before
+calling H1 a quality win.
 
 ## Recommended benchmark sequence
 

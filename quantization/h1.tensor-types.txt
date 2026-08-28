@@ -1,0 +1,5 @@
+^ple_ngram_embd\.[0-9]+\.weight$=q8_0
+^blk\.[0-9]+\.ffn_(down|gate|up)_exps\.weight$=q4_0_rocmfp4_fast
+^blk\.[0-9]+\.ffn_(down|gate|up)_shexp\.weight$=q4_0_rocmfp4
+^blk\.[0-9]+\.ffn_gate_inp\.weight$=q8_0
+^blk\.[0-9]+\.indexer\.(q|k)_proj\.weight$=q8_0
