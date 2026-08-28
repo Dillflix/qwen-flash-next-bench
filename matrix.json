@@ -241,10 +241,10 @@
       "args": [
         "--device",
         "Vulkan0,Vulkan1",
-        "--main-gpu",
-        "0",
         "--split-mode",
-        "none",
+        "layer",
+        "--tensor-split",
+        "1,0",
         "--override-tensor",
         "^ple_ngram_embd\\.[0-9]+\\.weight$=Vulkan1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=Vulkan1"
       ]
@@ -424,10 +424,10 @@
       "args": [
         "--device",
         "Vulkan0,Vulkan1",
-        "--main-gpu",
-        "0",
         "--split-mode",
-        "none",
+        "layer",
+        "--tensor-split",
+        "1,0",
         "--override-tensor",
         "^ple_ngram_embd\\.[0-9]+\\.weight$=Vulkan1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=Vulkan1",
         "-md",
@@ -453,10 +453,10 @@
       "args": [
         "--device",
         "Vulkan0,Vulkan1",
-        "--main-gpu",
-        "0",
         "--split-mode",
-        "none",
+        "layer",
+        "--tensor-split",
+        "1,0",
         "--override-tensor",
         "^ple_ngram_embd\\.[0-9]+\\.weight$=Vulkan1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=Vulkan1",
         "-md",
@@ -482,10 +482,10 @@
       "args": [
         "--device",
         "Vulkan0,Vulkan1",
-        "--main-gpu",
-        "0",
         "--split-mode",
-        "none",
+        "layer",
+        "--tensor-split",
+        "1,0",
         "--override-tensor",
         "^ple_ngram_embd\\.[0-9]+\\.weight$=Vulkan1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=Vulkan1",
         "-md",
@@ -593,10 +593,10 @@
       "args": [
         "--device",
         "ROCm0,ROCm1",
-        "--main-gpu",
-        "0",
         "--split-mode",
-        "none",
+        "layer",
+        "--tensor-split",
+        "1,0",
         "--override-tensor",
         "^ple_ngram_embd\\.[0-9]+\\.weight$=ROCm1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=ROCm1"
       ]

@@ -110,6 +110,7 @@ def load_config(path: pathlib.Path) -> dict[str, Any]:
             break
     config = expand_tree(raw, variables)
     config["experiments"] = resolve_experiment_inheritance(config.get("experiments", []))
+    validate_experiment_topologies(config["experiments"])
     return config
 
 
@@ -150,6 +151,27 @@ def resolve_experiment_inheritance(experiments: list[dict[str, Any]]) -> list[di
         return copy.deepcopy(child)
 
     return [one(str(item["name"])) for item in experiments]
+
+
+def option_value(args: list[Any], option: str) -> str | None:
+    values = [str(args[index + 1]) for index, value in enumerate(args[:-1]) if value == option]
+    return values[-1] if values else None
+
+
+def validate_experiment_topologies(experiments: list[dict[str, Any]]) -> None:
+    for experiment in experiments:
+        args = list(experiment.get("args", []))
+        override = option_value(args, "--override-tensor") or option_value(args, "-ot")
+        split_mode = option_value(args, "--split-mode") or option_value(args, "-sm")
+        if not override or split_mode != "none":
+            continue
+        targets = re.findall(r"=([^,]+)", override)
+        if any(target.upper() != "CPU" for target in targets):
+            raise ValueError(
+                f"{experiment['name']}: non-CPU tensor overrides cannot use --split-mode none; "
+                "llama.cpp prunes every model GPU except --main-gpu. Use layer mode with a "
+                "1,0 tensor split to keep the secondary backend registered."
+            )
 
 
 def read_jsonl(path: pathlib.Path) -> list[dict[str, Any]]:
@@ -1215,6 +1237,15 @@ def self_test() -> None:
     ])
     child = next(item for item in inherited if item["name"] == "child")
     assert child["args"] == ["a", "b"] and child["env"] == {"X": "1", "Y": "2"}
+    try:
+        validate_experiment_topologies([{
+            "name": "bad",
+            "args": ["--split-mode", "none", "--override-tensor", "^x$=Vulkan1"],
+        }])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("non-primary tensor override with split-mode none was not rejected")
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 

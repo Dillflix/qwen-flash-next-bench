@@ -69,6 +69,8 @@ First isolate placement without MTP:
 
 This runs three rounds of the expert split and 85/15, 82/18, 80/20, 78/22, and 75/25 contiguous splits. Failed out-of-memory points are still useful because the logs establish the feasible dGPU boundary.
 
+The expert experiments intentionally use `--split-mode layer --tensor-split 1,0`, even though they are not conventional layer splits. In llama.cpp, `--split-mode none` removes every model GPU except `--main-gpu` from the scheduler. Layer mode keeps both Vulkan/ROCm backends registered; `1,0` leaves all ordinary layers on device 0 while `--override-tensor` alone moves PLE and routed-expert tensors to device 1. The harness rejects non-CPU tensor overrides combined with split mode `none` during configuration loading.
+
 Benchmark the fork-specific Vulkan kernel and prefill knobs on the expert placement:
 
 ```bash
