@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import concurrent.futures
 import csv
 import datetime as dt
 import fnmatch
@@ -37,13 +38,14 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.11.1"
+VERSION = "1.12.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
     "-md",
     "-ot",
     "--batch-size",
+    "--cache-ram",
     "--cache-type-k",
     "--cache-type-v",
     "--ctx-size",
@@ -303,6 +305,79 @@ def make_prompt(base: str, requested_tokens: int, corpus: str) -> str:
     repeated = (corpus + "\n\n") * max(1, math.ceil(target_chars / max(1, len(corpus))))
     filler = repeated[:target_chars]
     return f"{prefix}{filler}\nEND REFERENCE\n\n{base}"
+
+
+def tokenize_count(base_url: str, content: str, timeout_s: float) -> int:
+    status, response = http_json(
+        "POST", base_url + "/tokenize", {"content": content}, timeout=min(timeout_s, 300.0),
+    )
+    if status != 200 or not isinstance(response, dict):
+        raise RuntimeError(f"tokenize returned HTTP {status}: {response}")
+    tokens = response.get("tokens")
+    if not isinstance(tokens, list):
+        raise RuntimeError(f"tokenize response has no token list: {response}")
+    return len(tokens)
+
+
+def fit_prompt_to_tokens(
+    base_url: str,
+    base: str,
+    target_tokens: int,
+    corpus: str,
+    timeout_s: float,
+    lane: int = 0,
+) -> tuple[str, int]:
+    """Build a prompt at or just below an exact per-slot token budget."""
+    lane_prefix = f"Independent benchmark lane {lane + 1}; lane marker {lane:08x}.\n"
+    if target_tokens <= 0:
+        prompt = lane_prefix + base
+        return prompt, tokenize_count(base_url, prompt, timeout_s)
+
+    low_chars = 0
+    high_chars = max(1024, target_tokens * 5)
+
+    def construct(filler_chars: int) -> str:
+        prefix = "Reference material follows. Read it, then answer the task after END REFERENCE.\n\n"
+        repeated = (corpus + "\n\n") * max(1, math.ceil(filler_chars / max(1, len(corpus))))
+        return f"{lane_prefix}{prefix}{repeated[:filler_chars]}\nEND REFERENCE\n\n{base}"
+
+    low_prompt = construct(low_chars)
+    low_count = tokenize_count(base_url, low_prompt, timeout_s)
+    if low_count > target_tokens:
+        raise ValueError(
+            f"base prompt is {low_count} tokens, larger than requested target {target_tokens}"
+        )
+    high_prompt = construct(high_chars)
+    high_count = tokenize_count(base_url, high_prompt, timeout_s)
+    while high_count < target_tokens:
+        low_chars, low_prompt, low_count = high_chars, high_prompt, high_count
+        high_chars *= 2
+        high_prompt = construct(high_chars)
+        high_count = tokenize_count(base_url, high_prompt, timeout_s)
+
+    best_prompt, best_count = low_prompt, low_count
+    for _ in range(8):
+        if high_count == low_count:
+            break
+        estimated = low_chars + int(
+            (target_tokens - low_count) * (high_chars - low_chars) / (high_count - low_count)
+        )
+        probe_chars = min(high_chars - 1, max(low_chars + 1, estimated))
+        if probe_chars <= low_chars or probe_chars >= high_chars:
+            probe_chars = (low_chars + high_chars) // 2
+        if probe_chars <= low_chars:
+            break
+        prompt = construct(probe_chars)
+        count = tokenize_count(base_url, prompt, timeout_s)
+        if count <= target_tokens:
+            low_chars, low_prompt, low_count = probe_chars, prompt, count
+            if count > best_count:
+                best_prompt, best_count = prompt, count
+            if target_tokens - count <= 16:
+                break
+        else:
+            high_chars, high_prompt, high_count = probe_chars, prompt, count
+    return best_prompt, best_count
 
 
 def command_text(command: list[str]) -> str:
@@ -857,15 +932,15 @@ def completion_request(
     return response, wall_ms
 
 
-def response_slot_id(response: dict[str, Any]) -> int:
+def response_slot_id(response: dict[str, Any], fallback: int = 0) -> int:
     """Return the llama-server slot used by a completion response."""
     for field in ("id_slot", "slot_id"):
         value = response.get(field)
         if isinstance(value, int) and value >= 0:
             return value
-    # Every checked-in experiment uses --parallel 1. Older server responses
-    # did not expose the slot id, so slot zero is the only possible target.
-    return 0
+    # Older server responses did not expose the slot id. The caller supplies
+    # the deterministic lane index for parallel probes.
+    return fallback
 
 
 def erase_slot(base_url: str, slot_id: int, timeout_s: float) -> dict[str, Any]:
@@ -876,6 +951,50 @@ def erase_slot(base_url: str, slot_id: int, timeout_s: float) -> dict[str, Any]:
     if status != 200:
         raise RuntimeError(f"slot {slot_id} erase returned HTTP {status}: {response}")
     return response if isinstance(response, dict) else {"response": response}
+
+
+def concurrent_metrics(responses: list[dict[str, Any]], wall_ms: float) -> dict[str, Any]:
+    timings = [extract_timing(response) for response in responses]
+    predicted_n = [float(item["predicted_n"]) for item in timings if isinstance(item.get("predicted_n"), (int, float))]
+    predicted_ms = [float(item["predicted_ms"]) for item in timings if isinstance(item.get("predicted_ms"), (int, float))]
+    prompt_n = [float(item["prompt_n"]) for item in timings if isinstance(item.get("prompt_n"), (int, float))]
+    prompt_ms = [float(item["prompt_ms"]) for item in timings if isinstance(item.get("prompt_ms"), (int, float))]
+    return {
+        "lanes": len(responses),
+        "wall_ms": round(wall_ms, 3),
+        "predicted_n_total": int(sum(predicted_n)) if predicted_n else None,
+        "prompt_n_total": int(sum(prompt_n)) if prompt_n else None,
+        "aggregate_decode_tok_s": (
+            sum(predicted_n) * 1000.0 / max(predicted_ms) if predicted_n and predicted_ms and max(predicted_ms) > 0 else None
+        ),
+        "aggregate_prefill_tok_s": (
+            sum(prompt_n) * 1000.0 / max(prompt_ms) if prompt_n and prompt_ms and max(prompt_ms) > 0 else None
+        ),
+        "end_to_end_output_tok_s": (
+            sum(predicted_n) * 1000.0 / wall_ms if predicted_n and wall_ms > 0 else None
+        ),
+    }
+
+
+def concurrent_completion_requests(
+    url: str,
+    prompts: list[str],
+    n_predict: int,
+    timeout_s: float,
+    extra: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[float], float]:
+    """Release independent HTTP requests together and retain per-lane latency."""
+    barrier = threading.Barrier(len(prompts))
+
+    def one(prompt: str) -> tuple[dict[str, Any], float]:
+        barrier.wait(timeout=30.0)
+        return completion_request(url, prompt, n_predict, timeout_s, extra)
+
+    started = time.monotonic()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(prompts)) as pool:
+        completed = list(pool.map(one, prompts))
+    wall_ms = (time.monotonic() - started) * 1000.0
+    return [item[0] for item in completed], [item[1] for item in completed], wall_ms
 
 
 def run_capture(command: list[str], env: dict[str, str] | None = None, timeout: float = 30) -> dict[str, Any]:
@@ -891,6 +1010,174 @@ def run_capture(command: list[str], env: dict[str, str] | None = None, timeout: 
         }
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"command": command, "error": repr(exc)}
+
+
+def sha256_file(path: pathlib.Path) -> str | None:
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
+    server = pathlib.Path(str(config.get("variables", {}).get("hip_server", "")))
+    build_root = server.parent.parent if server.name else pathlib.Path()
+    candidates = [build_root / "bin" / "libggml-hip.so", build_root / "lib" / "libggml-hip.so"]
+    library = next((path for path in candidates if path.is_file()), candidates[0])
+    test_binary = build_root / "bin" / "test-backend-ops"
+    result: dict[str, Any] = {}
+    for name, path in (("server", server), ("hip_library", library), ("test_backend_ops", test_binary)):
+        result[name] = {
+            "path": str(path),
+            "exists": path.is_file(),
+            "size_bytes": path.stat().st_size if path.is_file() else None,
+            "sha256": sha256_file(path),
+        }
+    return result
+
+
+def inspect_rocmfp4_sources(repo: pathlib.Path) -> dict[str, Any]:
+    runtime_roots = [repo / "ggml" / "src" / "ggml-cuda", repo / "ggml" / "src" / "ggml-hip"]
+    tokens = ("Q4_0_ROCMFP4", "Q4_0_ROCMFP4_FAST")
+    hits: dict[str, list[str]] = {token: [] for token in tokens}
+    checked = 0
+    for root in runtime_roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if path.suffix.lower() not in {".c", ".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp"}:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            checked += 1
+            for token in tokens:
+                if token in text:
+                    hits[token].append(str(path.relative_to(repo)))
+    return {
+        "repo": str(repo),
+        "runtime_source_files_checked": checked,
+        "token_hits": {token: sorted(set(paths)) for token, paths in hits.items()},
+        "static_dispatch_ready": all(hits[token] for token in tokens),
+        "note": "The standalone ggml/rocmfp4 directory does not count; markers must exist in a compiled HIP/CUDA runtime source tree.",
+    }
+
+
+def backend_ops_passed(capture: dict[str, Any]) -> tuple[bool, int, int]:
+    if capture.get("returncode") != 0:
+        return False, 0, 0
+    output = str(capture.get("stdout", "")) + "\n" + str(capture.get("stderr", ""))
+    matches = re.findall(r"(\d+)\s*/\s*(\d+)\s+tests passed", output)
+    if not matches:
+        return False, 0, 0
+    passed, total = (int(value) for value in matches[-1])
+    return total > 0 and passed == total and "FAIL" not in output, passed, total
+
+
+def run_rocm_audit(
+    config: dict[str, Any],
+    output: pathlib.Path,
+    run_ops: bool,
+    devices: list[str],
+    timeout_s: float,
+) -> dict[str, Any]:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    logs = output.parent / "rocm-audit-logs"
+    logs.mkdir(exist_ok=True)
+    repo = pathlib.Path(str(config.get("variables", {}).get("repo", "")))
+    fingerprint = rocm_build_fingerprint(config)
+    source = inspect_rocmfp4_sources(repo)
+    server = pathlib.Path(fingerprint["server"]["path"])
+    test_binary = pathlib.Path(fingerprint["test_backend_ops"]["path"])
+    env = os.environ.copy()
+    env.update({
+        "ROCM_PATH": "/opt/rocm-10.0.0",
+        "HIP_PATH": "/opt/rocm-10.0.0",
+        "LD_LIBRARY_PATH": "/opt/rocm-10.0.0/lib:/opt/rocm-10.0.0/lib/rocm_sysdeps/lib",
+    })
+    device_capture = run_capture([str(server), "--list-devices"], env=env, timeout=60) if server.is_file() else {
+        "command": [str(server), "--list-devices"], "error": "missing HIP llama-server",
+    }
+    write_capture(logs / "devices.txt", device_capture)
+    tests: list[dict[str, Any]] = []
+    if run_ops and source["static_dispatch_ready"] and test_binary.is_file():
+        for device in devices:
+            for operation in ("MUL_MAT", "MUL_MAT_ID"):
+                for quant_type in ("q8_0", "q4_0_rocmfp4", "q4_0_rocmfp4_fast"):
+                    command = [
+                        str(test_binary), "test", "-b", device, "-o", operation,
+                        "-p", f"type_a={quant_type}",
+                    ]
+                    capture = run_capture(command, env=env, timeout=timeout_s)
+                    passed, passed_n, total_n = backend_ops_passed(capture)
+                    log_name = safe_name(f"{device}-{operation}-{quant_type}") + ".txt"
+                    write_capture(logs / log_name, capture)
+                    tests.append({
+                        "device": device,
+                        "operation": operation,
+                        "type_a": quant_type,
+                        "passed": passed,
+                        "passed_n": passed_n,
+                        "total_n": total_n,
+                        "returncode": capture.get("returncode"),
+                        "error": capture.get("error"),
+                        "log": str(pathlib.Path("rocm-audit-logs") / log_name),
+                    })
+    expected_tests = len(devices) * 2 * 3
+    functional_pass = (
+        run_ops and len(tests) == expected_tests and expected_tests > 0 and all(item["passed"] for item in tests)
+    )
+    reasons: list[str] = []
+    if not source["static_dispatch_ready"]:
+        reasons.append("ROCmFP4 and ROCmFP4_FAST are not both wired into the compiled HIP runtime source tree")
+    if not test_binary.is_file():
+        reasons.append("build-hip10/bin/test-backend-ops is missing; rebuild with tests enabled")
+    if not run_ops:
+        reasons.append("functional backend-op tests were not requested; rerun with --run-ops after source integration")
+    elif tests and not functional_pass:
+        reasons.append("one or more filtered MUL_MAT/MUL_MAT_ID tests failed or matched zero cases")
+    report = {
+        "schema": 1,
+        "ts": utc_now(),
+        "harness_version": VERSION,
+        "ready_for_model_benchmarks": bool(source["static_dispatch_ready"] and functional_pass),
+        "source": source,
+        "build_fingerprint": fingerprint,
+        "devices_requested": devices,
+        "device_list_log": str(pathlib.Path("rocm-audit-logs") / "devices.txt"),
+        "functional_tests_requested": run_ops,
+        "functional_pass": functional_pass,
+        "tests": tests,
+        "reasons": reasons,
+    }
+    atomic_json(output, report)
+    return report
+
+
+def validate_rocm_audit(config: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    configured = config.get("variables", {}).get("rocm_audit")
+    path = pathlib.Path(str(configured)) if configured else pathlib.Path(__file__).with_name("preflight") / "rocm-audit.json"
+    if not path.is_file():
+        return None, f"ROCm audit is missing at {path}; run `python3 qwen_bench.py rocm-audit --run-ops`"
+    try:
+        report = load_json(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return None, f"cannot read ROCm audit {path}: {exc}"
+    if not report.get("ready_for_model_benchmarks"):
+        reasons = "; ".join(str(item) for item in report.get("reasons", []))
+        return report, f"ROCm audit has not proven custom kernel coverage: {reasons}"
+    current = rocm_build_fingerprint(config)
+    audited = report.get("build_fingerprint", {})
+    for key in ("server", "hip_library"):
+        expected = audited.get(key, {}).get("sha256")
+        actual = current.get(key, {}).get("sha256")
+        if not expected or expected != actual:
+            return report, f"ROCm audit is stale because {key} changed; rerun `python3 qwen_bench.py rocm-audit --run-ops`"
+    return report, None
 
 
 def write_capture(path: pathlib.Path, capture: dict[str, Any]) -> None:
@@ -929,6 +1216,7 @@ def preflight(
     port = int(defaults.get("port", 8189))
     errors: list[str] = []
     warnings: list[str] = []
+    rocm_audit: dict[str, Any] | None = None
     files: list[dict[str, Any]] = []
     for experiment in experiments:
         for kind in ("server", "model"):
@@ -968,6 +1256,27 @@ def preflight(
             errors.append("hot tiers must erase slot KV state between warm-up and measured requests")
     if cache_state == "cold" and int(tier.get("warmups", 0)) != 0:
         errors.append("cold tiers must set warmups to 0")
+    concurrency = int(tier.get("concurrency", 1))
+    if concurrency < 1:
+        errors.append("concurrency must be at least 1")
+    if concurrency > 1:
+        workloads = list(tier.get("workloads", []))
+        if len(workloads) != concurrency:
+            errors.append(
+                f"concurrent tiers require exactly one workload per lane; got {len(workloads)} workloads for {concurrency} lanes"
+            )
+        for experiment in experiments:
+            parallel = option_value(server_command(config, tier, experiment)[1:], "--parallel")
+            if parallel != str(concurrency):
+                errors.append(
+                    f"{experiment['name']}: tier concurrency is {concurrency}, but effective --parallel is {parallel}"
+                )
+    if tier.get("startup_only") and (int(tier.get("warmups", 0)) != 0 or concurrency != 1):
+        errors.append("startup-only tiers require warmups 0 and concurrency 1")
+    if tier.get("require_rocm_audit"):
+        rocm_audit, audit_error = validate_rocm_audit(config)
+        if audit_error:
+            errors.append(audit_error)
     if bool(tier.get("erase_slot_between_requests", defaults.get("erase_slot_between_requests", False))):
         slot_save_path = effective_slot_save_path(config, tier)
         try:
@@ -986,6 +1295,7 @@ def preflight(
         "files": files,
         "drm_cards": discover_drm_cards(),
         "active_llama_processes": active,
+        "rocm_audit": rocm_audit,
         "warnings": warnings,
         "errors": errors,
     }
@@ -1139,6 +1449,9 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
     n_predict = int(tier.get("n_predict", 128))
     request_timeout_s = float(tier.get("request_timeout_s", defaults.get("request_timeout_s", 900)))
     warmups = int(tier.get("warmups", 1))
+    concurrency = int(tier.get("concurrency", 1))
+    startup_only = bool(tier.get("startup_only", False))
+    exact_prompt_tokens = bool(tier.get("exact_prompt_tokens", False))
     erase_between_requests = bool(
         tier.get("erase_slot_between_requests", defaults.get("erase_slot_between_requests", False))
     )
@@ -1162,12 +1475,20 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
             for experiment in ordered:
                 if stop_event.is_set():
                     break
-                pending = [
-                    (workload, depth)
-                    for workload in workload_names
-                    for depth in depths
-                    if (round_index, experiment["name"], workload, depth) not in completed
-                ]
+                pending = (
+                    (
+                        [("startup", 0)]
+                        if (round_index, experiment["name"], "startup", 0) not in completed
+                        else []
+                    )
+                    if startup_only
+                    else [
+                        (workload, depth)
+                        for workload in workload_names
+                        for depth in depths
+                        if (round_index, experiment["name"], workload, depth) not in completed
+                    ]
+                )
                 if not pending:
                     continue
                 if not port_available(host, port):
@@ -1192,40 +1513,185 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                     settle = float(tier.get("settle_seconds", defaults.get("settle_seconds", 2)))
                     if settle > 0:
                         time.sleep(settle)
-                    warmup_depth = int(tier.get("warmup_depth", 0))
-                    warm_prompt = make_prompt(workloads_all[workload_names[0]], warmup_depth, corpus)
-                    for warmup_index in range(warmups):
-                        mark = server.telemetry.mark() if server.telemetry else 0
-                        warm_response, warm_wall_ms = completion_request(
-                            base_url + "/completion",
-                            warm_prompt,
-                            min(32, n_predict),
-                            request_timeout_s,
-                            extra_request,
-                        )
-                        samples = server.telemetry.slice(mark) if server.telemetry else []
-                        warm_row = {
+                    if startup_only:
+                        samples = list(server.telemetry.samples) if server.telemetry else []
+                        row = {
                             "schema": 1,
-                            "status": "warmup",
+                            "status": "ok",
+                            "mode": "startup_only",
                             "ts": utc_now(),
                             "run_id": run_id,
                             "experiment": experiment["name"],
+                            "backend": experiment.get("backend"),
                             "round": round_index,
-                            "warmup": warmup_index,
-                            "requested_depth_tokens": warmup_depth,
-                            "http_wall_ms": round(warm_wall_ms, 3),
-                            "timing": extract_timing(warm_response),
+                            "workload": "startup",
+                            "requested_depth_tokens": 0,
+                            "n_predict_requested": 0,
+                            "http_wall_ms": 0.0,
+                            "server_startup_seconds": server.startup_seconds,
+                            "output_sha256": "",
+                            "output_chars": 0,
+                            "degenerate": False,
+                            "timing": {},
                             "telemetry": aggregate_telemetry(samples),
                         }
-                        if erase_between_requests:
-                            warm_row["slot_erase"] = erase_slot(
-                                base_url, response_slot_id(warm_response), request_timeout_s,
+                        append_jsonl(results_path, row)
+                        completed.add((round_index, experiment["name"], "startup", 0))
+                        available = row["telemetry"].get("mem_available_min_bytes")
+                        available_text = (
+                            f", host available min {available / 1024**3:.2f} GiB"
+                            if isinstance(available, (int, float)) else ""
+                        )
+                        print(
+                            f"  capacity allocation READY in {server.startup_seconds:.1f}s{available_text}",
+                            flush=True,
+                        )
+                        continue
+
+                    prompt_cache: dict[tuple[str, int, int], tuple[str, int | None]] = {}
+
+                    def prepared_prompt(workload: str, depth: int, lane: int) -> tuple[str, int | None]:
+                        key = (workload, depth, lane)
+                        if key not in prompt_cache:
+                            if exact_prompt_tokens:
+                                prompt_cache[key] = fit_prompt_to_tokens(
+                                    base_url, workloads_all[workload], depth, corpus, request_timeout_s, lane,
+                                )
+                            else:
+                                prompt = make_prompt(workloads_all[workload], depth, corpus)
+                                if concurrency > 1:
+                                    prompt = f"Independent benchmark lane {lane + 1}; lane marker {lane:08x}.\n" + prompt
+                                prompt_cache[key] = (prompt, None)
+                        return prompt_cache[key]
+
+                    warmup_depth = int(tier.get("warmup_depth", 0))
+                    for warmup_index in range(warmups):
+                        mark = server.telemetry.mark() if server.telemetry else 0
+                        if concurrency > 1:
+                            warm_prompts = [
+                                prepared_prompt(workload, warmup_depth, lane)[0]
+                                for lane, workload in enumerate(workload_names)
+                            ]
+                            warm_responses, warm_walls, warm_group_wall = concurrent_completion_requests(
+                                base_url + "/completion", warm_prompts, min(32, n_predict),
+                                request_timeout_s, extra_request,
                             )
-                        append_jsonl(run_dir / "warmups.jsonl", warm_row)
+                        else:
+                            warm_prompt = prepared_prompt(workload_names[0], warmup_depth, 0)[0]
+                            warm_response, warm_wall_ms = completion_request(
+                                base_url + "/completion", warm_prompt, min(32, n_predict),
+                                request_timeout_s, extra_request,
+                            )
+                            warm_responses, warm_walls, warm_group_wall = [warm_response], [warm_wall_ms], warm_wall_ms
+                        samples = server.telemetry.slice(mark) if server.telemetry else []
+                        warm_group = concurrent_metrics(warm_responses, warm_group_wall)
+                        erased: dict[int, Any] = {}
+                        if erase_between_requests:
+                            for lane, response in enumerate(warm_responses):
+                                slot = response_slot_id(response, lane)
+                                if slot not in erased:
+                                    erased[slot] = erase_slot(base_url, slot, request_timeout_s)
+                        for lane, (workload, response, lane_wall) in enumerate(
+                            zip(workload_names, warm_responses, warm_walls)
+                        ):
+                            warm_row = {
+                                "schema": 1,
+                                "status": "warmup",
+                                "ts": utc_now(),
+                                "run_id": run_id,
+                                "experiment": experiment["name"],
+                                "round": round_index,
+                                "warmup": warmup_index,
+                                "lane": lane,
+                                "concurrency": concurrency,
+                                "workload": workload,
+                                "requested_depth_tokens": warmup_depth,
+                                "http_wall_ms": round(lane_wall, 3),
+                                "concurrent_group": warm_group,
+                                "timing": extract_timing(response),
+                                "telemetry": aggregate_telemetry(samples),
+                            }
+                            if erase_between_requests:
+                                slot = response_slot_id(response, lane)
+                                warm_row["slot_erase"] = erased[slot]
+                            append_jsonl(run_dir / "warmups.jsonl", warm_row)
+                    if concurrency > 1:
+                        pending_depths = [
+                            depth for depth in depths
+                            if any(
+                                (round_index, experiment["name"], workload, depth) not in completed
+                                for workload in workload_names
+                            )
+                        ]
+                        for depth in pending_depths:
+                            if stop_event.is_set():
+                                break
+                            prompts = [
+                                prepared_prompt(workload, depth, lane)[0]
+                                for lane, workload in enumerate(workload_names)
+                            ]
+                            mark = server.telemetry.mark() if server.telemetry else 0
+                            responses, lane_walls, group_wall = concurrent_completion_requests(
+                                base_url + "/completion", prompts, n_predict,
+                                request_timeout_s, extra_request,
+                            )
+                            samples = server.telemetry.slice(mark) if server.telemetry else []
+                            telemetry = aggregate_telemetry(samples)
+                            group = concurrent_metrics(responses, group_wall)
+                            group_id = f"{suffix}-d{depth}"
+                            append_jsonl(run_dir / "concurrency-groups.jsonl", {
+                                "schema": 1,
+                                "status": "ok",
+                                "ts": utc_now(),
+                                "run_id": run_id,
+                                "group_id": group_id,
+                                "experiment": experiment["name"],
+                                "round": round_index,
+                                "requested_depth_tokens": depth,
+                                "workloads": workload_names,
+                                **group,
+                                "telemetry": telemetry,
+                            })
+                            erased: dict[int, Any] = {}
+                            if erase_between_requests:
+                                for lane, response in enumerate(responses):
+                                    slot = response_slot_id(response, lane)
+                                    if slot not in erased:
+                                        erased[slot] = erase_slot(base_url, slot, request_timeout_s)
+                            for lane, (workload, response, lane_wall) in enumerate(
+                                zip(workload_names, responses, lane_walls)
+                            ):
+                                key = (round_index, experiment["name"], workload, depth)
+                                if key in completed:
+                                    continue
+                                row = probe_row(
+                                    run_id, experiment, round_index, workload, depth, n_predict,
+                                    response, lane_wall, server.startup_seconds, telemetry,
+                                )
+                                row.update({
+                                    "lane": lane,
+                                    "concurrency": concurrency,
+                                    "concurrency_group_id": group_id,
+                                    "concurrent_group": group,
+                                })
+                                response_name = f"{suffix}-{safe_name(workload)}-d{depth}-lane{lane}.json"
+                                atomic_json(run_dir / "responses" / response_name, response)
+                                row["response_file"] = str(pathlib.Path("responses") / response_name)
+                                if erase_between_requests:
+                                    row["slot_erase"] = erased[response_slot_id(response, lane)]
+                                append_jsonl(results_path, row)
+                                completed.add(key)
+                            print(
+                                f"  {concurrency}-user depth~{depth}: aggregate decode {fmt(group['aggregate_decode_tok_s'])} tok/s, "
+                                f"aggregate prefill {fmt(group['aggregate_prefill_tok_s'])} tok/s, "
+                                f"wall {group_wall / 1000.0:.1f}s",
+                                flush=True,
+                            )
+                        continue
                     for workload, depth in pending:
                         if stop_event.is_set():
                             break
-                        prompt = make_prompt(workloads_all[workload], depth, corpus)
+                        prompt = prepared_prompt(workload, depth, 0)[0]
                         mark = server.telemetry.mark() if server.telemetry else 0
                         response, wall_ms = completion_request(
                             base_url + "/completion", prompt, n_predict, request_timeout_s, extra_request
@@ -1318,9 +1784,10 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
     baseline_name = baseline_names[0] if baseline_names else experiments[0]["name"]
     baseline_hashes: dict[tuple[str, int, int], str] = {}
     for row in valid:
-        if row["experiment"] == baseline_name:
+        output_hash = row.get("output_sha256")
+        if row["experiment"] == baseline_name and isinstance(output_hash, str) and output_hash:
             key = (row["workload"], int(row["requested_depth_tokens"]), int(row["round"]))
-            baseline_hashes.setdefault(key, row["output_sha256"])
+            baseline_hashes.setdefault(key, output_hash)
     groups: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
     for row in valid:
         groups[(row["experiment"], row["workload"], int(row["requested_depth_tokens"]))].append(row)
@@ -1334,7 +1801,7 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         matches = []
         for row in rows:
             key = (workload, depth, int(row["round"]))
-            if key in baseline_hashes:
+            if key in baseline_hashes and row.get("output_sha256"):
                 matches.append(row["output_sha256"] == baseline_hashes[key])
         gpu_busy: dict[str, list[float]] = defaultdict(list)
         gpu_vram: dict[str, list[float]] = defaultdict(list)
@@ -1508,6 +1975,34 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             f"{fmt(row['mem_available_min_gib_median'])} | {fmt(row['host_cached_max_gib_median'])} | "
             f"{fmt(row['rss_anon_max_gib_median'])} | {row['gpu_vram_max_gib']} | {row['gpu_gtt_max_gib']} |\n"
         )
+    concurrent_groups = [
+        row for row in read_jsonl(run_dir / "concurrency-groups.jsonl")
+        if row.get("status") == "ok"
+    ]
+    if concurrent_groups:
+        concurrency_fields = [
+            "experiment", "round", "requested_depth_tokens", "lanes", "prompt_n_total",
+            "predicted_n_total", "aggregate_prefill_tok_s", "aggregate_decode_tok_s",
+            "end_to_end_output_tok_s", "wall_ms",
+        ]
+        with (run_dir / "concurrency.csv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=concurrency_fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(concurrent_groups)
+        md.extend([
+            "\n## True concurrent-request throughput\n\n",
+            "Aggregate prefill and decode divide both lanes' tokens by the longest overlapping phase; end-to-end output includes prompt processing.\n\n",
+            "| Experiment | Round | Depth/lane | Lanes | Prompt n total | Output n total | Aggregate prefill tok/s | Aggregate decode tok/s | End-to-end output tok/s | Wall s |\n",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        ])
+        for group in concurrent_groups:
+            md.append(
+                f"| {group['experiment']} | {int(group.get('round', 0)) + 1} | "
+                f"{group.get('requested_depth_tokens', '')} | {group.get('lanes', '')} | "
+                f"{group.get('prompt_n_total', '')} | {group.get('predicted_n_total', '')} | "
+                f"{fmt(group.get('aggregate_prefill_tok_s'))} | {fmt(group.get('aggregate_decode_tok_s'))} | "
+                f"{fmt(group.get('end_to_end_output_tok_s'))} | {fmt(float(group.get('wall_ms', 0)) / 1000.0, 1)} |\n"
+            )
     failures = [row for row in results if row.get("status") not in SUCCESS_STATES]
     if failures:
         md.extend(["\n## Failures\n\n"])
@@ -1529,6 +2024,23 @@ def execute_preflight(args: argparse.Namespace) -> pathlib.Path:
     if args.capture_system:
         capture_system(config, experiments, output)
     print(json.dumps(report, indent=2))
+    return output
+
+
+def execute_rocm_audit(args: argparse.Namespace) -> pathlib.Path:
+    config_path = pathlib.Path(args.config).resolve()
+    config = load_config(config_path)
+    output = pathlib.Path(args.output).resolve()
+    devices = parse_selector(args.devices)
+    if not devices:
+        raise ValueError("--devices must select at least one ROCm backend")
+    report = run_rocm_audit(config, output, args.run_ops, devices, args.timeout)
+    print(json.dumps(report, indent=2))
+    if not report["ready_for_model_benchmarks"]:
+        raise RuntimeError(
+            "ROCm audit did not prove the build safe for model benchmarks; inspect "
+            f"{output} and {output.parent / 'rocm-audit-logs'}"
+        )
     return output
 
 
@@ -1602,6 +2114,27 @@ def self_test() -> None:
     assert aggregate["host_cached_max_bytes"] == 60
     assert response_slot_id({"id_slot": 3}) == 3
     assert response_slot_id({}) == 0
+    assert response_slot_id({}, 1) == 1
+    concurrent = concurrent_metrics([
+        {"timings": {"predicted_n": 100, "predicted_ms": 5000, "prompt_n": 1000, "prompt_ms": 2000}},
+        {"timings": {"predicted_n": 100, "predicted_ms": 4000, "prompt_n": 1000, "prompt_ms": 2500}},
+    ], 8000)
+    assert concurrent["aggregate_decode_tok_s"] == 40.0
+    assert concurrent["aggregate_prefill_tok_s"] == 800.0
+    assert concurrent["end_to_end_output_tok_s"] == 25.0
+    passed, passed_n, total_n = backend_ops_passed({
+        "returncode": 0, "stdout": "43/43 tests passed", "stderr": "",
+    })
+    assert passed and passed_n == 43 and total_n == 43
+    assert not backend_ops_passed({"returncode": 0, "stdout": "0/0 tests passed", "stderr": ""})[0]
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        source_root = pathlib.Path(raw_tmp)
+        runtime_root = source_root / "ggml" / "src" / "ggml-cuda"
+        runtime_root.mkdir(parents=True)
+        (runtime_root / "custom.cu").write_text(
+            "Q4_0_ROCMFP4 Q4_0_ROCMFP4_FAST", encoding="utf-8",
+        )
+        assert inspect_rocmfp4_sources(source_root)["static_dispatch_ready"] is True
     with tempfile.TemporaryDirectory() as raw_tmp:
         summary_root = pathlib.Path(raw_tmp)
         atomic_json(summary_root / "manifest.json", {"tier": {"cache_state": "hot"}})
@@ -1624,10 +2157,25 @@ def self_test() -> None:
             },
             "telemetry": aggregate,
         })
+        append_jsonl(summary_root / "concurrency-groups.jsonl", {
+            "status": "ok",
+            "experiment": "test",
+            "round": 0,
+            "requested_depth_tokens": 4096,
+            "lanes": 2,
+            "prompt_n_total": 8192,
+            "predicted_n_total": 256,
+            "aggregate_prefill_tok_s": 40.0,
+            "aggregate_decode_tok_s": 20.0,
+            "end_to_end_output_tok_s": 10.0,
+            "wall_ms": 25600.0,
+        })
         summarize(summary_root, {}, [{"name": "test", "baseline": True}])
         rendered = (summary_root / "summary.md").read_text(encoding="utf-8")
         assert "Declared cache state: `hot`" in rendered
         assert "Residency and capacity telemetry" in rendered
+        assert "True concurrent-request throughput" in rendered
+        assert (summary_root / "concurrency.csv").is_file()
     inherited = resolve_experiment_inheritance([
         {"name": "base", "args": ["a"], "env": {"X": "1"}},
         {"name": "child", "extends": "base", "args_append": ["b"], "env": {"Y": "2"}},
@@ -1681,6 +2229,18 @@ def build_parser() -> argparse.ArgumentParser:
     summary = sub.add_parser("summarize", help="regenerate CSV and Markdown from results.jsonl")
     summary.add_argument("run_dir")
 
+    rocm = sub.add_parser(
+        "rocm-audit",
+        help="prove ROCmFP4 source dispatch and filtered HIP backend-op correctness before model loading",
+    )
+    rocm.add_argument("--config", default=str(pathlib.Path(__file__).with_name("matrix.json")))
+    rocm.add_argument(
+        "--output", default=str(pathlib.Path(__file__).with_name("preflight") / "rocm-audit.json"),
+    )
+    rocm.add_argument("--devices", default="ROCm0,ROCm1")
+    rocm.add_argument("--run-ops", action="store_true")
+    rocm.add_argument("--timeout", type=float, default=600.0, help="timeout per filtered backend-op test")
+
     sub.add_parser("self-test", help="run parser and aggregation unit checks")
     return parser
 
@@ -1694,6 +2254,8 @@ def main() -> int:
             execute_preflight(args)
         elif args.command == "summarize":
             summarize(pathlib.Path(args.run_dir).resolve())
+        elif args.command == "rocm-audit":
+            execute_rocm_audit(args)
         elif args.command == "self-test":
             self_test()
         return 0

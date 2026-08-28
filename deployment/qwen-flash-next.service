@@ -1,0 +1,22 @@
+[Unit]
+Description=Qwen3.8 Flash Next llama.cpp production server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jdillman
+Group=jdillman
+WorkingDirectory=/srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+EnvironmentFile=-/etc/qwen-flash-next.env
+ExecStart=/usr/bin/bash /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench/deployment/run-production.sh
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=1800
+TimeoutStopSec=60
+KillMode=mixed
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

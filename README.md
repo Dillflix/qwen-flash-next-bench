@@ -10,6 +10,7 @@ For every measured completion the harness records:
 
 - prompt-processing and decode throughput from `llama-server`;
 - HTTP wall time, generated-token count, stop reason, and server startup time;
+- synchronized multi-request aggregate prefill/decode and end-to-end throughput;
 - MTP drafted/accepted token counts and acceptance ratio when available;
 - a SHA-256 hash of the exact greedy output, compared with the non-MTP baseline;
 - per-DRM-device busy percentage, peak VRAM/GTT use, temperature, and power when exposed by sysfs;
@@ -368,6 +369,75 @@ per-device VRAM/GTT peaks, storage bytes read, and major faults. File-backed cac
 is reclaimable, so capacity conclusions should use `MemAvailable` and device
 allocations rather than process RSS alone.
 
+### Recommended two-user production deployment
+
+The production candidate keeps the split PLE16 table CPU-mapped, puts the Q8 MTP
+sidecar on the RX 7900 XT, uses F16 target KV, and gives each of two independent
+slots 262,144 tokens by setting total context to 524,288 with `--parallel 2`.
+The preferred target split is 88/12; 90/10 is the lower-VRAM fallback. Both use
+batch/ubatch 2048, continuous batching, separate per-slot KV, no prompt-response
+RAM cache, and no context shifting.
+
+Do not start with a near-full prompt. First prove that both complete server
+allocations fit:
+
+```bash
+python3 qwen_bench.py preflight --tier production-capacity
+./run-bench.sh --tier production-capacity
+```
+
+This tier loads 90/10 and 88/12 separately at the complete two-slot allocation,
+waits for steady telemetry, records startup time and memory/device residency, and
+stops without submitting a completion. Use 88/12 only if it loads with useful
+7900 XT headroom; otherwise use 90/10. A load success is necessary but does not
+prove simultaneous-request stability.
+
+Next run two real requests together. The selector avoids loading both candidates
+again after the capacity result has chosen one:
+
+```bash
+./run-bench.sh --tier production-concurrency-smoke \
+  --experiments prod_88_12_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu \
+  --fail-fast
+```
+
+For the fallback, replace `prod_88_12` with `prod_90_10` in that experiment name.
+The two workers synchronize before sending independent code and prose prompts.
+The runner reports per-user latency plus aggregate prefill, aggregate decode, and
+end-to-end throughput in `concurrency.csv` and `summary.md`; this is not two
+serial requests against a parallel server.
+
+Only after smoke passes, validate the actual context target:
+
+```bash
+./run-bench.sh --tier production-concurrency-full \
+  --experiments prod_88_12_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu \
+  --fail-fast
+```
+
+That tier runs synchronized pairs at exactly fitted prompt budgets of 32,768,
+131,072, and 253,952 tokens per lane. The `/tokenize` endpoint is used before
+measurement, so the near-full case retains margin for 256 generated tokens inside
+each 262,144-token slot. Slot KV is erased after every pair without dropping the
+model mapping or Linux page cache.
+
+After the chosen split passes, install the checked-in systemd deployment:
+
+```bash
+sudo cp deployment/qwen-flash-next.env.example /etc/qwen-flash-next.env
+sudo cp deployment/qwen-flash-next.service /etc/systemd/system/
+sudo chmod 640 /etc/qwen-flash-next.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now qwen-flash-next.service
+systemctl status qwen-flash-next.service
+```
+
+Edit `/etc/qwen-flash-next.env` before starting if capacity selected 90/10, the
+paths differ, or the server must listen somewhere other than
+`127.0.0.1:8080`. The launcher refuses any non-loopback bind without `API_KEY`.
+Keep the service on loopback behind an authenticated reverse proxy or Tailscale
+when possible. Metrics are available from llama-server's `/metrics` endpoint.
+
 ### Focused 7900 XT prefill screen
 
 MTP does not accelerate target-model prefill: the target remains on the iGPU and
@@ -388,30 +458,61 @@ cold page-cache/shader effects from masquerading as a placement result. Generati
 is limited to eight forced tokens and is diagnostic only; rank this tier by prefill
 tok/s and prefill milliseconds.
 
-Bring up ROCm 10 separately before running a large cross-backend matrix:
+### ROCm 10 recovery: prove kernels before loading the model
+
+The old HIP result is not a meaningful backend comparison. The current branch
+contains standalone ROCmFP4 source, but the observed build did not establish that
+types 100/101 dispatch into compiled HIP matrix kernels. Running the same 121 GB
+model again would only repeat the catastrophic scalar/fallback path.
+
+Start with the static audit. It deliberately exits nonzero on the currently known
+bad build and writes a detailed report instead of loading a model:
+
+```bash
+python3 qwen_bench.py rocm-audit
+```
+
+The audit counts ROCmFP4 and ROCmFP4_FAST integration only under the compiled
+`ggml/src/ggml-cuda` or `ggml/src/ggml-hip` runtime trees. A standalone
+`ggml/rocmfp4` file is explicitly insufficient. After porting the accelerated HIP
+kernels into this Qwen/PLE16 branch, build the operation test binary and run the
+functional gate:
+
+```bash
+cmake --build /srv/llm/src/llama-qwen4exp/build-hip10 \
+  --target llama-server test-backend-ops -j16
+python3 qwen_bench.py rocm-audit --run-ops
+```
+
+The functional audit filters `MUL_MAT` and `MUL_MAT_ID` for Q8_0,
+Q4_0_ROCMFP4, and Q4_0_ROCMFP4_FAST on both `ROCm0` and `ROCm1`. It rejects a
+zero-test match, any numerical failure, or a stale server/HIP-library fingerprint.
+Every ROCm model tier is gated on that saved proof, so an expensive full-model run
+cannot begin accidentally after an unverified rebuild.
+
+Once the audit passes, use the clean APU-only diagnostic:
 
 ```bash
 python3 qwen_bench.py preflight --tier rocm-smoke
 ./run-bench.sh --tier rocm-smoke --fail-fast
 ```
 
-`rocm-smoke` tests APU-only HIP with both the original joined PLE and PLE16 files, an 85/15 heterogeneous layer split, and routed-expert placement. The APU-only controls hide the 7900 XT and enable unified-memory fallback; mixed-GPU experiments expose both devices and deliberately leave the fallback disabled so placement remains measurable.
+This path hides the 7900 XT with `ROCR_VISIBLE_DEVICES=1` (therefore the physical
+8060S becomes logical `ROCm0`), disables managed-memory fallback, keeps the split
+PLE table CPU-mapped, and uses neither MTP nor heterogeneous placement. It tests
+only shallow 0/512-token depths so kernel correctness and basic throughput are
+isolated first.
 
-After bring-up, run the full ROCm placement sweep:
-
-```bash
-./run-bench.sh --tier rocm-placement
-```
-
-It mirrors the Vulkan ratio/order/row tests using `ROCm1` for the 8060S and `ROCm0` for the 7900 XT. Failed high-dGPU ratios remain useful for establishing the ROCm allocation boundary.
-
-ROCm MTP is isolated in a smaller tier that reserves more dGPU headroom:
+If shallow performance is sane, localize the previously reported context cliff:
 
 ```bash
-./run-bench.sh --tier rocm-mtp
+./run-bench.sh --tier rocm-depth --fail-fast
 ```
 
-The target uses a 90/10 APU-to-dGPU layer split and the Q8 MTP sidecar stays on `ROCm0`; n=2, n=3, and n=4 are compared against an otherwise identical non-MTP baseline. If the sidecar still exceeds available VRAM, reduce the target dGPU fraction before changing any other variable.
+That single-variable tier stays APU-only and sweeps 0, 512, 1024, 1536, 2048,
+4096, 8192, and 32768 requested tokens. Do not proceed to `rocm-placement` or
+`rocm-mtp` until this curve remains sane. Only then should multi-GPU placement be
+reintroduced, followed last by the Q8 MTP sidecar on the 7900 XT.
 
 Benchmark the fork-specific Vulkan kernel and prefill knobs on the representative 88/12 placement:
 

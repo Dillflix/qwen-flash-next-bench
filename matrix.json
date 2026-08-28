@@ -8,7 +8,8 @@
     "model_joined": "{model_dir}/Qwen3.8-Flash-Next-Q4_0-ROCmFP4-STRIX.gguf",
     "mtp": "{model_dir}/mtp-Qwen3.8-Flash-Next-Q8_0.gguf",
     "vulkan_server": "{repo}/build-vulkan/bin/llama-server",
-    "hip_server": "{repo}/build-hip10/bin/llama-server"
+    "hip_server": "{repo}/build-hip10/bin/llama-server",
+    "rocm_audit": "{config_dir}/preflight/rocm-audit.json"
   },
   "workloads_file": "{config_dir}/prompts.json",
   "context_sources": [
@@ -506,29 +507,130 @@
       "startup_timeout_s": 600,
       "request_timeout_s": 600
     },
-    "rocm-smoke": {
-      "description": "One-pass ROCm 10 controls and heterogeneous placement bring-up.",
+    "production-capacity": {
+      "description": "Allocation-only validation of the 90/10 fallback and 88/12 preferred Vulkan production layouts at two 256-Ki-token slots.",
       "experiments": [
-        "apu_hip_joined_no_mtp",
-        "apu_hip_ple16_no_mtp",
-        "layer_85_15_hip_no_mtp",
-        "expert_hip_no_mtp"
+        "prod_90_10_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu",
+        "prod_88_12_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu"
       ],
       "workloads": [
-        "code",
-        "json"
+        "code"
       ],
       "depths": [
         0
       ],
-      "ctx_size": 2048,
+      "ctx_size": 524288,
+      "n_predict": 0,
+      "warmups": 0,
+      "rounds": 1,
+      "startup_only": true,
+      "erase_slot_between_requests": false,
+      "settle_seconds": 10,
+      "startup_timeout_s": 1800
+    },
+    "production-concurrency-smoke": {
+      "description": "Two genuinely simultaneous 32K prompts against either capacity-qualified production layout.",
+      "cache_state": "hot",
+      "experiments": [
+        "prod_90_10_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu",
+        "prod_88_12_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu"
+      ],
+      "workloads": [
+        "code",
+        "prose"
+      ],
+      "depths": [
+        32768
+      ],
+      "ctx_size": 524288,
+      "n_predict": 128,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "concurrency": 2,
+      "exact_prompt_tokens": true,
+      "settle_seconds": 5,
+      "startup_timeout_s": 1800,
+      "request_timeout_s": 3600
+    },
+    "production-concurrency-full": {
+      "description": "Two-user production validation through near-full 256-Ki-token slots; run only after the capacity and smoke tiers pass.",
+      "cache_state": "hot",
+      "experiments": [
+        "prod_90_10_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu",
+        "prod_88_12_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu"
+      ],
+      "workloads": [
+        "code",
+        "prose"
+      ],
+      "depths": [
+        32768,
+        131072,
+        253952
+      ],
+      "ctx_size": 524288,
+      "n_predict": 256,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "concurrency": 2,
+      "exact_prompt_tokens": true,
+      "settle_seconds": 5,
+      "startup_timeout_s": 1800,
+      "request_timeout_s": 7200
+    },
+    "rocm-smoke": {
+      "description": "Gated ROCm 10 APU-only bring-up with PLE mmap on CPU; never runs until the custom FP4 backend-op audit passes.",
+      "require_rocm_audit": true,
+      "experiments": [
+        "apu_hip_ple16_cpu_no_mtp"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        0,
+        512
+      ],
+      "ctx_size": 4096,
       "n_predict": 64,
       "warmups": 1,
       "rounds": 1,
       "settle_seconds": 2
     },
+    "rocm-depth": {
+      "description": "Gated APU-only ROCm context-depth localization after backend-op correctness and smoke pass.",
+      "require_rocm_audit": true,
+      "cache_state": "hot",
+      "experiments": [
+        "apu_hip_ple16_cpu_no_mtp"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        0,
+        512,
+        1024,
+        1536,
+        2048,
+        4096,
+        8192,
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 64,
+      "warmups": 1,
+      "warmup_depth": 8192,
+      "rounds": 1,
+      "settle_seconds": 2,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
+    },
     "rocm-placement": {
       "description": "Three-round ROCm 10 APU, expert, layer-order, ratio, and row sweep.",
+      "require_rocm_audit": true,
       "experiments": [
         "apu_hip_joined_no_mtp",
         "apu_hip_ple16_no_mtp",
@@ -557,6 +659,7 @@
     },
     "rocm-mtp": {
       "description": "ROCm layer split with extra dGPU headroom for MTP n=2/3/4.",
+      "require_rocm_audit": true,
       "experiments": [
         "layer_90_10_hip_no_mtp",
         "layer_90_10_hip_mtp_n2",
@@ -578,6 +681,7 @@
     },
     "backend": {
       "description": "Matched Vulkan and ROCm controls and heterogeneous placements.",
+      "require_rocm_audit": true,
       "experiments": [
         "expert_vk_no_mtp",
         "expert_hip_no_mtp",
@@ -1229,6 +1333,35 @@
       ]
     },
     {
+      "name": "prod_88_12_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu",
+      "description": "Preferred two-user production layout: 88/12 target split, F16 KV, CPU-mmap PLE16, and Q8 MTP n=4 on the 7900 XT.",
+      "extends": "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu",
+      "baseline": false,
+      "args_append": [
+        "--tensor-split",
+        "88,12",
+        "--batch-size",
+        "2048",
+        "--parallel",
+        "2",
+        "--no-kv-unified",
+        "--cont-batching",
+        "--cache-ram",
+        "0",
+        "--no-context-shift"
+      ]
+    },
+    {
+      "name": "prod_90_10_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu",
+      "description": "Lower-VRAM two-user production fallback with a 90/10 target split; otherwise identical to the preferred layout.",
+      "extends": "prod_88_12_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu",
+      "baseline": true,
+      "args_append": [
+        "--tensor-split",
+        "90,10"
+      ]
+    },
+    {
       "name": "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub2048_joined_ple_cpu",
       "description": "Original joined-PLE file with per_layer_token_embd.weight explicitly assigned to CPU under mmap.",
       "extends": "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub2048",
@@ -1424,6 +1557,30 @@
       "description": "APU-only ROCm control using the PLE16 file for a structure-matched comparison.",
       "extends": "apu_hip_joined_no_mtp",
       "model": "{model_ple16}"
+    },
+    {
+      "name": "apu_hip_ple16_cpu_no_mtp",
+      "description": "Clean ROCm diagnostic: APU only, no managed-memory fallback, split PLE mmap on CPU, no dGPU, and no MTP.",
+      "backend": "rocm",
+      "baseline": true,
+      "server": "{hip_server}",
+      "model": "{model_ple16}",
+      "env": {
+        "ROCM_PATH": "/opt/rocm-10.0.0",
+        "HIP_PATH": "/opt/rocm-10.0.0",
+        "LD_LIBRARY_PATH": "/opt/rocm-10.0.0/lib:/opt/rocm-10.0.0/lib/rocm_sysdeps/lib",
+        "ROCR_VISIBLE_DEVICES": "1"
+      },
+      "args": [
+        "--device",
+        "ROCm0",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "none",
+        "--override-tensor",
+        "^ple_ngram_embd\\.[0-9]+\\.weight$=CPU"
+      ]
     },
     {
       "name": "layer_90_10_hip_no_mtp",
