@@ -9,6 +9,7 @@ recoverable partial results matter more than shaving a few seconds off a run.
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import concurrent.futures
 import csv
@@ -18,6 +19,7 @@ import hashlib
 import http.client
 import json
 import math
+import mimetypes
 import os
 import pathlib
 import re
@@ -39,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.16.0"
+VERSION = "1.17.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -56,6 +58,9 @@ SINGLE_VALUE_SERVER_OPTIONS = {
     "--host",
     "--load-mode",
     "--main-gpu",
+    "--mmproj",
+    "--image-max-tokens",
+    "--image-min-tokens",
     "--n-gpu-layers",
     "--override-tensor",
     "--parallel",
@@ -278,6 +283,31 @@ def load_workloads(config: dict[str, Any], config_path: pathlib.Path) -> dict[st
     return {str(key): str(value) for key, value in workloads.items()}
 
 
+def load_vision_cases(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_path = config.get("vision_cases_file")
+    if not raw_path:
+        raise ValueError("vision mode requires vision_cases_file")
+    path = pathlib.Path(str(raw_path))
+    cases = load_json(path)
+    if not isinstance(cases, dict) or not cases:
+        raise ValueError("vision cases file must be a non-empty JSON object")
+    result: dict[str, dict[str, Any]] = {}
+    for name, raw in cases.items():
+        if not isinstance(raw, dict):
+            raise ValueError(f"vision case {name!r} must be an object")
+        image = raw.get("image")
+        prompt = raw.get("prompt")
+        anchors = raw.get("anchors", [])
+        if not isinstance(image, str) or not image:
+            raise ValueError(f"vision case {name!r} requires an image path")
+        if not isinstance(prompt, str) or not prompt:
+            raise ValueError(f"vision case {name!r} requires a prompt")
+        if not isinstance(anchors, list) or not all(isinstance(value, str) and value for value in anchors):
+            raise ValueError(f"vision case {name!r} anchors must be non-empty strings")
+        result[str(name)] = {"image": image, "prompt": prompt, "anchors": anchors}
+    return result
+
+
 def load_context_corpus(config: dict[str, Any]) -> str:
     chunks: list[str] = []
     for raw_path in config.get("context_sources", []):
@@ -433,6 +463,7 @@ def canonicalize_server_args(args: list[str]) -> list[str]:
         {"--kv-unified", "--no-kv-unified"},
         {"--cont-batching", "--no-cont-batching"},
         {"--context-shift", "--no-context-shift"},
+        {"--mmproj-offload", "--no-mmproj-offload"},
     )
     for group in mutually_exclusive:
         last = max((index for index, token in enumerate(result) if token in group), default=-1)
@@ -942,12 +973,113 @@ def completion_request(
     return response, wall_ms
 
 
+def image_data_url(path: pathlib.Path) -> str:
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def vision_completion_request(
+    url: str,
+    prompt: str,
+    image_path: pathlib.Path,
+    n_predict: int,
+    timeout_s: float,
+    extra: dict[str, Any],
+) -> tuple[dict[str, Any], float]:
+    payload: dict[str, Any] = {
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_data_url(image_path)}},
+                {"type": "text", "text": prompt},
+            ],
+        }],
+        "max_tokens": n_predict,
+        "temperature": 0.0,
+        "seed": 1,
+        "cache_prompt": False,
+    }
+    payload.update(extra)
+    started = time.monotonic()
+    status, response = http_json("POST", url, payload, timeout=timeout_s)
+    wall_ms = (time.monotonic() - started) * 1000.0
+    if status != 200:
+        raise RuntimeError(f"vision completion returned HTTP {status}: {response}")
+    if not isinstance(response, dict):
+        raise RuntimeError("vision completion response is not a JSON object")
+    return response, wall_ms
+
+
+def response_content(response: dict[str, Any]) -> str:
+    direct = response.get("content")
+    if isinstance(direct, str):
+        return direct
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            return str(message["content"])
+        if isinstance(choices[0].get("text"), str):
+            return str(choices[0]["text"])
+    return ""
+
+
+def anchor_metrics(content: str, anchors: list[str]) -> dict[str, Any]:
+    normalized = re.sub(r"\s+", " ", content).casefold()
+    matched = [anchor for anchor in anchors if re.sub(r"\s+", " ", anchor).casefold() in normalized]
+    return {
+        "anchors": anchors,
+        "anchors_matched": matched,
+        "anchor_score": len(matched) / len(anchors) if anchors else None,
+    }
+
+
+def file_mark(path: pathlib.Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def file_since(path: pathlib.Path, offset: int) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def extract_vision_log_metrics(text: str) -> dict[str, Any]:
+    def values(*patterns: str) -> list[float]:
+        found: list[float] = []
+        for pattern in patterns:
+            found.extend(float(value) for value in re.findall(pattern, text, flags=re.IGNORECASE))
+        return found
+
+    encoded = values(r"image(?:/slice| slice)? encoded in\s+([0-9.]+)\s*ms")
+    decoded = values(r"image decoded[^\n]*?in\s+([0-9.]+)\s*ms")
+    processed = values(r"image processed in\s+([0-9.]+)\s*ms")
+    return {
+        "image_encode_ms": sum(encoded) if encoded else None,
+        "image_decode_ms": sum(decoded) if decoded else None,
+        "image_process_ms": processed[-1] if processed else None,
+    }
+
+
 def response_slot_id(response: dict[str, Any], fallback: int = 0) -> int:
     """Return the llama-server slot used by a completion response."""
     for field in ("id_slot", "slot_id"):
         value = response.get(field)
         if isinstance(value, int) and value >= 0:
             return value
+    verbose = response.get("__verbose")
+    if isinstance(verbose, dict):
+        for field in ("id_slot", "slot_id"):
+            value = verbose.get(field)
+            if isinstance(value, int) and value >= 0:
+                return value
     # Older server responses did not expose the slot id. The caller supplies
     # the deterministic lane index for parallel probes.
     return fallback
@@ -1305,6 +1437,26 @@ def preflight(
     warnings: list[str] = []
     rocm_audit: dict[str, Any] | None = None
     files: list[dict[str, Any]] = []
+    vision_mode = str(tier.get("mode", "text")) == "vision"
+    vision_cases: dict[str, dict[str, Any]] = {}
+    if vision_mode:
+        try:
+            vision_cases = load_vision_cases(config)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            errors.append(f"cannot load vision cases: {exc}")
+        selected_cases = list(tier.get("vision_cases", vision_cases))
+        missing_cases = sorted(set(selected_cases) - set(vision_cases))
+        if missing_cases:
+            errors.append(f"vision tier references unknown cases: {missing_cases}")
+        for case_name in selected_cases:
+            case = vision_cases.get(case_name)
+            if not case:
+                continue
+            image = pathlib.Path(str(case["image"]))
+            exists = image.is_file()
+            files.append({"vision_case": case_name, "kind": "image", "path": str(image), "exists": exists})
+            if not skip_path_check and not exists:
+                errors.append(f"vision case {case_name}: missing image {image}; run python3 qwen_vision.py fixtures")
     for experiment in experiments:
         for kind in ("server", "model"):
             path = pathlib.Path(str(experiment[kind]))
@@ -1322,6 +1474,20 @@ def preflight(
             files.append({"experiment": experiment["name"], "kind": "draft_model", "path": str(sidecar), "exists": exists})
             if not skip_path_check and not exists:
                 errors.append(f"{experiment['name']}: missing draft model {sidecar}")
+        if vision_mode:
+            experiment_args = list(experiment.get("args", []))
+            mmproj_value = option_value(experiment_args, "--mmproj") or option_value(experiment_args, "-mm")
+            if not mmproj_value:
+                errors.append(f"{experiment['name']}: vision experiment has no --mmproj")
+            else:
+                mmproj = pathlib.Path(mmproj_value)
+                exists = mmproj.is_file()
+                files.append({"experiment": experiment["name"], "kind": "mmproj", "path": str(mmproj), "exists": exists})
+                if not skip_path_check and not exists:
+                    errors.append(
+                        f"{experiment['name']}: missing projector {mmproj}; "
+                        "run python3 qwen_vision.py projectors"
+                    )
     if not port_available(host, port):
         errors.append(f"{host}:{port} is already in use")
     active = active_llama_processes()
@@ -1337,8 +1503,10 @@ def preflight(
     if cache_state not in {"unspecified", "hot", "cold"}:
         errors.append(f"unsupported cache_state {cache_state!r}; expected hot, cold, or unspecified")
     if cache_state == "hot":
-        if int(tier.get("warmups", 0)) < 1 or int(tier.get("warmup_depth", 0)) <= 0:
-            errors.append("hot tiers require at least one nonzero-depth warm-up")
+        if int(tier.get("warmups", 0)) < 1 or (
+            not vision_mode and int(tier.get("warmup_depth", 0)) <= 0
+        ):
+            errors.append("hot text tiers require at least one nonzero-depth warm-up; vision tiers require one image warm-up")
         if not bool(tier.get("erase_slot_between_requests", defaults.get("erase_slot_between_requests", False))):
             errors.append("hot tiers must erase slot KV state between warm-up and measured requests")
     if cache_state == "cold" and int(tier.get("warmups", 0)) != 0:
@@ -1358,6 +1526,24 @@ def preflight(
                 errors.append(
                     f"{experiment['name']}: tier concurrency is {concurrency}, but effective --parallel is {parallel}"
                 )
+    if vision_mode:
+        if concurrency != 1:
+            errors.append("vision tiers currently require concurrency 1")
+        if [int(value) for value in tier.get("depths", [0])] != [0]:
+            errors.append("vision tiers currently require depths: [0]")
+        if tier.get("exact_prompt_tokens"):
+            errors.append("vision tiers cannot use exact_prompt_tokens")
+        if not skip_path_check:
+            checked_servers: set[str] = set()
+            for experiment in experiments:
+                server_path = str(experiment["server"])
+                if server_path in checked_servers or not pathlib.Path(server_path).is_file():
+                    continue
+                checked_servers.add(server_path)
+                capture = run_capture([server_path, "--help"], env=merged_env(config, experiment), timeout=60)
+                help_text = str(capture.get("stdout", "")) + str(capture.get("stderr", ""))
+                if capture.get("returncode") != 0 or "--mmproj" not in help_text:
+                    errors.append(f"{server_path}: build does not advertise --mmproj support")
     if tier.get("startup_only") and (int(tier.get("warmups", 0)) != 0 or concurrency != 1):
         errors.append("startup-only tiers require warmups 0 and concurrency 1")
     if tier.get("require_rocm_audit"):
@@ -1439,7 +1625,7 @@ def probe_row(
     startup_seconds: float | None,
     telemetry: dict[str, Any],
 ) -> dict[str, Any]:
-    content = str(response.get("content", ""))
+    content = response_content(response)
     timing = extract_timing(response)
     predicted_n = timing.get("predicted_n")
     degenerate = not isinstance(predicted_n, (int, float)) or predicted_n < n_predict * 0.95
@@ -1482,8 +1668,16 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
         raise ValueError(f"unknown tier {args.tier!r}; choose from {', '.join(config.get('tiers', {}))}")
     tier = config["tiers"][args.tier]
     experiments = select_experiments(config, tier, args.experiments)
-    workloads_all = load_workloads(config, config_path)
-    workload_names = list(tier.get("workloads", workloads_all))
+    vision_mode = str(tier.get("mode", "text")) == "vision"
+    vision_cases_all = load_vision_cases(config) if vision_mode else {}
+    workloads_all = (
+        {name: str(case["prompt"]) for name, case in vision_cases_all.items()}
+        if vision_mode else load_workloads(config, config_path)
+    )
+    workload_names = list(
+        tier.get("vision_cases", vision_cases_all) if vision_mode
+        else tier.get("workloads", workloads_all)
+    )
     missing_workloads = [name for name in workload_names if name not in workloads_all]
     if missing_workloads:
         raise ValueError(f"tier references unknown workload(s): {missing_workloads}")
@@ -1518,6 +1712,7 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
         "experiments": experiments,
         "commands": {item["name"]: server_command(config, tier, item) for item in experiments},
         "request": effective_request,
+        "vision_cases": {name: vision_cases_all[name] for name in workload_names} if vision_mode else None,
         "argv": sys.argv,
     }
     atomic_json(run_dir / "manifest.json", manifest)
@@ -1591,7 +1786,7 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                     health_url=base_url + "/health",
                     startup_timeout_s=float(tier.get("startup_timeout_s", defaults.get("startup_timeout_s", 900))),
                     telemetry_path=run_dir / "telemetry" / f"{suffix}.jsonl",
-                    telemetry_interval_s=float(defaults.get("telemetry_interval_s", 1.0)),
+                    telemetry_interval_s=float(tier.get("telemetry_interval_s", defaults.get("telemetry_interval_s", 1.0))),
                     pcie_bdf=defaults.get("pcie_upstream_bdf"),
                     stop_event=stop_event,
                 )
@@ -1651,6 +1846,31 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                                 prompt_cache[key] = (prompt, None)
                         return prompt_cache[key]
 
+                    def request_one(workload: str, prompt: str, predict: int) -> tuple[dict[str, Any], float, dict[str, Any]]:
+                        if not vision_mode:
+                            response, wall_ms = completion_request(
+                                base_url + "/completion", prompt, predict, request_timeout_s, extra_request,
+                            )
+                            return response, wall_ms, {}
+                        log_offset = file_mark(server.log_path)
+                        case = vision_cases_all[workload]
+                        response, wall_ms = vision_completion_request(
+                            base_url + "/v1/chat/completions",
+                            prompt,
+                            pathlib.Path(str(case["image"])),
+                            predict,
+                            request_timeout_s,
+                            extra_request,
+                        )
+                        log_metrics = extract_vision_log_metrics(file_since(server.log_path, log_offset))
+                        content = response_content(response)
+                        return response, wall_ms, {
+                            "image": str(case["image"]),
+                            "image_sha256": sha256_file(pathlib.Path(str(case["image"]))),
+                            **anchor_metrics(content, list(case.get("anchors", []))),
+                            **log_metrics,
+                        }
+
                     warmup_depth = int(tier.get("warmup_depth", 0))
                     for warmup_index in range(warmups):
                         mark = server.telemetry.mark() if server.telemetry else 0
@@ -1663,13 +1883,14 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                                 base_url + "/completion", warm_prompts, min(32, n_predict),
                                 request_timeout_s, extra_request,
                             )
+                            warm_vision = [{} for _ in warm_responses]
                         else:
                             warm_prompt = prepared_prompt(workload_names[0], warmup_depth, 0)[0]
-                            warm_response, warm_wall_ms = completion_request(
-                                base_url + "/completion", warm_prompt, min(32, n_predict),
-                                request_timeout_s, extra_request,
+                            warm_response, warm_wall_ms, warm_vision_metrics = request_one(
+                                workload_names[0], warm_prompt, min(32, n_predict),
                             )
                             warm_responses, warm_walls, warm_group_wall = [warm_response], [warm_wall_ms], warm_wall_ms
+                            warm_vision = [warm_vision_metrics]
                         samples = server.telemetry.slice(mark) if server.telemetry else []
                         warm_group = concurrent_metrics(warm_responses, warm_group_wall)
                         erased: dict[int, Any] = {}
@@ -1698,6 +1919,8 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                                 "timing": extract_timing(response),
                                 "telemetry": aggregate_telemetry(samples),
                             }
+                            if vision_mode:
+                                warm_row["vision"] = warm_vision[lane]
                             if erase_between_requests:
                                 slot = response_slot_id(response, lane)
                                 warm_row["slot_erase"] = erased[slot]
@@ -1780,14 +2003,14 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             break
                         prompt = prepared_prompt(workload, depth, 0)[0]
                         mark = server.telemetry.mark() if server.telemetry else 0
-                        response, wall_ms = completion_request(
-                            base_url + "/completion", prompt, n_predict, request_timeout_s, extra_request
-                        )
+                        response, wall_ms, vision_metrics = request_one(workload, prompt, n_predict)
                         samples = server.telemetry.slice(mark) if server.telemetry else []
                         row = probe_row(
                             run_id, experiment, round_index, workload, depth, n_predict,
                             response, wall_ms, server.startup_seconds, aggregate_telemetry(samples),
                         )
+                        if vision_mode:
+                            row["vision"] = vision_metrics
                         response_name = f"{suffix}-{safe_name(workload)}-d{depth}.json"
                         atomic_json(run_dir / "responses" / response_name, response)
                         row["response_file"] = str(pathlib.Path("responses") / response_name)
@@ -1820,6 +2043,13 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             status_parts.append("prefill unavailable")
                         if isinstance(draft, (int, float)):
                             status_parts.append(f"MTP accept {draft:.1%}")
+                        if vision_mode:
+                            image_ms = vision_metrics.get("image_process_ms")
+                            anchor_score = vision_metrics.get("anchor_score")
+                            if isinstance(image_ms, (int, float)):
+                                status_parts.append(f"image {image_ms:.0f} ms")
+                            if isinstance(anchor_score, (int, float)):
+                                status_parts.append(f"anchors {anchor_score:.0%}")
                         print(f"  {workload} depth~{depth}: {', '.join(status_parts)}", flush=True)
                 except Exception as exc:
                     error = {
@@ -1909,8 +2139,21 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         major_faults: list[float] = []
         mem_available: list[float] = []
         host_cached: list[float] = []
+        vision_encode: list[float] = []
+        vision_decode: list[float] = []
+        vision_process: list[float] = []
+        vision_anchor_scores: list[float] = []
         for row in rows:
             telemetry = row.get("telemetry", {})
+            vision = row.get("vision", {})
+            if isinstance(vision.get("image_encode_ms"), (int, float)):
+                vision_encode.append(float(vision["image_encode_ms"]))
+            if isinstance(vision.get("image_decode_ms"), (int, float)):
+                vision_decode.append(float(vision["image_decode_ms"]))
+            if isinstance(vision.get("image_process_ms"), (int, float)):
+                vision_process.append(float(vision["image_process_ms"]))
+            if isinstance(vision.get("anchor_score"), (int, float)):
+                vision_anchor_scores.append(float(vision["anchor_score"]))
             if isinstance(telemetry.get("pid_rss_file_max_bytes"), (int, float)):
                 rss_file.append(float(telemetry["pid_rss_file_max_bytes"]))
             if isinstance(telemetry.get("pid_rss_anon_max_bytes"), (int, float)):
@@ -1954,6 +2197,10 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             "prefill_ms_median": median_or_none(prompt_ms),
             "prompt_tok_s_median": median_or_none(pp),
             "http_wall_ms_median": median_or_none(row.get("http_wall_ms") for row in rows),
+            "vision_encode_ms_median": median_or_none(vision_encode),
+            "vision_decode_ms_median": median_or_none(vision_decode),
+            "vision_process_ms_median": median_or_none(vision_process),
+            "vision_anchor_score_median": median_or_none(vision_anchor_scores),
             "startup_s_median": median_or_none(row.get("server_startup_seconds") for row in rows),
             "mtp_acceptance_median": median_or_none(acceptance),
             "baseline_output_match": (sum(matches) / len(matches)) if matches else None,
@@ -2054,6 +2301,21 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             f"{fmt(row['decode_tok_s_median'])} | {fmt(row['prompt_tok_s_median'])} | {fmt(row['prefill_ms_median'])} | {accept} | {match} | "
             f"{fmt(row['rss_file_max_gib_median'])} | {fmt(row['storage_read_gib_median'])} | {fmt(row['major_faults_median'], 0)} | {pcie} |\n"
         )
+    vision_rows = [row for row in ranked if row.get("vision_anchor_score_median") is not None]
+    if vision_rows:
+        md.extend([
+            "\n## Vision correctness and image processing\n\n",
+            "Anchor score checks known visible facts in the deterministic fixture; exact output hash is a stricter cross-backend reproducibility check. Blank image timing fields mean this server build did not emit the corresponding log marker.\n\n",
+            "| Experiment | Case | Anchor score | Image encode ms | Image decode ms | Image total ms | Prompt tokens | Prompt ms | HTTP wall ms |\n",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        ])
+        for row in vision_rows:
+            md.append(
+                f"| {row['experiment']} | {row['workload']} | {fmt(100.0 * row['vision_anchor_score_median'], 0)}% | "
+                f"{fmt(row['vision_encode_ms_median'])} | {fmt(row['vision_decode_ms_median'])} | "
+                f"{fmt(row['vision_process_ms_median'])} | {fmt(row['prefill_tokens_median'], 0)} | "
+                f"{fmt(row['prefill_ms_median'])} | {fmt(row['http_wall_ms_median'])} |\n"
+            )
     md.extend([
         "\n## Residency and capacity telemetry\n\n",
         "Host available memory includes reclaimable cache. GPU maps are keyed by PCI BDF.\n\n",
@@ -2188,9 +2450,24 @@ def self_test() -> None:
     canonical = canonicalize_server_args([
         "--cache-type-k", "q8_0", "--jinja", "--cache-type-k", "f16",
         "--spec-draft-n-max", "2", "--spec-draft-n-max", "4",
-        "--no-kv-unified", "--kv-unified",
+        "--no-kv-unified", "--kv-unified", "--no-mmproj-offload", "--mmproj-offload",
     ])
-    assert canonical == ["--jinja", "--cache-type-k", "f16", "--spec-draft-n-max", "4", "--kv-unified"]
+    assert canonical == [
+        "--jinja", "--cache-type-k", "f16", "--spec-draft-n-max", "4",
+        "--kv-unified", "--mmproj-offload",
+    ]
+    oai = {
+        "choices": [{"message": {"content": "A red circle and UNSLOTH 42"}}],
+        "timings": {"predicted_n": 16},
+        "__verbose": {"id_slot": 2},
+    }
+    assert response_content(oai) == "A red circle and UNSLOTH 42"
+    anchors = anchor_metrics(response_content(oai), ["red", "circle", "blue", "UNSLOTH 42"])
+    assert anchors["anchor_score"] == 0.75
+    vision_log = extract_vision_log_metrics(
+        "image/slice encoded in 12.5 ms\nimage decoded (batch 1/1) in 3.5 ms\nimage processed in 16.2 ms\n"
+    )
+    assert vision_log == {"image_encode_ms": 12.5, "image_decode_ms": 3.5, "image_process_ms": 16.2}
     short = probe_row(
         "self-test", {"name": "test", "backend": "cpu"}, 0, "code", 0, 128,
         {"content": "", "timings": {"predicted_n": 0}}, 1.0, None, {},
@@ -2240,6 +2517,7 @@ def self_test() -> None:
     assert aggregate["mem_available_min_bytes"] == 90
     assert aggregate["host_cached_max_bytes"] == 60
     assert response_slot_id({"id_slot": 3}) == 3
+    assert response_slot_id(oai) == 2
     assert response_slot_id({}) == 0
     assert response_slot_id({}, 1) == 1
     concurrent = concurrent_metrics([
@@ -2291,6 +2569,12 @@ def self_test() -> None:
                 "draft_acceptance": 0.75,
             },
             "telemetry": aggregate,
+            "vision": {
+                "anchor_score": 1.0,
+                "image_encode_ms": 12.5,
+                "image_decode_ms": 3.5,
+                "image_process_ms": 16.2,
+            },
         })
         append_jsonl(summary_root / "results.jsonl", {
             "status": "ok",
@@ -2314,6 +2598,12 @@ def self_test() -> None:
                 "draft_acceptance": 0.75,
             },
             "telemetry": aggregate,
+            "vision": {
+                "anchor_score": 1.0,
+                "image_encode_ms": 13.5,
+                "image_decode_ms": 4.5,
+                "image_process_ms": 18.2,
+            },
         })
         append_jsonl(summary_root / "concurrency-groups.jsonl", {
             "status": "ok",
@@ -2333,6 +2623,8 @@ def self_test() -> None:
         rendered = (summary_root / "summary.md").read_text(encoding="utf-8")
         assert "Declared cache state: `hot`" in rendered
         assert "Residency and capacity telemetry" in rendered
+        assert "Vision correctness and image processing" in rendered
+        assert "100% | 13.00 | 4.00 | 17.20" in rendered
         assert "True concurrent-request throughput" in rendered
         assert (summary_root / "concurrency.csv").is_file()
         concurrency_csv = (summary_root / "concurrency.csv").read_text(encoding="utf-8")

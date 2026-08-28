@@ -22,8 +22,11 @@ jobs:
         run: |
           python -m py_compile qwen_bench.py
           python -m py_compile qwen_quant.py
+          python -m py_compile qwen_vision.py
           python qwen_bench.py self-test
           python qwen_quant.py self-test
+          python qwen_vision.py self-test
           python -m json.tool matrix.json >/dev/null
           python -m json.tool prompts.json >/dev/null
+          python -m json.tool vision_cases.json >/dev/null
           python -c 'import pathlib, qwen_bench; qwen_bench.load_config(pathlib.Path("matrix.json"))'

@@ -1,0 +1,33 @@
+{
+  "shapes": {
+    "image": "/srv/llm/models/qwen-flash-next/vision-assets/shapes.png",
+    "prompt": "Describe every colored shape, its approximate position, and transcribe the large text exactly.",
+    "anchors": [
+      "red",
+      "circle",
+      "blue",
+      "square",
+      "green",
+      "triangle",
+      "UNSLOTH 42"
+    ]
+  },
+  "invoice": {
+    "image": "/srv/llm/models/qwen-flash-next/vision-assets/invoice.png",
+    "prompt": "Read this document. State the invoice number, vendor, date, and total. Do not infer missing values.",
+    "anchors": [
+      "4827",
+      "NORTH STAR LABS",
+      "2026-08-28",
+      "348.00"
+    ]
+  },
+  "chart": {
+    "image": "/srv/llm/models/qwen-flash-next/vision-assets/chart.png",
+    "prompt": "Which quarter has the highest sales, and what exact value is printed for it?",
+    "anchors": [
+      "Q4",
+      "91"
+    ]
+  }
+}

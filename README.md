@@ -94,6 +94,73 @@ analysis.
 
 Large HIP model starts can take several minutes. While waiting for `/health`, the runner prints a heartbeat every 30 seconds with elapsed time, log size, and the latest non-empty server-log line. The default startup timeout is 1200 seconds (20 minutes).
 
+## Vision bring-up
+
+Qwen3.8-Flash-Next is multimodal, but llama.cpp stores its vision encoder/projector
+separately from the language-model GGUF. The `kingjones777` ROCmFP4 repository does
+not include that projector. This harness uses the matching BF16 projector from
+Unsloth as the quality reference and the matching Q8 projector published by
+`ggml-org` as the likely production winner.
+
+Prepare both checksum-pinned projectors and three deterministic local PNG fixtures:
+
+```bash
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+python3 qwen_vision.py self-test
+python3 qwen_vision.py prepare
+```
+
+The download is about 1.5 GB total. `prepare` writes only under
+`/srv/llm/models/qwen-flash-next`, verifies SHA-256, and generates synthetic cases
+for colored shapes plus text, invoice OCR, and chart reasoning. It is safe to rerun;
+valid existing files are not downloaded again. To fetch only the smaller projector:
+
+```bash
+python3 qwen_vision.py prepare --projectors q8
+```
+
+Run the one-image bring-up first:
+
+```bash
+python3 qwen_bench.py preflight --tier vision-smoke
+./run-bench.sh --tier vision-smoke --fail-fast
+```
+
+This compares three isolated server starts:
+
+1. BF16 projector on CPU, which is the correctness reference;
+2. BF16 projector on the RX 7900 XT;
+3. Q8 projector on the RX 7900 XT.
+
+The dGPU experiments set `MTMD_BACKEND_DEVICE=Vulkan0` explicitly. `--main-gpu`
+does not select the projector device. All experiments keep the target model on the
+88/12 iGPU/dGPU split, PLE16 on CPU mmap, Q8 target KV, and a 2048-token batch.
+
+If smoke succeeds and the anchor scores agree, run the complete fixture set and
+then test MTP:
+
+```bash
+./run-bench.sh --tier vision
+./run-bench.sh --tier vision-mtp
+```
+
+Vision results add a dedicated summary table with known-fact anchor score, image
+encode/decode/total milliseconds parsed from the server log, visual prompt tokens,
+prompt time, HTTP wall time, GPU residency, and the existing exact output hashes.
+The anchor score is the primary correctness gate because numerically equivalent
+backends can produce differently worded answers. Review the archived response JSON
+before accepting Q8 or Vulkan for production.
+
+The MTP tier is deliberately separate. Multimodal plus MTP has had model- and
+backend-specific failures in llama.cpp, so a successful projector-only run is a
+hard prerequisite; `vision-mtp` is a compatibility gate, not an assumption that
+the combination is safe.
+
+If the projector plus target allocation exceeds 20 GB on the 7900 XT, first change
+the vision experiments from `--tensor-split 88,12` to `90,10`. If that is still
+insufficient, reduce batch and ubatch together to 1024. Do not move the projector to
+the iGPU until the dGPU placement has been tested at those two lower-memory settings.
+
 ## Build the H1 low-risk quant
 
 H1 changes precision where quality is most likely to benefit while retaining the
