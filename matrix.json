@@ -315,7 +315,9 @@
         "layer_82_18_vk_f16kv_no_mtp",
         "layer_82_18_vk_mtp_n3_f16kv_dgpu",
         "layer_82_18_vk_mtp_n4_f16kv_dgpu",
-        "layer_82_18_vk_mtp_n4_p50_f16kv_dgpu"
+        "layer_82_18_vk_mtp_n4_p50_f16kv_dgpu",
+        "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub1024",
+        "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub2048"
       ],
       "workloads": [
         "code",
@@ -1071,6 +1073,24 @@
       "args_append": [
         "--spec-draft-p-min",
         "0.50"
+      ]
+    },
+    {
+      "name": "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub1024",
+      "description": "Winning 82/18 F16-KV, dGPU-MTP n=4 p-min 0.75 placement with ubatch 1024.",
+      "extends": "layer_82_18_vk_mtp_n4_f16kv_dgpu",
+      "args_append": [
+        "--ubatch-size",
+        "1024"
+      ]
+    },
+    {
+      "name": "layer_82_18_vk_mtp_n4_f16kv_dgpu_ub2048",
+      "description": "Winning 82/18 F16-KV, dGPU-MTP n=4 p-min 0.75 placement with ubatch 2048.",
+      "extends": "layer_82_18_vk_mtp_n4_f16kv_dgpu",
+      "args_append": [
+        "--ubatch-size",
+        "2048"
       ]
     },
     {

@@ -188,10 +188,12 @@ python3 qwen_bench.py preflight --tier vulkan-mtp-tuning
 ./run-bench.sh --tier vulkan-mtp-tuning
 ```
 
-This retains a no-MTP control and makes two isolated decisions: n=3 versus n=4 at
-`--spec-draft-p-min 0.75`, then p-min 0.50 versus 0.75 at n=4. Target placement,
-F16 cache, draft device, prompts, 16K warm-up, and 512-token output are otherwise
-identical. It deliberately does not repeat device placement or layer-ratio tests.
+This retains a no-MTP control and makes three isolated decisions: n=3 versus n=4
+at `--spec-draft-p-min 0.75`, p-min 0.50 versus 0.75 at n=4, and ubatch 512 versus
+1024 versus 2048 on the n=4/p-min-0.75 winner. Target placement, F16 cache, draft
+device, prompts, 16K warm-up, and 512-token output are otherwise identical. The
+ubatch sweep is not multiplied across the MTP parameter candidates, and the tier
+does not repeat device-placement or layer-ratio tests.
 
 ### Focused 7900 XT prefill screen
 
