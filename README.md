@@ -195,8 +195,8 @@ Compare the Q8 K/V cache used by the performance candidates against the maximum-
 ```
 
 This covers APU-only and representative 88/12 layer placement, including MTP n=4.
-The repeated cache flags in the expanded command are intentional: the per-experiment
-F16 setting comes last and therefore overrides the Q8 default.
+Experiment-specific cache settings replace the Q8 defaults when commands are
+expanded, so the logged command contains one unambiguous value for each cache type.
 
 Finally, compare matched backend/control cases:
 

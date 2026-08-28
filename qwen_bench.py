@@ -36,8 +36,35 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 SUCCESS_STATES = {"ok"}
+SINGLE_VALUE_SERVER_OPTIONS = {
+    "-m",
+    "-md",
+    "-ot",
+    "--cache-type-k",
+    "--cache-type-v",
+    "--ctx-size",
+    "--device",
+    "--fit",
+    "--flash-attn",
+    "--host",
+    "--load-mode",
+    "--main-gpu",
+    "--n-gpu-layers",
+    "--override-tensor",
+    "--parallel",
+    "--port",
+    "--spec-draft-device",
+    "--spec-draft-ngl",
+    "--spec-draft-n-max",
+    "--spec-draft-p-min",
+    "--spec-type",
+    "--split-mode",
+    "--tensor-split",
+    "--threads",
+    "--ubatch-size",
+}
 
 
 def utc_now() -> str:
@@ -300,6 +327,32 @@ def merged_env(config: dict[str, Any], experiment: dict[str, Any]) -> dict[str, 
     return env
 
 
+def canonicalize_server_args(args: list[str]) -> list[str]:
+    """Apply last-wins overrides without emitting contradictory singleton options."""
+    last_position: dict[str, int] = {}
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in SINGLE_VALUE_SERVER_OPTIONS and index + 1 < len(args):
+            last_position[token] = index
+            index += 2
+        else:
+            index += 1
+
+    result: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in SINGLE_VALUE_SERVER_OPTIONS and index + 1 < len(args):
+            if last_position[token] == index:
+                result.extend((token, args[index + 1]))
+            index += 2
+        else:
+            result.append(token)
+            index += 1
+    return result
+
+
 def server_command(config: dict[str, Any], tier: dict[str, Any], experiment: dict[str, Any]) -> list[str]:
     defaults = config.get("defaults", {})
     host = str(defaults.get("host", "127.0.0.1"))
@@ -314,7 +367,7 @@ def server_command(config: dict[str, Any], tier: dict[str, Any], experiment: dic
     ])
     command.extend(str(item) for item in defaults.get("server_args", []))
     command.extend(str(item) for item in experiment.get("args", []))
-    return command
+    return [command[0], *canonicalize_server_args(command[1:])]
 
 
 def port_available(host: str, port: int) -> bool:
@@ -1308,6 +1361,11 @@ def self_test() -> None:
     assert timing["prompt_n"] == 4096
     assert timing["prompt_ms"] == 2048.0
     assert timing["prompt_per_second"] == 2000.0
+    canonical = canonicalize_server_args([
+        "--cache-type-k", "q8_0", "--jinja", "--cache-type-k", "f16",
+        "--spec-draft-n-max", "2", "--spec-draft-n-max", "4",
+    ])
+    assert canonical == ["--jinja", "--cache-type-k", "f16", "--spec-draft-n-max", "4"]
     bw = parse_pcie_bw("100 200 256\n")
     assert bw["pcie_rx_est_bytes_s"] == 25_600 and bw["pcie_tx_est_bytes_s"] == 51_200
     expanded = expand_tree({"x": "{root}/file"}, {"root": "/tmp"})
