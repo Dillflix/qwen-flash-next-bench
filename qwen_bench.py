@@ -358,7 +358,11 @@ def discover_drm_cards() -> list[dict[str, str]]:
     drm_root = pathlib.Path("/sys/class/drm")
     if not drm_root.exists():
         return cards
-    for card in sorted(drm_root.glob("card[0-9]*")):
+    for card in sorted(drm_root.iterdir()):
+        # `card[0-9]*` also matches connector symlinks such as card0-DP-1.
+        # Only the canonical cardN entries own the device telemetry files.
+        if not re.fullmatch(r"card\d+", card.name):
+            continue
         device = card / "device"
         if not device.exists():
             continue
