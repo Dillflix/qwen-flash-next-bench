@@ -36,7 +36,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 SUCCESS_STATES = {"ok"}
 
 
@@ -1054,11 +1054,24 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                         append_jsonl(results_path, row)
                         completed.add((round_index, experiment["name"], workload, depth))
                         speed = row["timing"].get("predicted_per_second")
+                        prefill = row["timing"].get("prompt_per_second")
+                        prompt_n = row["timing"].get("prompt_n")
+                        prompt_ms = row["timing"].get("prompt_ms")
                         draft = row["timing"].get("draft_acceptance")
-                        status_text = f"{speed:.2f} tok/s" if isinstance(speed, (int, float)) else "no speed"
+                        status_parts = [
+                            f"decode {speed:.2f} tok/s"
+                            if isinstance(speed, (int, float)) else "decode unavailable"
+                        ]
+                        if isinstance(prefill, (int, float)):
+                            prefill_text = f"prefill {prefill:.2f} tok/s"
+                            if isinstance(prompt_n, (int, float)) and isinstance(prompt_ms, (int, float)):
+                                prefill_text += f" ({int(prompt_n)} tok, {prompt_ms:.0f} ms)"
+                            status_parts.append(prefill_text)
+                        else:
+                            status_parts.append("prefill unavailable")
                         if isinstance(draft, (int, float)):
-                            status_text += f", MTP accept {draft:.1%}"
-                        print(f"  {workload} depth~{depth}: {status_text}", flush=True)
+                            status_parts.append(f"MTP accept {draft:.1%}")
+                        print(f"  {workload} depth~{depth}: {', '.join(status_parts)}", flush=True)
                 except Exception as exc:
                     error = {
                         "schema": 1,
@@ -1119,6 +1132,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
     for (experiment, workload, depth), rows in sorted(groups.items()):
         speeds = [row["timing"].get("predicted_per_second") for row in rows]
         pp = [row["timing"].get("prompt_per_second") for row in rows]
+        prompt_tokens = [row["timing"].get("prompt_n") for row in rows]
+        prompt_ms = [row["timing"].get("prompt_ms") for row in rows]
         acceptance = [row["timing"].get("draft_acceptance") for row in rows]
         matches = []
         for row in rows:
@@ -1160,6 +1175,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             "decode_tok_s_median": median_or_none(speeds),
             "decode_tok_s_min": min((float(x) for x in speeds if isinstance(x, (int, float))), default=None),
             "decode_tok_s_max": max((float(x) for x in speeds if isinstance(x, (int, float))), default=None),
+            "prefill_tokens_median": median_or_none(prompt_tokens),
+            "prefill_ms_median": median_or_none(prompt_ms),
             "prompt_tok_s_median": median_or_none(pp),
             "http_wall_ms_median": median_or_none(row.get("http_wall_ms") for row in rows),
             "startup_s_median": median_or_none(row.get("server_startup_seconds") for row in rows),
@@ -1180,11 +1197,21 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         for row in summary_rows
         if row["experiment"] == baseline_name and row["decode_tok_s_median"]
     }
+    baseline_prefill_speeds = {
+        (row["workload"], row["depth_tokens_requested"]): row["prompt_tok_s_median"]
+        for row in summary_rows
+        if row["experiment"] == baseline_name and row["prompt_tok_s_median"]
+    }
     for row in summary_rows:
         baseline_speed = baseline_speeds.get((row["workload"], row["depth_tokens_requested"]))
+        baseline_prefill = baseline_prefill_speeds.get((row["workload"], row["depth_tokens_requested"]))
         speed = row["decode_tok_s_median"]
+        prefill = row["prompt_tok_s_median"]
         row["decode_speedup_vs_baseline"] = (
             float(speed) / float(baseline_speed) if speed and baseline_speed else None
+        )
+        row["prefill_speedup_vs_baseline"] = (
+            float(prefill) / float(baseline_prefill) if prefill and baseline_prefill else None
         )
     fields = list(summary_rows[0])
     with (run_dir / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -1196,33 +1223,40 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         experiment_groups[row["experiment"]].append(row)
     overall: list[dict[str, Any]] = []
     for experiment, rows in experiment_groups.items():
-        speedups = [float(row["decode_speedup_vs_baseline"]) for row in rows if row["decode_speedup_vs_baseline"] and row["decode_speedup_vs_baseline"] > 0]
+        decode_speedups = [float(row["decode_speedup_vs_baseline"]) for row in rows if row["decode_speedup_vs_baseline"] and row["decode_speedup_vs_baseline"] > 0]
+        prefill_speedups = [float(row["prefill_speedup_vs_baseline"]) for row in rows if row["prefill_speedup_vs_baseline"] and row["prefill_speedup_vs_baseline"] > 0]
         matches = [float(row["baseline_output_match"]) for row in rows if row["baseline_output_match"] is not None]
         accepts = [float(row["mtp_acceptance_median"]) for row in rows if row["mtp_acceptance_median"] is not None]
+        decode_geomean = math.exp(statistics.fmean(math.log(value) for value in decode_speedups)) if decode_speedups else None
+        prefill_geomean = math.exp(statistics.fmean(math.log(value) for value in prefill_speedups)) if prefill_speedups else None
         overall.append({
             "experiment": experiment,
             "cells": len(rows),
-            "geomean_speedup": math.exp(statistics.fmean(math.log(value) for value in speedups)) if speedups else None,
+            "decode_geomean_speedup": decode_geomean,
+            "prefill_geomean_speedup": prefill_geomean,
+            "balanced_geomean_speedup": math.sqrt(decode_geomean * prefill_geomean) if decode_geomean and prefill_geomean else None,
             "hash_match": statistics.fmean(matches) if matches else None,
             "mtp_acceptance": statistics.median(accepts) if accepts else None,
         })
-    overall.sort(key=lambda row: row["geomean_speedup"] or -1, reverse=True)
+    overall.sort(key=lambda row: row["balanced_geomean_speedup"] or -1, reverse=True)
     md = [
         f"# Benchmark summary: {run_dir.name}\n\n",
         f"Baseline for output hashes: `{baseline_name}`. Medians exclude warm-ups and degenerate responses.\n\n",
         "## Overall comparable-cell ranking\n\n",
-        "| Experiment | Cells | Geomean decode speedup | Hash match | Median MTP accept |\n",
-        "|---|---:|---:|---:|---:|\n",
+        "| Experiment | Cells | Decode speedup | Prefill speedup | Balanced | Hash match | Median MTP accept |\n",
+        "|---|---:|---:|---:|---:|---:|---:|\n",
     ]
     for row in overall:
-        speedup = "" if row["geomean_speedup"] is None else f"{row['geomean_speedup']:.3f}x"
+        decode_speedup = "" if row["decode_geomean_speedup"] is None else f"{row['decode_geomean_speedup']:.3f}x"
+        prefill_speedup = "" if row["prefill_geomean_speedup"] is None else f"{row['prefill_geomean_speedup']:.3f}x"
+        balanced = "" if row["balanced_geomean_speedup"] is None else f"{row['balanced_geomean_speedup']:.3f}x"
         match = "" if row["hash_match"] is None else f"{row['hash_match']:.0%}"
         accept = "" if row["mtp_acceptance"] is None else f"{row['mtp_acceptance']:.1%}"
-        md.append(f"| {row['experiment']} | {row['cells']} | {speedup} | {match} | {accept} |\n")
+        md.append(f"| {row['experiment']} | {row['cells']} | {decode_speedup} | {prefill_speedup} | {balanced} | {match} | {accept} |\n")
     md.extend([
         "\n## Per-workload results\n\n",
-        "| Experiment | Workload | Depth | n | Decode tok/s | Prompt tok/s | MTP accept | Hash match | PCIe |\n",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "| Experiment | Workload | Requested depth | Prompt n | Samples | Decode tok/s | Prefill tok/s | Prefill ms | MTP accept | Hash match | PCIe |\n",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     ])
     ranked = sorted(summary_rows, key=lambda row: row["decode_tok_s_median"] or -1, reverse=True)
     for row in ranked:
@@ -1232,8 +1266,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         if row["pcie_speed_gt_s_max"] is not None:
             pcie = f"{row['pcie_speed_gt_s_max']:g} GT/s x{int(row['pcie_width_lanes_max'] or 0)}"
         md.append(
-            f"| {row['experiment']} | {row['workload']} | {row['depth_tokens_requested']} | {row['samples']} | "
-            f"{fmt(row['decode_tok_s_median'])} | {fmt(row['prompt_tok_s_median'])} | {accept} | {match} | {pcie} |\n"
+            f"| {row['experiment']} | {row['workload']} | {row['depth_tokens_requested']} | {fmt(row['prefill_tokens_median'], 0)} | {row['samples']} | "
+            f"{fmt(row['decode_tok_s_median'])} | {fmt(row['prompt_tok_s_median'])} | {fmt(row['prefill_ms_median'])} | {accept} | {match} | {pcie} |\n"
         )
     failures = [row for row in results if row.get("status") not in SUCCESS_STATES]
     if failures:
@@ -1262,8 +1296,18 @@ def execute_preflight(args: argparse.Namespace) -> pathlib.Path:
 def self_test() -> None:
     parsed = parse_link_status("LnkSta: Speed 16GT/s, Width x4\n")
     assert parsed == {"speed": "16GT/s", "width": "x4", "speed_gt_s": 16.0, "width_lanes": 4}
-    timing = extract_timing({"timings": {"predicted_n": 10, "draft_n": 8, "draft_n_accepted": 6}})
+    timing = extract_timing({"timings": {
+        "prompt_n": 4096,
+        "prompt_ms": 2048.0,
+        "prompt_per_second": 2000.0,
+        "predicted_n": 10,
+        "draft_n": 8,
+        "draft_n_accepted": 6,
+    }})
     assert timing["draft_acceptance"] == 0.75
+    assert timing["prompt_n"] == 4096
+    assert timing["prompt_ms"] == 2048.0
+    assert timing["prompt_per_second"] == 2000.0
     bw = parse_pcie_bw("100 200 256\n")
     assert bw["pcie_rx_est_bytes_s"] == 25_600 and bw["pcie_tx_est_bytes_s"] == 51_200
     expanded = expand_tree({"x": "{root}/file"}, {"root": "/tmp"})

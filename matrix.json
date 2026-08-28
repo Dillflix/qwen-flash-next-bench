@@ -53,10 +53,10 @@
   },
   "tiers": {
     "smoke": {
-      "description": "Two placement candidates, one short measured pass. Start here.",
+      "description": "APU-only and representative Vulkan layer split, one short measured pass.",
       "experiments": [
-        "expert_vk_no_mtp",
-        "layer_82_18_vk_no_mtp"
+        "apu_vk_no_mtp",
+        "layer_88_12_vk_no_mtp"
       ],
       "workloads": [
         "code",
@@ -72,18 +72,17 @@
       "settle_seconds": 2
     },
     "short": {
-      "description": "Placement sweep plus MTP n=2/3/4 at shallow context.",
+      "description": "Structurally distinct Vulkan placements plus MTP n=2/3/4 at shallow context.",
       "experiments": [
+        "apu_vk_no_mtp",
+        "layer_88_12_vk_no_mtp",
         "expert_vk_no_mtp",
-        "layer_85_15_vk_no_mtp",
-        "layer_82_18_vk_no_mtp",
-        "layer_80_20_vk_no_mtp",
-        "layer_78_22_vk_no_mtp",
-        "layer_75_25_vk_no_mtp",
-        "expert_vk_mtp_n2",
-        "expert_vk_mtp_n3",
-        "expert_vk_mtp_n4",
-        "layer_82_18_vk_mtp_n4"
+        "layer_reverse_18_82_vk_no_mtp",
+        "row_86_14_main_apu_vk_no_mtp",
+        "row_86_14_main_dgpu_vk_no_mtp",
+        "layer_88_12_vk_mtp_n2",
+        "layer_88_12_vk_mtp_n3",
+        "layer_88_12_vk_mtp_n4"
       ],
       "workloads": [
         "code",
@@ -99,15 +98,15 @@
       "rounds": 3
     },
     "tuning": {
-      "description": "Vulkan wave-width and ubatch sweep for the expert placement.",
+      "description": "Vulkan wave-width and ubatch sweep for the representative 88/12 placement.",
       "experiments": [
-        "expert_vk_no_mtp",
-        "expert_vk_densew32_no_mtp",
-        "expert_vk_mmidw32_no_mtp",
-        "expert_vk_bothw32_no_mtp",
-        "expert_vk_ub1024_no_mtp",
-        "expert_vk_ub2048_no_mtp",
-        "expert_vk_bothw32_ub2048_no_mtp"
+        "layer_88_12_vk_no_mtp",
+        "layer_88_12_vk_densew32_no_mtp",
+        "layer_88_12_vk_mmidw32_no_mtp",
+        "layer_88_12_vk_bothw32_no_mtp",
+        "layer_88_12_vk_ub1024_no_mtp",
+        "layer_88_12_vk_ub2048_no_mtp",
+        "layer_88_12_vk_bothw32_ub2048_no_mtp"
       ],
       "workloads": [
         "code",
@@ -125,14 +124,13 @@
       "rounds": 3
     },
     "kv": {
-      "description": "Q8 versus F16 KV cache for likely expert/layer and MTP finalists.",
+      "description": "Q8 versus F16 KV cache for the representative layer and MTP finalists.",
       "experiments": [
-        "expert_vk_no_mtp",
-        "expert_vk_f16kv_no_mtp",
-        "expert_vk_mtp_n4",
-        "expert_vk_mtp_n4_f16kv",
-        "layer_82_18_vk_no_mtp",
-        "layer_82_18_vk_f16kv_no_mtp"
+        "apu_vk_no_mtp",
+        "layer_88_12_vk_no_mtp",
+        "layer_88_12_vk_f16kv_no_mtp",
+        "layer_88_12_vk_mtp_n4",
+        "layer_88_12_vk_mtp_n4_f16kv"
       ],
       "workloads": [
         "code",
@@ -150,12 +148,12 @@
       "rounds": 3
     },
     "context": {
-      "description": "Four likely finalists over increasing prompt depth.",
+      "description": "Representative Vulkan finalists over increasing prompt depth.",
       "experiments": [
-        "expert_vk_no_mtp",
-        "expert_vk_mtp_n4",
-        "layer_82_18_vk_no_mtp",
-        "layer_82_18_vk_mtp_n4"
+        "apu_vk_no_mtp",
+        "layer_88_12_vk_no_mtp",
+        "layer_88_12_vk_f16kv_no_mtp",
+        "layer_88_12_vk_mtp_n4"
       ],
       "workloads": [
         "code",
@@ -177,7 +175,7 @@
       "experiments": [
         "apu_vk_no_mtp",
         "expert_vk_no_mtp",
-        "layer_82_18_vk_no_mtp",
+        "layer_88_12_vk_no_mtp",
         "layer_reverse_18_82_vk_no_mtp",
         "row_86_14_main_apu_vk_no_mtp",
         "row_86_14_main_dgpu_vk_no_mtp"
@@ -196,14 +194,11 @@
       "settle_seconds": 2
     },
     "placement": {
-      "description": "Three-round Vulkan placement sweep around the feasible dGPU boundary.",
+      "description": "Three-round comparison of structurally distinct Vulkan placements.",
       "experiments": [
-        "expert_vk_no_mtp",
-        "layer_90_10_vk_no_mtp",
+        "apu_vk_no_mtp",
         "layer_88_12_vk_no_mtp",
-        "layer_85_15_vk_no_mtp",
-        "layer_82_18_vk_no_mtp",
-        "layer_80_20_vk_no_mtp",
+        "expert_vk_no_mtp",
         "layer_reverse_18_82_vk_no_mtp",
         "row_86_14_main_apu_vk_no_mtp",
         "row_86_14_main_dgpu_vk_no_mtp"
@@ -214,41 +209,33 @@
         "prose"
       ],
       "depths": [
-        0
+        0,
+        4096
       ],
-      "ctx_size": 8192,
-      "n_predict": 256,
+      "ctx_size": 16384,
+      "n_predict": 128,
       "warmups": 1,
       "rounds": 3
     },
     "vulkan-baseline": {
-      "description": "One-round, Vulkan-only screen of every placement, kernel, ubatch, KV, and MTP experiment.",
+      "description": "Vulkan decision screen with representative placements plus decode and long-prompt prefill metrics.",
       "experiments": [
         "apu_vk_no_mtp",
-        "expert_vk_no_mtp",
-        "layer_90_10_vk_no_mtp",
         "layer_88_12_vk_no_mtp",
-        "layer_85_15_vk_no_mtp",
-        "layer_82_18_vk_no_mtp",
-        "layer_80_20_vk_no_mtp",
-        "layer_78_22_vk_no_mtp",
-        "layer_75_25_vk_no_mtp",
+        "expert_vk_no_mtp",
         "layer_reverse_18_82_vk_no_mtp",
         "row_86_14_main_apu_vk_no_mtp",
         "row_86_14_main_dgpu_vk_no_mtp",
-        "expert_vk_densew32_no_mtp",
-        "expert_vk_mmidw32_no_mtp",
-        "expert_vk_bothw32_no_mtp",
-        "expert_vk_ub1024_no_mtp",
-        "expert_vk_ub2048_no_mtp",
-        "expert_vk_bothw32_ub2048_no_mtp",
-        "expert_vk_f16kv_no_mtp",
-        "layer_82_18_vk_f16kv_no_mtp",
-        "expert_vk_mtp_n2",
-        "expert_vk_mtp_n3",
-        "expert_vk_mtp_n4",
-        "layer_82_18_vk_mtp_n4",
-        "expert_vk_mtp_n4_f16kv"
+        "layer_88_12_vk_densew32_no_mtp",
+        "layer_88_12_vk_mmidw32_no_mtp",
+        "layer_88_12_vk_bothw32_no_mtp",
+        "layer_88_12_vk_ub1024_no_mtp",
+        "layer_88_12_vk_ub2048_no_mtp",
+        "layer_88_12_vk_bothw32_ub2048_no_mtp",
+        "layer_88_12_vk_f16kv_no_mtp",
+        "layer_88_12_vk_mtp_n2",
+        "layer_88_12_vk_mtp_n3",
+        "layer_88_12_vk_mtp_n4"
       ],
       "workloads": [
         "code",
@@ -256,15 +243,17 @@
         "prose"
       ],
       "depths": [
-        0
+        0,
+        4096,
+        16384
       ],
-      "ctx_size": 8192,
+      "ctx_size": 32768,
       "n_predict": 128,
       "warmups": 1,
       "rounds": 1,
       "settle_seconds": 2,
       "startup_timeout_s": 600,
-      "request_timeout_s": 300
+      "request_timeout_s": 600
     },
     "rocm-smoke": {
       "description": "One-pass ROCm 10 controls and heterogeneous placement bring-up.",
@@ -363,21 +352,17 @@
       "rounds": 3
     },
     "full": {
-      "description": "Expensive validation matrix; run only after pruning with short/context.",
+      "description": "Expensive Vulkan-only validation template; prune to measured finalists before running.",
       "experiments": [
-        "expert_vk_no_mtp",
-        "layer_85_15_vk_no_mtp",
-        "layer_82_18_vk_no_mtp",
-        "layer_80_20_vk_no_mtp",
-        "layer_78_22_vk_no_mtp",
-        "layer_75_25_vk_no_mtp",
-        "expert_vk_mtp_n2",
-        "expert_vk_mtp_n3",
-        "expert_vk_mtp_n4",
-        "layer_82_18_vk_mtp_n4",
         "apu_vk_no_mtp",
-        "apu_hip_joined_no_mtp",
-        "expert_hip_no_mtp"
+        "layer_88_12_vk_no_mtp",
+        "expert_vk_no_mtp",
+        "layer_reverse_18_82_vk_no_mtp",
+        "row_86_14_main_apu_vk_no_mtp",
+        "row_86_14_main_dgpu_vk_no_mtp",
+        "layer_88_12_vk_f16kv_no_mtp",
+        "layer_88_12_vk_mtp_n4",
+        "layer_88_12_vk_mtp_n4_f16kv"
       ],
       "workloads": [
         "code",
@@ -403,7 +388,7 @@
       "name": "expert_vk_no_mtp",
       "description": "dGPU owns shared/dense/attention tensors; APU owns PLE and non-shared routed experts.",
       "backend": "vulkan",
-      "baseline": true,
+      "baseline": false,
       "server": "{vulkan_server}",
       "model": "{model_ple16}",
       "args": [
@@ -458,6 +443,117 @@
         "layer",
         "--tensor-split",
         "88,12"
+      ]
+    },
+    {
+      "name": "layer_88_12_vk_densew32_no_mtp",
+      "description": "Representative 88/12 layer split with the dense Vulkan wave32 path enabled.",
+      "extends": "layer_88_12_vk_no_mtp",
+      "env": {
+        "GGML_VK_DENSE_WAVE32": "1"
+      }
+    },
+    {
+      "name": "layer_88_12_vk_mmidw32_no_mtp",
+      "description": "Representative 88/12 layer split with Vulkan mul_mat_id wave32 enabled.",
+      "extends": "layer_88_12_vk_no_mtp",
+      "env": {
+        "GGML_VK_MMID_WAVE32": "1"
+      }
+    },
+    {
+      "name": "layer_88_12_vk_bothw32_no_mtp",
+      "description": "Representative 88/12 layer split with both Vulkan wave32 paths enabled.",
+      "extends": "layer_88_12_vk_no_mtp",
+      "env": {
+        "GGML_VK_DENSE_WAVE32": "1",
+        "GGML_VK_MMID_WAVE32": "1"
+      }
+    },
+    {
+      "name": "layer_88_12_vk_ub1024_no_mtp",
+      "description": "Representative 88/12 layer split with ubatch 1024.",
+      "extends": "layer_88_12_vk_no_mtp",
+      "args_append": [
+        "--ubatch-size",
+        "1024"
+      ]
+    },
+    {
+      "name": "layer_88_12_vk_ub2048_no_mtp",
+      "description": "Representative 88/12 layer split with ubatch 2048.",
+      "extends": "layer_88_12_vk_no_mtp",
+      "args_append": [
+        "--ubatch-size",
+        "2048"
+      ]
+    },
+    {
+      "name": "layer_88_12_vk_bothw32_ub2048_no_mtp",
+      "description": "Representative 88/12 layer split with both wave32 paths and ubatch 2048.",
+      "extends": "layer_88_12_vk_bothw32_no_mtp",
+      "args_append": [
+        "--ubatch-size",
+        "2048"
+      ]
+    },
+    {
+      "name": "layer_88_12_vk_f16kv_no_mtp",
+      "description": "Representative 88/12 layer split with F16 K/V cache.",
+      "extends": "layer_88_12_vk_no_mtp",
+      "args_append": [
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
+      ]
+    },
+    {
+      "name": "layer_88_12_vk_mtp_n2",
+      "description": "Representative 88/12 layer split with Q8 MTP and a two-token draft window.",
+      "extends": "layer_88_12_vk_no_mtp",
+      "args_append": [
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "Vulkan0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "2",
+        "--spec-draft-p-min",
+        "0.75"
+      ]
+    },
+    {
+      "name": "layer_88_12_vk_mtp_n3",
+      "description": "Representative 88/12 layer split with Q8 MTP and a three-token draft window.",
+      "extends": "layer_88_12_vk_mtp_n2",
+      "args_append": [
+        "--spec-draft-n-max",
+        "3"
+      ]
+    },
+    {
+      "name": "layer_88_12_vk_mtp_n4",
+      "description": "Representative 88/12 layer split with Q8 MTP and a four-token draft window.",
+      "extends": "layer_88_12_vk_mtp_n2",
+      "args_append": [
+        "--spec-draft-n-max",
+        "4"
+      ]
+    },
+    {
+      "name": "layer_88_12_vk_mtp_n4_f16kv",
+      "description": "Representative 88/12 MTP n=4 placement with F16 target K/V cache.",
+      "extends": "layer_88_12_vk_mtp_n4",
+      "args_append": [
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
       ]
     },
     {
@@ -783,6 +879,7 @@
       "name": "apu_vk_no_mtp",
       "description": "APU-only Vulkan control using the PLE16 model.",
       "backend": "vulkan",
+      "baseline": true,
       "server": "{vulkan_server}",
       "model": "{model_ple16}",
       "args": [

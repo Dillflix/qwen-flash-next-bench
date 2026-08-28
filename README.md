@@ -2,7 +2,7 @@
 
 This package runs repeatable `llama-server` comparisons for the Strix Halo + RX 7900 XT system. It is preconfigured for the existing fork, Vulkan and ROCm 10 builds, the PLE16 Vulkan-safe model, the original joined-PLE model, and the Q8 MTP sidecar.
 
-The important default is intentionally small: `smoke` compares routed-expert placement with an 82/18 contiguous layer split. Larger placement, MTP, context, and backend sweeps are opt-in.
+The important default is intentionally small: `smoke` compares APU-only Vulkan with the representative 88/12 contiguous layer split. Larger strategy, MTP, context, and backend sweeps are opt-in.
 
 ## What it records
 
@@ -62,14 +62,12 @@ Large HIP model starts can take several minutes. While waiting for `/health`, th
 
 ## Recommended benchmark sequence
 
-First isolate placement without MTP:
-
-```bash
-./run-bench.sh --tier short \
-  --experiments 'expert_vk_no_mtp,layer_*_vk_no_mtp'
-```
-
-This runs three rounds of the expert split and 85/15, 82/18, 80/20, 78/22, and 75/25 contiguous splits. Failed out-of-memory points are still useful because the logs establish the feasible dGPU boundary.
+Start with `vulkan-baseline` below. Earlier bring-up established that nominal 90/10,
+88/12, 85/15, and 82/18 forward splits have effectively the same decode rate on
+this host. The active tiers therefore use 88/12 as the forward representative and
+spend measurement time on structurally different placements and real prefill loads.
+The other ratios remain defined for deliberate boundary investigations, but are not
+part of the recommended campaign.
 
 The expert experiments intentionally use `--split-mode layer --tensor-split 1,0`, even though they are not conventional layer splits. In llama.cpp, `--split-mode none` removes every model GPU except `--main-gpu` from the scheduler. Layer mode keeps both Vulkan/ROCm backends registered; `1,0` leaves all ordinary layers on device 0 while `--override-tensor` alone moves PLE and routed-expert tensors to device 1. The harness rejects non-CPU tensor overrides combined with split mode `none` during configuration loading.
 
@@ -81,29 +79,39 @@ Bring up the alternative Vulkan strategies with one short pass:
 
 This compares APU-only, routed-expert, ordinary APU-to-dGPU contiguous layers, reverse dGPU-to-APU layers, and row splitting with intermediate results/KV on each possible main device. Row splitting is expected to be communication-heavy, but measuring both `--main-gpu` choices makes it a useful control rather than an assumption.
 
-If those all load, collect the three-round Vulkan placement sweep:
+If those all load, collect the three-round Vulkan strategy comparison:
 
 ```bash
 ./run-bench.sh --tier placement
 ```
 
-The sweep adds 90/10 and 88/12 points around the original 85/15 through 80/20 boundary. Forward layer splits put early layers on the APU and the tail/output on the dGPU; the reverse control tests whether the same approximate dGPU allocation is sensitive to layer order.
+This compares APU-only, representative forward layer, reverse layer, expert/component,
+and both row placements at base and approximately 4K prompt depths. It does not
+repeat neighboring forward ratios.
 
 ### Complete Vulkan baseline
 
-To screen every currently defined Vulkan experiment without invoking HIP/ROCm, run:
+To screen the decision-relevant Vulkan configurations without invoking HIP/ROCm, run:
 
 ```bash
 python3 qwen_bench.py preflight --tier vulkan-baseline
 ./run-bench.sh --tier vulkan-baseline
 ```
 
-This is a one-round pruning pass across all 25 Vulkan configurations: APU-only,
-component/expert placement, forward and reverse layer splits, row splits, wave32
-kernel switches, ubatch sizes, Q8/F16 KV, and MTP draft windows. It uses three
-workloads, an 8192-token server context, 128 generated tokens, a 10-minute Vulkan
-startup limit, and a 5-minute request limit. Fail-fast is intentionally omitted:
-an OOM or unsupported topology is recorded and the remaining configurations run.
+This is a one-round decision pass across 16 non-redundant Vulkan configurations.
+The nominal 90/10 through 82/18 forward ratios produced noise-sized decode
+differences on the target host, so 88/12 is retained as the representative forward
+split while expert/component, reverse-layer, and both row strategies remain as
+structurally different controls. Kernel, ubatch, Q8/F16 KV, and MTP variants are
+applied to the representative 88/12 placement rather than the slower expert split.
+
+Every configuration is measured with three workloads at base, approximately 4K,
+and approximately 16K prompt depths inside a 32K server context, followed by 128
+generated tokens. The live output reports both prefill and decode throughput plus
+actual prefill token count and milliseconds. `summary.md` ranks decode and prefill
+separately and provides an equal-weight geometric mean only as a convenient sorting
+aid. The startup and request limits are 10 minutes. Fail-fast is intentionally
+omitted so an OOM or unsupported topology is recorded and the campaign continues.
 
 The baseline is a feasibility and ranking screen, not final proof. Use its winners
 to prune the three-round placement, tuning, KV, and context tiers; do not run every
@@ -135,7 +143,7 @@ ROCm MTP is isolated in a smaller tier that reserves more dGPU headroom:
 
 The target uses a 90/10 APU-to-dGPU layer split and the Q8 MTP sidecar stays on `ROCm0`; n=2, n=3, and n=4 are compared against an otherwise identical non-MTP baseline. If the sidecar still exceeds available VRAM, reduce the target dGPU fraction before changing any other variable.
 
-Benchmark the fork-specific Vulkan kernel and prefill knobs on the expert placement:
+Benchmark the fork-specific Vulkan kernel and prefill knobs on the representative 88/12 placement:
 
 ```bash
 ./run-bench.sh --tier tuning
@@ -143,21 +151,14 @@ Benchmark the fork-specific Vulkan kernel and prefill knobs on the expert placem
 
 This independently tests `GGML_VK_DENSE_WAVE32=1`, `GGML_VK_MMID_WAVE32=1`, both together, ubatch 1024, ubatch 2048, and both wave32 paths with ubatch 2048. The tier stops at an 8192-token requested filler depth and uses a 16384-token context. Do not carry ubatch 2048 into the 65536-token `full` tier without separate stability testing; the fork documents compute-ring timeouts at very long context with that ubatch on related models.
 
-Then isolate MTP depth on the expert placement:
+Then isolate MTP draft depth on the representative 88/12 placement:
 
 ```bash
 ./run-bench.sh --tier short \
-  --experiments 'expert_vk_no_mtp,expert_vk_mtp_n*'
+  --experiments 'layer_88_12_vk_no_mtp,layer_88_12_vk_mtp_n*'
 ```
 
 The non-MTP experiment remains in the selection so output hashes and speedups have a baseline. Compare both decode tokens/second and MTP acceptance; a larger draft window is not automatically faster.
-
-Compare the best expert and layer candidate with and without MTP:
-
-```bash
-./run-bench.sh --tier short \
-  --experiments 'expert_vk_no_mtp,expert_vk_mtp_n4,layer_82_18_vk_no_mtp,layer_82_18_vk_mtp_n4'
-```
 
 After pruning the shallow-context matrix, measure context sensitivity:
 
@@ -173,7 +174,9 @@ Compare the Q8 K/V cache used by the performance candidates against the maximum-
 ./run-bench.sh --tier kv
 ```
 
-This covers expert and 82/18 layer placement, plus expert MTP n=4. The repeated cache flags in the expanded command are intentional: the per-experiment F16 setting comes last and therefore overrides the Q8 default.
+This covers APU-only and representative 88/12 layer placement, including MTP n=4.
+The repeated cache flags in the expanded command are intentional: the per-experiment
+F16 setting comes last and therefore overrides the Q8 default.
 
 Finally, compare matched backend/control cases:
 
@@ -183,7 +186,7 @@ Finally, compare matched backend/control cases:
 
 This pairs Vulkan and ROCm expert, 85/15, and 82/18 placements, then includes APU-only Vulkan and both APU-only ROCm file structures. Compare exact output hashes as well as throughput; backend numerical differences can change a greedy token even when both runs are valid.
 
-The `full` tier is deliberately expensive (five rounds, four prompt depths, 13 configurations). It is a template for final validation, not a sensible first run. Edit its experiment list down to the finalists before using it.
+The `full` tier is deliberately expensive (five rounds, four prompt depths, nine Vulkan configurations). It is a template for final validation, not a sensible first run. Edit its experiment list down to the finalists before using it.
 
 ## Resume and select runs
 
