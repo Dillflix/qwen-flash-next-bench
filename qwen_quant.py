@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import importlib.util
 import json
 import os
 import re
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 GIB = 1024**3
 HERE = Path(__file__).resolve().parent
 
@@ -257,6 +258,16 @@ def fork_checks(llama_dir: Path) -> tuple[list[str], list[str]]:
 def preflight(args: argparse.Namespace) -> dict[str, Any]:
     errors, warnings = fork_checks(args.llama_dir)
     phase = args.phase
+    python_dependencies: dict[str, bool] = {}
+    if phase == "convert":
+        for package in ("huggingface_hub", "numpy", "safetensors", "torch"):
+            available = importlib.util.find_spec(package) is not None
+            python_dependencies[package] = available
+            if not available:
+                errors.append(
+                    f"Python package {package!r} is missing from {sys.executable}; "
+                    "activate the existing conversion environment"
+                )
     required_bins: list[str] = []
     if phase == "quantize":
         required_bins.append("llama-quantize")
@@ -306,6 +317,9 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
         "phase": phase,
         "llama_dir": str(args.llama_dir),
         "llama_revision": git_revision(args.llama_dir),
+        "python_executable": sys.executable,
+        "python_version": sys.version.split()[0],
+        "python_dependencies": python_dependencies,
         "source_repo": args.hf_repo,
         "source_prefix": str(args.source),
         "source_files": [{"path": str(p), "size_bytes": p.stat().st_size} for p in source_files],
