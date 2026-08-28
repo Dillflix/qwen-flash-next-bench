@@ -195,6 +195,19 @@ device, prompts, 16K warm-up, and 512-token output are otherwise identical. The
 ubatch sweep is not multiplied across the MTP parameter candidates, and the tier
 does not repeat device-placement or layer-ratio tests.
 
+If ubatch 2048 materially improves prefill on the target host, continue upward
+without repeating the completed sweep:
+
+```bash
+python3 qwen_bench.py preflight --tier vulkan-ubatch-large
+./run-bench.sh --tier vulkan-ubatch-large
+```
+
+This runs only ubatch 4096 and 8192 on the n=4/p-min-0.75 winner. Both experiments
+set `--batch-size` equal to `--ubatch-size`, because llama.cpp's default logical
+batch ceiling is 2048. A load or allocation failure is valid capacity-boundary
+data; fail-fast remains off so the 8192 cell still runs if 4096 fails, or vice versa.
+
 ### Focused 7900 XT prefill screen
 
 MTP does not accelerate target-model prefill: the target remains on the iGPU and

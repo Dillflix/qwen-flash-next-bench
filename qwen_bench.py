@@ -36,12 +36,13 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.8.1"
+VERSION = "1.9.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
     "-md",
     "-ot",
+    "--batch-size",
     "--cache-type-k",
     "--cache-type-v",
     "--ctx-size",
