@@ -58,6 +58,8 @@ The smoke run loads two model placements, performs one excluded warm-up on each,
 
 If a server cannot load, its complete log is retained under `logs/`. The normal behavior is to record the failure and continue to the next experiment; `--fail-fast` is useful during bring-up.
 
+Large HIP model starts can take several minutes. While waiting for `/health`, the runner prints a heartbeat every 30 seconds with elapsed time, log size, and the latest non-empty server-log line. The default startup timeout is 1200 seconds (20 minutes).
+
 ## Recommended benchmark sequence
 
 First isolate placement without MTP:

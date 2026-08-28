@@ -36,7 +36,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 SUCCESS_STATES = {"ok"}
 
 
@@ -277,6 +277,19 @@ def make_prompt(base: str, requested_tokens: int, corpus: str) -> str:
 
 def command_text(command: list[str]) -> str:
     return shlex.join(command)
+
+
+def latest_log_line(path: pathlib.Path, max_bytes: int = 16_384) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes), os.SEEK_SET)
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
 
 
 def merged_env(config: dict[str, Any], experiment: dict[str, Any]) -> dict[str, str]:
@@ -620,6 +633,7 @@ class ManagedServer:
         )
         self.telemetry.start()
         deadline = started + self.startup_timeout_s
+        next_report = started + 30.0
         last_error = "health endpoint unavailable"
         while time.monotonic() < deadline:
             if self.stop_event and self.stop_event.is_set():
@@ -634,6 +648,20 @@ class ManagedServer:
                 last_error = f"health returned HTTP {status}: {body}"
             except Exception as exc:
                 last_error = repr(exc)
+            now = time.monotonic()
+            if now >= next_report:
+                try:
+                    log_mib = self.log_path.stat().st_size / 1024**2
+                except OSError:
+                    log_mib = 0.0
+                line = latest_log_line(self.log_path)
+                detail = f"; latest: {line[:240]}" if line else ""
+                print(
+                    f"  waiting for server health: {now - started:.0f}s "
+                    f"(log {log_mib:.2f} MiB){detail}",
+                    flush=True,
+                )
+                next_report = now + 30.0
             time.sleep(1.0)
         raise TimeoutError(f"server did not become healthy in {self.startup_timeout_s}s: {last_error}")
 
