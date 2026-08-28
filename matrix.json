@@ -309,6 +309,32 @@
       "startup_timeout_s": 600,
       "request_timeout_s": 900
     },
+    "vulkan-mtp-tuning": {
+      "description": "Focused MTP window and confidence-threshold tuning on the winning 82/18 F16-KV target placement with the draft model on the 7900 XT.",
+      "experiments": [
+        "layer_82_18_vk_f16kv_no_mtp",
+        "layer_82_18_vk_mtp_n3_f16kv_dgpu",
+        "layer_82_18_vk_mtp_n4_f16kv_dgpu",
+        "layer_82_18_vk_mtp_n4_p50_f16kv_dgpu"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        4096,
+        16384
+      ],
+      "ctx_size": 32768,
+      "n_predict": 512,
+      "warmups": 1,
+      "warmup_depth": 16384,
+      "rounds": 1,
+      "settle_seconds": 2,
+      "startup_timeout_s": 600,
+      "request_timeout_s": 900
+    },
     "vulkan-expert-shared": {
       "description": "Focused F16-KV A/B of routed-expert-only versus routed-plus-shared-expert placement on the iGPU, with remaining target tensors on the 7900 XT.",
       "experiments": [
@@ -1027,6 +1053,24 @@
         "f16",
         "--cache-type-v",
         "f16"
+      ]
+    },
+    {
+      "name": "layer_82_18_vk_mtp_n3_f16kv_dgpu",
+      "description": "82/18 F16-KV target placement with Q8 MTP on the 7900 XT, a three-token draft window, and p-min 0.75.",
+      "extends": "layer_82_18_vk_mtp_n4_f16kv_dgpu",
+      "args_append": [
+        "--spec-draft-n-max",
+        "3"
+      ]
+    },
+    {
+      "name": "layer_82_18_vk_mtp_n4_p50_f16kv_dgpu",
+      "description": "82/18 F16-KV target placement with Q8 MTP on the 7900 XT, a four-token draft window, and p-min 0.50.",
+      "extends": "layer_82_18_vk_mtp_n4_f16kv_dgpu",
+      "args_append": [
+        "--spec-draft-p-min",
+        "0.50"
       ]
     },
     {

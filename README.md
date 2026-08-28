@@ -179,6 +179,20 @@ directly comparable. Fail-fast is intentionally omitted: the 82/18 target plus
 dGPU MTP cell may exceed the 7900 XT's available VRAM, and that failure is useful
 capacity data while the remaining cells continue.
 
+The first placement pass selected the 82/18 target split with F16 K/V cache and
+MTP on the 7900 XT. Once that result is reproduced on a host, tune only the two
+remaining speculative-decoding controls:
+
+```bash
+python3 qwen_bench.py preflight --tier vulkan-mtp-tuning
+./run-bench.sh --tier vulkan-mtp-tuning
+```
+
+This retains a no-MTP control and makes two isolated decisions: n=3 versus n=4 at
+`--spec-draft-p-min 0.75`, then p-min 0.50 versus 0.75 at n=4. Target placement,
+F16 cache, draft device, prompts, 16K warm-up, and 512-token output are otherwise
+identical. It deliberately does not repeat device placement or layer-ratio tests.
+
 ### Focused 7900 XT prefill screen
 
 MTP does not accelerate target-model prefill: the target remains on the iGPU and
