@@ -37,7 +37,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.11.0"
+VERSION = "1.11.1"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -63,6 +63,7 @@ SINGLE_VALUE_SERVER_OPTIONS = {
     "--spec-draft-p-min",
     "--spec-type",
     "--split-mode",
+    "--slot-save-path",
     "--tensor-split",
     "--threads",
     "--ubatch-size",
@@ -369,7 +370,18 @@ def server_command(config: dict[str, Any], tier: dict[str, Any], experiment: dic
     ])
     command.extend(str(item) for item in defaults.get("server_args", []))
     command.extend(str(item) for item in experiment.get("args", []))
+    if bool(tier.get("erase_slot_between_requests", defaults.get("erase_slot_between_requests", False))):
+        command.extend(["--slot-save-path", effective_slot_save_path(config, tier)])
     return [command[0], *canonicalize_server_args(command[1:])]
+
+
+def effective_slot_save_path(config: dict[str, Any], tier: dict[str, Any]) -> str:
+    defaults = config.get("defaults", {})
+    configured = tier.get("slot_save_path", defaults.get("slot_save_path"))
+    if configured:
+        return str(configured)
+    uid = os.getuid() if hasattr(os, "getuid") else os.getpid()
+    return str(pathlib.Path(tempfile.gettempdir()) / f"qwen-bench-slots-{uid}")
 
 
 def port_available(host: str, port: int) -> bool:
@@ -946,6 +958,7 @@ def preflight(
     if available is not None and available < int(defaults.get("warn_mem_available_bytes", 32 * 1024**3)):
         warnings.append(f"MemAvailable is only {available / 1024**3:.1f} GiB before model load")
     cache_state = str(tier.get("cache_state", "unspecified"))
+    slot_save_path: str | None = None
     if cache_state not in {"unspecified", "hot", "cold"}:
         errors.append(f"unsupported cache_state {cache_state!r}; expected hot, cold, or unspecified")
     if cache_state == "hot":
@@ -955,6 +968,12 @@ def preflight(
             errors.append("hot tiers must erase slot KV state between warm-up and measured requests")
     if cache_state == "cold" and int(tier.get("warmups", 0)) != 0:
         errors.append("cold tiers must set warmups to 0")
+    if bool(tier.get("erase_slot_between_requests", defaults.get("erase_slot_between_requests", False))):
+        slot_save_path = effective_slot_save_path(config, tier)
+        try:
+            pathlib.Path(slot_save_path).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            errors.append(f"cannot create slot-save path {slot_save_path}: {exc}")
     report = {
         "ts": utc_now(),
         "version": VERSION,
@@ -962,6 +981,7 @@ def preflight(
         "port": port,
         "tier": tier,
         "cache_state": cache_state,
+        "slot_save_path": slot_save_path,
         "experiments": [item["name"] for item in experiments],
         "files": files,
         "drm_cards": discover_drm_cards(),

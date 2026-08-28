@@ -23,6 +23,9 @@ Warm-ups are excluded from rankings and recorded separately in `warmups.jsonl`.
 The current hot tiers use a nonzero-depth warm-up, then erase the llama-server
 slot after every request. This retains file pages and compiled kernels while
 preventing target or draft KV reuse from contaminating the next prefill result.
+The harness creates a per-user directory under the system temporary directory
+and passes it with `--slot-save-path`, which this llama-server fork requires
+before enabling slot actions. Erasing a slot does not save a KV file there.
 Measured throughput runs use temperature zero, `top_k=1`, `cache_prompt=false`,
 `ignore_eos=true`, and a fixed seed. Ignoring EOS is required
 for fixed-length decode timing: otherwise naturally short JSON/code answers report
