@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.17.0"
+VERSION = "1.17.1"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -1011,18 +1011,27 @@ def vision_completion_request(
     return response, wall_ms
 
 
-def response_content(response: dict[str, Any]) -> str:
+def response_text_parts(response: dict[str, Any]) -> tuple[str, str]:
+    """Return final-answer and reasoning text without silently losing either."""
     direct = response.get("content")
     if isinstance(direct, str):
-        return direct
+        return direct, ""
     choices = response.get("choices")
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
         message = choices[0].get("message")
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
-            return str(message["content"])
+        if isinstance(message, dict):
+            answer = str(message.get("content", "")) if isinstance(message.get("content"), str) else ""
+            raw_reasoning = message.get("reasoning_content", message.get("reasoning", ""))
+            reasoning = str(raw_reasoning) if isinstance(raw_reasoning, str) else ""
+            return answer, reasoning
         if isinstance(choices[0].get("text"), str):
-            return str(choices[0]["text"])
-    return ""
+            return str(choices[0]["text"]), ""
+    return "", ""
+
+
+def response_content(response: dict[str, Any]) -> str:
+    answer, reasoning = response_text_parts(response)
+    return answer if answer else reasoning
 
 
 def anchor_metrics(content: str, anchors: list[str]) -> dict[str, Any]:
@@ -1533,6 +1542,14 @@ def preflight(
             errors.append("vision tiers currently require depths: [0]")
         if tier.get("exact_prompt_tokens"):
             errors.append("vision tiers cannot use exact_prompt_tokens")
+        request = dict(defaults.get("request", {}))
+        request.update(tier.get("request", {}))
+        chat_kwargs = request.get("chat_template_kwargs")
+        if not isinstance(chat_kwargs, dict) or chat_kwargs.get("enable_thinking") is not False:
+            errors.append(
+                "vision tiers require request.chat_template_kwargs.enable_thinking=false "
+                "so the measured decode budget reaches a final answer"
+            )
         if not skip_path_check:
             checked_servers: set[str] = set()
             for experiment in experiments:
@@ -1625,10 +1642,17 @@ def probe_row(
     startup_seconds: float | None,
     telemetry: dict[str, Any],
 ) -> dict[str, Any]:
-    content = response_content(response)
+    answer, reasoning = response_text_parts(response)
+    content = answer if answer else reasoning
     timing = extract_timing(response)
     predicted_n = timing.get("predicted_n")
-    degenerate = not isinstance(predicted_n, (int, float)) or predicted_n < n_predict * 0.95
+    chat_response = isinstance(response.get("choices"), list)
+    answer_missing = chat_response and not answer.strip()
+    degenerate = (
+        not isinstance(predicted_n, (int, float))
+        or predicted_n < n_predict * 0.95
+        or answer_missing
+    )
     return {
         "schema": 1,
         "status": "ok",
@@ -1644,6 +1668,9 @@ def probe_row(
         "server_startup_seconds": startup_seconds,
         "output_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         "output_chars": len(content),
+        "answer_chars": len(answer),
+        "reasoning_chars": len(reasoning),
+        "answer_missing": answer_missing,
         "stop": response.get("stop"),
         "stopped_eos": response.get("stopped_eos"),
         "stopped_limit": response.get("stopped_limit"),
@@ -1863,11 +1890,11 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             extra_request,
                         )
                         log_metrics = extract_vision_log_metrics(file_since(server.log_path, log_offset))
-                        content = response_content(response)
+                        answer, _reasoning = response_text_parts(response)
                         return response, wall_ms, {
                             "image": str(case["image"]),
                             "image_sha256": sha256_file(pathlib.Path(str(case["image"]))),
-                            **anchor_metrics(content, list(case.get("anchors", []))),
+                            **anchor_metrics(answer, list(case.get("anchors", []))),
                             **log_metrics,
                         }
 
@@ -2027,7 +2054,9 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                         draft = row["timing"].get("draft_acceptance")
                         predicted_n = row["timing"].get("predicted_n")
                         status_parts: list[str] = []
-                        if row["degenerate"]:
+                        if row.get("answer_missing"):
+                            status_parts.append("INVALID empty final answer")
+                        elif row["degenerate"]:
                             actual = int(predicted_n) if isinstance(predicted_n, (int, float)) else "unknown"
                             status_parts.append(f"INVALID short decode ({actual}/{n_predict} tokens)")
                         status_parts.append(
@@ -2462,6 +2491,10 @@ def self_test() -> None:
         "__verbose": {"id_slot": 2},
     }
     assert response_content(oai) == "A red circle and UNSLOTH 42"
+    assert response_text_parts(oai) == ("A red circle and UNSLOTH 42", "")
+    reasoning_only = {"choices": [{"message": {"content": "", "reasoning_content": "visible reasoning"}}]}
+    assert response_content(reasoning_only) == "visible reasoning"
+    assert response_text_parts(reasoning_only) == ("", "visible reasoning")
     anchors = anchor_metrics(response_content(oai), ["red", "circle", "blue", "UNSLOTH 42"])
     assert anchors["anchor_score"] == 0.75
     vision_log = extract_vision_log_metrics(
@@ -2478,6 +2511,13 @@ def self_test() -> None:
     )
     assert short["degenerate"] is True
     assert full["degenerate"] is False
+    empty_answer = probe_row(
+        "self-test", {"name": "test", "backend": "cpu"}, 0, "vision", 0, 64,
+        {"choices": [{"message": {"content": "", "reasoning_content": "thinking"}}],
+         "timings": {"predicted_n": 64}},
+        1.0, None, {},
+    )
+    assert empty_answer["degenerate"] is True and empty_answer["answer_missing"] is True
     bw = parse_pcie_bw("100 200 256\n")
     assert bw["pcie_rx_est_bytes_s"] == 25_600 and bw["pcie_tx_est_bytes_s"] == 51_200
     expanded = expand_tree({"x": "{root}/file"}, {"root": "/tmp"})

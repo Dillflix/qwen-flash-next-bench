@@ -151,6 +151,11 @@ The anchor score is the primary correctness gate because numerically equivalent
 backends can produce differently worded answers. Review the archived response JSON
 before accepting Q8 or Vulkan for production.
 
+Vision tiers pass `chat_template_kwargs.enable_thinking=false` so a fixed decode
+budget measures the answer rather than being consumed by Qwen's default internal
+reasoning. A response with reasoning tokens but an empty final answer is marked
+degenerate and excluded from rankings.
+
 The MTP tier is deliberately separate. Multimodal plus MTP has had model- and
 backend-specific failures in llama.cpp, so a successful projector-only run is a
 hard prerequisite; `vision-mtp` is a compatibility gate, not an assumption that

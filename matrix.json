@@ -74,9 +74,6 @@
       ],
       "ctx_size": 2048,
       "n_predict": 64,
-      "request": {
-        "reasoning_effort": "none"
-      },
       "warmups": 1,
       "rounds": 1,
       "settle_seconds": 2
@@ -130,9 +127,6 @@
       ],
       "ctx_size": 16384,
       "n_predict": 128,
-      "request": {
-        "reasoning_effort": "none"
-      },
       "warmups": 1,
       "rounds": 3
     },
@@ -227,9 +221,6 @@
       ],
       "ctx_size": 16384,
       "n_predict": 128,
-      "request": {
-        "reasoning_effort": "none"
-      },
       "warmups": 1,
       "rounds": 3
     },
@@ -811,6 +802,11 @@
       ],
       "ctx_size": 8192,
       "n_predict": 64,
+      "request": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
       "warmups": 1,
       "rounds": 1,
       "settle_seconds": 2,
@@ -837,6 +833,11 @@
       ],
       "ctx_size": 16384,
       "n_predict": 128,
+      "request": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
       "warmups": 1,
       "rounds": 2,
       "settle_seconds": 2,
@@ -862,6 +863,11 @@
       ],
       "ctx_size": 16384,
       "n_predict": 128,
+      "request": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
       "warmups": 1,
       "rounds": 3,
       "settle_seconds": 2,
