@@ -221,6 +221,51 @@
       "warmups": 1,
       "rounds": 3
     },
+    "vulkan-baseline": {
+      "description": "One-round, Vulkan-only screen of every placement, kernel, ubatch, KV, and MTP experiment.",
+      "experiments": [
+        "apu_vk_no_mtp",
+        "expert_vk_no_mtp",
+        "layer_90_10_vk_no_mtp",
+        "layer_88_12_vk_no_mtp",
+        "layer_85_15_vk_no_mtp",
+        "layer_82_18_vk_no_mtp",
+        "layer_80_20_vk_no_mtp",
+        "layer_78_22_vk_no_mtp",
+        "layer_75_25_vk_no_mtp",
+        "layer_reverse_18_82_vk_no_mtp",
+        "row_86_14_main_apu_vk_no_mtp",
+        "row_86_14_main_dgpu_vk_no_mtp",
+        "expert_vk_densew32_no_mtp",
+        "expert_vk_mmidw32_no_mtp",
+        "expert_vk_bothw32_no_mtp",
+        "expert_vk_ub1024_no_mtp",
+        "expert_vk_ub2048_no_mtp",
+        "expert_vk_bothw32_ub2048_no_mtp",
+        "expert_vk_f16kv_no_mtp",
+        "layer_82_18_vk_f16kv_no_mtp",
+        "expert_vk_mtp_n2",
+        "expert_vk_mtp_n3",
+        "expert_vk_mtp_n4",
+        "layer_82_18_vk_mtp_n4",
+        "expert_vk_mtp_n4_f16kv"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 8192,
+      "n_predict": 128,
+      "warmups": 1,
+      "rounds": 1,
+      "settle_seconds": 2,
+      "startup_timeout_s": 600,
+      "request_timeout_s": 300
+    },
     "rocm-smoke": {
       "description": "One-pass ROCm 10 controls and heterogeneous placement bring-up.",
       "experiments": [

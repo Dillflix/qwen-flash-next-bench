@@ -89,6 +89,27 @@ If those all load, collect the three-round Vulkan placement sweep:
 
 The sweep adds 90/10 and 88/12 points around the original 85/15 through 80/20 boundary. Forward layer splits put early layers on the APU and the tail/output on the dGPU; the reverse control tests whether the same approximate dGPU allocation is sensitive to layer order.
 
+### Complete Vulkan baseline
+
+To screen every currently defined Vulkan experiment without invoking HIP/ROCm, run:
+
+```bash
+python3 qwen_bench.py preflight --tier vulkan-baseline
+./run-bench.sh --tier vulkan-baseline
+```
+
+This is a one-round pruning pass across all 25 Vulkan configurations: APU-only,
+component/expert placement, forward and reverse layer splits, row splits, wave32
+kernel switches, ubatch sizes, Q8/F16 KV, and MTP draft windows. It uses three
+workloads, an 8192-token server context, 128 generated tokens, a 10-minute Vulkan
+startup limit, and a 5-minute request limit. Fail-fast is intentionally omitted:
+an OOM or unsupported topology is recorded and the remaining configurations run.
+
+The baseline is a feasibility and ranking screen, not final proof. Use its winners
+to prune the three-round placement, tuning, KV, and context tiers; do not run every
+loser at long context. Completed probes can be resumed with the run directory as
+described below.
+
 Bring up ROCm 10 separately before running a large cross-backend matrix:
 
 ```bash
