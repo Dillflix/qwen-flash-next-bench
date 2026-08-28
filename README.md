@@ -71,6 +71,47 @@ This runs three rounds of the expert split and 85/15, 82/18, 80/20, 78/22, and 7
 
 The expert experiments intentionally use `--split-mode layer --tensor-split 1,0`, even though they are not conventional layer splits. In llama.cpp, `--split-mode none` removes every model GPU except `--main-gpu` from the scheduler. Layer mode keeps both Vulkan/ROCm backends registered; `1,0` leaves all ordinary layers on device 0 while `--override-tensor` alone moves PLE and routed-expert tensors to device 1. The harness rejects non-CPU tensor overrides combined with split mode `none` during configuration loading.
 
+Bring up the alternative Vulkan strategies with one short pass:
+
+```bash
+./run-bench.sh --tier strategy-smoke
+```
+
+This compares APU-only, routed-expert, ordinary APU-to-dGPU contiguous layers, reverse dGPU-to-APU layers, and row splitting with intermediate results/KV on each possible main device. Row splitting is expected to be communication-heavy, but measuring both `--main-gpu` choices makes it a useful control rather than an assumption.
+
+If those all load, collect the three-round Vulkan placement sweep:
+
+```bash
+./run-bench.sh --tier placement
+```
+
+The sweep adds 90/10 and 88/12 points around the original 85/15 through 80/20 boundary. Forward layer splits put early layers on the APU and the tail/output on the dGPU; the reverse control tests whether the same approximate dGPU allocation is sensitive to layer order.
+
+Bring up ROCm 10 separately before running a large cross-backend matrix:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-smoke
+./run-bench.sh --tier rocm-smoke --fail-fast
+```
+
+`rocm-smoke` tests APU-only HIP with both the original joined PLE and PLE16 files, an 85/15 heterogeneous layer split, and routed-expert placement. The APU-only controls hide the 7900 XT and enable unified-memory fallback; mixed-GPU experiments expose both devices and deliberately leave the fallback disabled so placement remains measurable.
+
+After bring-up, run the full ROCm placement sweep:
+
+```bash
+./run-bench.sh --tier rocm-placement
+```
+
+It mirrors the Vulkan ratio/order/row tests using `ROCm1` for the 8060S and `ROCm0` for the 7900 XT. Failed high-dGPU ratios remain useful for establishing the ROCm allocation boundary.
+
+ROCm MTP is isolated in a smaller tier that reserves more dGPU headroom:
+
+```bash
+./run-bench.sh --tier rocm-mtp
+```
+
+The target uses a 90/10 APU-to-dGPU layer split and the Q8 MTP sidecar stays on `ROCm0`; n=2, n=3, and n=4 are compared against an otherwise identical non-MTP baseline. If the sidecar still exceeds available VRAM, reduce the target dGPU fraction before changing any other variable.
+
 Benchmark the fork-specific Vulkan kernel and prefill knobs on the expert placement:
 
 ```bash
@@ -111,13 +152,13 @@ Compare the Q8 K/V cache used by the performance candidates against the maximum-
 
 This covers expert and 82/18 layer placement, plus expert MTP n=4. The repeated cache flags in the expanded command are intentional: the per-experiment F16 setting comes last and therefore overrides the Q8 default.
 
-Finally, compare backend/control cases only if useful:
+Finally, compare matched backend/control cases:
 
 ```bash
 ./run-bench.sh --tier backend
 ```
 
-This adds APU-only Vulkan, APU-only ROCm 10 with the joined PLE model and unified-memory fallback, and experimental two-device ROCm tensor routing. The mixed ROCm experiment deliberately does **not** enable global `GGML_CUDA_ENABLE_UNIFIED_MEMORY`; doing so would blur device placement and make the comparison difficult to interpret.
+This pairs Vulkan and ROCm expert, 85/15, and 82/18 placements, then includes APU-only Vulkan and both APU-only ROCm file structures. Compare exact output hashes as well as throughput; backend numerical differences can change a greedy token even when both runs are valid.
 
 The `full` tier is deliberately expensive (five rounds, four prompt depths, 13 configurations). It is a template for final validation, not a sensible first run. Edit its experiment list down to the finalists before using it.
 

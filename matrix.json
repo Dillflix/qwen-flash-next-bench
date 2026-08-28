@@ -172,14 +172,137 @@
       "warmups": 1,
       "rounds": 3
     },
-    "backend": {
-      "description": "Vulkan and ROCm controls plus experimental mixed ROCm placement.",
+    "strategy-smoke": {
+      "description": "One-pass Vulkan comparison of APU-only, component, forward/reverse layer, and row strategies.",
       "experiments": [
+        "apu_vk_no_mtp",
         "expert_vk_no_mtp",
         "layer_82_18_vk_no_mtp",
+        "layer_reverse_18_82_vk_no_mtp",
+        "row_86_14_main_apu_vk_no_mtp",
+        "row_86_14_main_dgpu_vk_no_mtp"
+      ],
+      "workloads": [
+        "code",
+        "json"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 2048,
+      "n_predict": 64,
+      "warmups": 1,
+      "rounds": 1,
+      "settle_seconds": 2
+    },
+    "placement": {
+      "description": "Three-round Vulkan placement sweep around the feasible dGPU boundary.",
+      "experiments": [
+        "expert_vk_no_mtp",
+        "layer_90_10_vk_no_mtp",
+        "layer_88_12_vk_no_mtp",
+        "layer_85_15_vk_no_mtp",
+        "layer_82_18_vk_no_mtp",
+        "layer_80_20_vk_no_mtp",
+        "layer_reverse_18_82_vk_no_mtp",
+        "row_86_14_main_apu_vk_no_mtp",
+        "row_86_14_main_dgpu_vk_no_mtp"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 8192,
+      "n_predict": 256,
+      "warmups": 1,
+      "rounds": 3
+    },
+    "rocm-smoke": {
+      "description": "One-pass ROCm 10 controls and heterogeneous placement bring-up.",
+      "experiments": [
+        "apu_hip_joined_no_mtp",
+        "apu_hip_ple16_no_mtp",
+        "layer_85_15_hip_no_mtp",
+        "expert_hip_no_mtp"
+      ],
+      "workloads": [
+        "code",
+        "json"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 2048,
+      "n_predict": 64,
+      "warmups": 1,
+      "rounds": 1,
+      "settle_seconds": 2
+    },
+    "rocm-placement": {
+      "description": "Three-round ROCm 10 APU, expert, layer-order, ratio, and row sweep.",
+      "experiments": [
+        "apu_hip_joined_no_mtp",
+        "apu_hip_ple16_no_mtp",
+        "expert_hip_no_mtp",
+        "layer_90_10_hip_no_mtp",
+        "layer_88_12_hip_no_mtp",
+        "layer_85_15_hip_no_mtp",
+        "layer_82_18_hip_no_mtp",
+        "layer_80_20_hip_no_mtp",
+        "layer_reverse_18_82_hip_no_mtp",
+        "row_86_14_main_apu_hip_no_mtp",
+        "row_86_14_main_dgpu_hip_no_mtp"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 8192,
+      "n_predict": 256,
+      "warmups": 1,
+      "rounds": 3
+    },
+    "rocm-mtp": {
+      "description": "ROCm layer split with extra dGPU headroom for MTP n=2/3/4.",
+      "experiments": [
+        "layer_90_10_hip_no_mtp",
+        "layer_90_10_hip_mtp_n2",
+        "layer_90_10_hip_mtp_n3",
+        "layer_90_10_hip_mtp_n4"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 8192,
+      "n_predict": 256,
+      "warmups": 1,
+      "rounds": 3
+    },
+    "backend": {
+      "description": "Matched Vulkan and ROCm controls and heterogeneous placements.",
+      "experiments": [
+        "expert_vk_no_mtp",
+        "expert_hip_no_mtp",
+        "layer_85_15_vk_no_mtp",
+        "layer_85_15_hip_no_mtp",
+        "layer_82_18_vk_no_mtp",
+        "layer_82_18_hip_no_mtp",
         "apu_vk_no_mtp",
         "apu_hip_joined_no_mtp",
-        "expert_hip_no_mtp"
+        "apu_hip_ple16_no_mtp"
       ],
       "workloads": [
         "code",
@@ -264,6 +387,75 @@
         "layer",
         "--tensor-split",
         "85,15"
+      ]
+    },
+    {
+      "name": "layer_90_10_vk_no_mtp",
+      "description": "Contiguous Vulkan layer split with extra dGPU headroom.",
+      "extends": "layer_85_15_vk_no_mtp",
+      "args": [
+        "--device",
+        "Vulkan1,Vulkan0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "90,10"
+      ]
+    },
+    {
+      "name": "layer_88_12_vk_no_mtp",
+      "description": "Contiguous Vulkan layer split with moderate dGPU allocation.",
+      "extends": "layer_85_15_vk_no_mtp",
+      "args": [
+        "--device",
+        "Vulkan1,Vulkan0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "88,12"
+      ]
+    },
+    {
+      "name": "layer_reverse_18_82_vk_no_mtp",
+      "description": "Reverse-order Vulkan control: early layers on dGPU, remaining layers and output on APU.",
+      "extends": "layer_85_15_vk_no_mtp",
+      "args": [
+        "--device",
+        "Vulkan0,Vulkan1",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "18,82"
+      ]
+    },
+    {
+      "name": "row_86_14_main_apu_vk_no_mtp",
+      "description": "Vulkan row split with reductions, intermediate results, and KV on the APU.",
+      "extends": "layer_85_15_vk_no_mtp",
+      "args": [
+        "--device",
+        "Vulkan1,Vulkan0",
+        "--split-mode",
+        "row",
+        "--tensor-split",
+        "86,14",
+        "--main-gpu",
+        "0"
+      ]
+    },
+    {
+      "name": "row_86_14_main_dgpu_vk_no_mtp",
+      "description": "Vulkan row split with reductions, intermediate results, and KV on the dGPU.",
+      "extends": "layer_85_15_vk_no_mtp",
+      "args": [
+        "--device",
+        "Vulkan1,Vulkan0",
+        "--split-mode",
+        "row",
+        "--tensor-split",
+        "86,14",
+        "--main-gpu",
+        "1"
       ]
     },
     {
@@ -599,6 +791,177 @@
         "1,0",
         "--override-tensor",
         "^ple_ngram_embd\\.[0-9]+\\.weight$=ROCm1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=ROCm1"
+      ]
+    },
+    {
+      "name": "apu_hip_ple16_no_mtp",
+      "description": "APU-only ROCm control using the PLE16 file for a structure-matched comparison.",
+      "extends": "apu_hip_joined_no_mtp",
+      "model": "{model_ple16}"
+    },
+    {
+      "name": "layer_90_10_hip_no_mtp",
+      "description": "ROCm contiguous layer split with maximum dGPU headroom.",
+      "extends": "expert_hip_no_mtp",
+      "args": [
+        "--device",
+        "ROCm1,ROCm0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "90,10"
+      ]
+    },
+    {
+      "name": "layer_88_12_hip_no_mtp",
+      "description": "ROCm contiguous layer split with substantial dGPU headroom.",
+      "extends": "expert_hip_no_mtp",
+      "args": [
+        "--device",
+        "ROCm1,ROCm0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "88,12"
+      ]
+    },
+    {
+      "name": "layer_85_15_hip_no_mtp",
+      "description": "ROCm contiguous layer split, APU first and dGPU second.",
+      "extends": "expert_hip_no_mtp",
+      "args": [
+        "--device",
+        "ROCm1,ROCm0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "85,15"
+      ]
+    },
+    {
+      "name": "layer_82_18_hip_no_mtp",
+      "description": "ROCm contiguous layer split matching the initial Vulkan winner.",
+      "extends": "expert_hip_no_mtp",
+      "args": [
+        "--device",
+        "ROCm1,ROCm0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "82,18"
+      ]
+    },
+    {
+      "name": "layer_80_20_hip_no_mtp",
+      "description": "ROCm contiguous layer split near the expected dGPU memory boundary.",
+      "extends": "expert_hip_no_mtp",
+      "args": [
+        "--device",
+        "ROCm1,ROCm0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "80,20"
+      ]
+    },
+    {
+      "name": "layer_reverse_18_82_hip_no_mtp",
+      "description": "Reverse-order ROCm control: early layers on dGPU, remaining layers and output on APU.",
+      "extends": "expert_hip_no_mtp",
+      "args": [
+        "--device",
+        "ROCm0,ROCm1",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "18,82"
+      ]
+    },
+    {
+      "name": "row_86_14_main_apu_hip_no_mtp",
+      "description": "ROCm row split with reductions, intermediate results, and KV on the APU.",
+      "extends": "expert_hip_no_mtp",
+      "args": [
+        "--device",
+        "ROCm1,ROCm0",
+        "--split-mode",
+        "row",
+        "--tensor-split",
+        "86,14",
+        "--main-gpu",
+        "0"
+      ]
+    },
+    {
+      "name": "row_86_14_main_dgpu_hip_no_mtp",
+      "description": "ROCm row split with reductions, intermediate results, and KV on the dGPU.",
+      "extends": "expert_hip_no_mtp",
+      "args": [
+        "--device",
+        "ROCm1,ROCm0",
+        "--split-mode",
+        "row",
+        "--tensor-split",
+        "86,14",
+        "--main-gpu",
+        "1"
+      ]
+    },
+    {
+      "name": "layer_90_10_hip_mtp_n2",
+      "description": "90/10 ROCm layer split with MTP sidecar on dGPU and two-token draft window.",
+      "extends": "layer_90_10_hip_no_mtp",
+      "args_append": [
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "ROCm0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "2",
+        "--spec-draft-p-min",
+        "0.75"
+      ]
+    },
+    {
+      "name": "layer_90_10_hip_mtp_n3",
+      "description": "90/10 ROCm layer split with MTP sidecar on dGPU and three-token draft window.",
+      "extends": "layer_90_10_hip_no_mtp",
+      "args_append": [
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "ROCm0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "3",
+        "--spec-draft-p-min",
+        "0.75"
+      ]
+    },
+    {
+      "name": "layer_90_10_hip_mtp_n4",
+      "description": "90/10 ROCm layer split with MTP sidecar on dGPU and four-token draft window.",
+      "extends": "layer_90_10_hip_no_mtp",
+      "args_append": [
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "ROCm0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "4",
+        "--spec-draft-p-min",
+        "0.75"
       ]
     }
   ]

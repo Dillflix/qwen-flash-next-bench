@@ -111,6 +111,7 @@ def load_config(path: pathlib.Path) -> dict[str, Any]:
     config = expand_tree(raw, variables)
     config["experiments"] = resolve_experiment_inheritance(config.get("experiments", []))
     validate_experiment_topologies(config["experiments"])
+    validate_config_references(config)
     return config
 
 
@@ -119,6 +120,8 @@ def resolve_experiment_inheritance(experiments: list[dict[str, Any]]) -> list[di
     by_name = {item.get("name"): item for item in experiments}
     if None in by_name:
         raise ValueError("every experiment requires a name")
+    if len(by_name) != len(experiments):
+        raise ValueError("experiment names must be unique")
     resolved: dict[str, dict[str, Any]] = {}
     visiting: set[str] = set()
 
@@ -172,6 +175,17 @@ def validate_experiment_topologies(experiments: list[dict[str, Any]]) -> None:
                 "llama.cpp prunes every model GPU except --main-gpu. Use layer mode with a "
                 "1,0 tensor split to keep the secondary backend registered."
             )
+
+
+def validate_config_references(config: dict[str, Any]) -> None:
+    experiment_names = {item["name"] for item in config.get("experiments", [])}
+    for tier_name, tier in config.get("tiers", {}).items():
+        selected = tier.get("experiments", [])
+        if not selected:
+            raise ValueError(f"tier {tier_name!r} has no experiments")
+        missing = sorted(set(selected) - experiment_names)
+        if missing:
+            raise ValueError(f"tier {tier_name!r} references unknown experiments: {missing}")
 
 
 def read_jsonl(path: pathlib.Path) -> list[dict[str, Any]]:

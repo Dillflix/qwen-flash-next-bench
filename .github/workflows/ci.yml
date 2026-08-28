@@ -24,3 +24,4 @@ jobs:
           python qwen_bench.py self-test
           python -m json.tool matrix.json >/dev/null
           python -m json.tool prompts.json >/dev/null
+          python -c 'import pathlib, qwen_bench; qwen_bench.load_config(pathlib.Path("matrix.json"))'
