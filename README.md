@@ -19,8 +19,12 @@ For every measured completion the harness records:
 - the observed speed and width of PCIe bridge `c5:00.0` during the request;
 - the exact server command, environment-specific device listing, git revision, OS, PCI, Vulkan, ROCm, and AMD SMI diagnostics.
 
-Warm-ups are excluded. Measured throughput runs use temperature zero, `top_k=1`,
-`cache_prompt=false`, `ignore_eos=true`, and a fixed seed. Ignoring EOS is required
+Warm-ups are excluded from rankings and recorded separately in `warmups.jsonl`.
+The current hot tiers use a nonzero-depth warm-up, then erase the llama-server
+slot after every request. This retains file pages and compiled kernels while
+preventing target or draft KV reuse from contaminating the next prefill result.
+Measured throughput runs use temperature zero, `top_k=1`, `cache_prompt=false`,
+`ignore_eos=true`, and a fixed seed. Ignoring EOS is required
 for fixed-length decode timing: otherwise naturally short JSON/code answers report
 zero or incomparable throughput. A response producing less than 95% of the requested
 tokens is marked invalid, excluded from summaries, and retried when a run is resumed.
@@ -217,25 +221,45 @@ workload matrix. The 4096 cell explicitly sets both batch and ubatch to 4096; th
 `--load-mode mmap` is already the harness default, but `=CPU` alone does not prove
 that the n-gram table is being served from SSD rather than resident RAM. The exact
 tensor name also differs between the original joined GGUF and this repository's
-Vulkan-compatible PLE16 file. Run the three-cell residency test:
+Vulkan-compatible PLE16 file. Run the hot two-cell residency and throughput test:
 
 ```bash
 python3 qwen_bench.py preflight --tier vulkan-ple-ssd
 ./run-bench.sh --tier vulkan-ple-ssd
 ```
 
-The control uses PLE16 automatic placement. Candidate one applies
-`^ple_ngram_embd\.[0-9]+\.weight$=CPU` to all PLE16 shards. Candidate two uses the
-original joined GGUF with `^per_layer_token_embd\.weight$=CPU`, which should also
-bypass Vulkan's per-buffer size limit if the override matches before allocation.
-Everything else stays at 82/18, F16 KV, dGPU MTP n=4, p-min 0.75, and ubatch 2048.
+The control uses PLE16 automatic placement. The candidate applies
+`^ple_ngram_embd\.[0-9]+\.weight$=CPU` to all PLE16 shards. Everything else stays
+at 82/18, F16 KV, dGPU MTP n=4, p-min 0.75, and ubatch 2048. Each server receives
+an excluded 4K warm-up; its slot is erased before measured 4K, 16K, and 32K
+prefills. Physical reads and faults in each measured row verify whether the page
+working set was actually hot.
 
-Two rotated rounds measure one code workload at approximately 4K and 16K depth.
-The summary includes file-backed versus anonymous process RSS, storage bytes read,
-and major page faults alongside prefill/decode. File-backed RSS is reclaimable;
-nonzero storage reads and major faults demonstrate actual backing-store traffic.
-Page-cache temperature still affects the absolute I/O figures, so compare both
-rounds rather than treating a warm-cache zero as proof that no SSD mapping exists.
+The original joined GGUF is no longer part of the tier. Its matched CPU override
+still makes Vulkan reserve a roughly 55 GiB compute buffer on the iGPU, including
+a single roughly 6.8 GiB allocation that exceeds the backend limit. PLE16 is the
+required split representation for this Vulkan path.
+
+Cold first-request behavior is intentionally kept out of the hot throughput
+ranking. Measure it separately, with one prompt depth per server:
+
+```bash
+python3 qwen_bench.py preflight --tier vulkan-ple-ssd-cold-4k
+./run-bench.sh --tier vulkan-ple-ssd-cold-4k
+
+python3 qwen_bench.py preflight --tier vulkan-ple-ssd-cold-16k
+./run-bench.sh --tier vulkan-ple-ssd-cold-16k
+```
+
+These tiers do not globally drop Linux caches. Treat a sample as physically cold
+only when its storage-read and major-fault counters confirm it; "server-cold" is
+not necessarily "page-cache-cold." Run the 4K and 16K tiers independently after
+the file pages have been reclaimed; running them back-to-back normally makes the
+second one hot. Each cold tier uses one round with the CPU/mmap candidate first.
+The summary reports file-backed and anonymous RSS, host available/cached memory,
+per-device VRAM/GTT peaks, storage bytes read, and major faults. File-backed cache
+is reclaimable, so capacity conclusions should use `MemAvailable` and device
+allocations rather than process RSS alone.
 
 ### Focused 7900 XT prefill screen
 
@@ -360,6 +384,7 @@ Each run directory contains:
 manifest.json          expanded config and exact command for every experiment
 preflight.json         paths, file sizes, DRM mapping, memory and process checks
 results.jsonl          durable machine-readable result stream
+warmups.jsonl          excluded warm-up timings, I/O, faults, and slot erasure
 summary.csv            one median row per experiment/workload/depth
 summary.md             human-readable ranking and failure list
 logs/                  complete stdout/stderr for each server start
@@ -368,7 +393,11 @@ telemetry/             raw one-second telemetry samples
 system/                device listings and host/software provenance
 ```
 
-In `summary.csv`, `gpu_busy_mean` and `gpu_vram_max_gib` are JSON maps keyed by PCI BDF, which avoids assuming that Linux card numbering is stable. The 7900 XT should map to `0000:c7:00.0` in the current topology; verify this in `preflight.json` rather than hard-coding it in analysis.
+In `summary.csv`, `gpu_busy_mean`, `gpu_vram_max_gib`, and `gpu_gtt_max_gib` are
+JSON maps keyed by PCI BDF, which avoids assuming that Linux card numbering is
+stable. The Markdown summary also includes a dedicated residency/capacity table.
+The 7900 XT should map to `0000:c7:00.0` in the current topology; verify this in
+`preflight.json` rather than hard-coding it in analysis.
 
 `pcie_speed_gt_s_max=16` and `pcie_width_lanes_max=4` would confirm the expected Gen4 ×4 host uplink under load. If the request telemetry never rises above 2.5 GT/s ×1, inspect the raw telemetry and `lspci` output before drawing any conclusion about the split. The sampler first uses non-interactive `lspci`; it never prompts for `sudo`.
 

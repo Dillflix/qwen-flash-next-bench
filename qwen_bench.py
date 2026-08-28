@@ -27,6 +27,7 @@ import socket
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -36,7 +37,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.10.1"
+VERSION = "1.11.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -627,6 +628,7 @@ def aggregate_telemetry(samples: list[dict[str, Any]]) -> dict[str, Any]:
     rss: list[float] = []
     process_values: dict[str, list[float]] = defaultdict(list)
     available: list[float] = []
+    cached: list[float] = []
     link_speeds: list[float] = []
     link_widths: list[float] = []
     for sample in samples:
@@ -638,6 +640,9 @@ def aggregate_telemetry(samples: list[dict[str, Any]]) -> dict[str, Any]:
         host_available = sample.get("host", {}).get("MemAvailable")
         if isinstance(host_available, (int, float)):
             available.append(float(host_available))
+        host_cached = sample.get("host", {}).get("Cached")
+        if isinstance(host_cached, (int, float)):
+            cached.append(float(host_cached))
         for bdf, gpu in sample.get("gpus", {}).items():
             for field in (
                 "gpu_busy_percent", "vram_used_bytes", "gtt_used_bytes", "power_w", "temp_c",
@@ -663,6 +668,10 @@ def aggregate_telemetry(samples: list[dict[str, Any]]) -> dict[str, Any]:
             result[f"pid_{field}_delta"] = int(max(values) - min(values))
     if available:
         result["mem_available_min_bytes"] = int(min(available))
+        result["mem_available_max_bytes"] = int(max(available))
+    if cached:
+        result["host_cached_min_bytes"] = int(min(cached))
+        result["host_cached_max_bytes"] = int(max(cached))
     for bdf, fields in gpu_values.items():
         aggregate: dict[str, Any] = {}
         busy = fields.get("gpu_busy_percent", [])
@@ -836,6 +845,27 @@ def completion_request(
     return response, wall_ms
 
 
+def response_slot_id(response: dict[str, Any]) -> int:
+    """Return the llama-server slot used by a completion response."""
+    for field in ("id_slot", "slot_id"):
+        value = response.get(field)
+        if isinstance(value, int) and value >= 0:
+            return value
+    # Every checked-in experiment uses --parallel 1. Older server responses
+    # did not expose the slot id, so slot zero is the only possible target.
+    return 0
+
+
+def erase_slot(base_url: str, slot_id: int, timeout_s: float) -> dict[str, Any]:
+    """Erase target/draft KV state without disturbing model or OS page caches."""
+    status, response = http_json(
+        "POST", f"{base_url}/slots/{slot_id}?action=erase", None, timeout=min(timeout_s, 30.0),
+    )
+    if status != 200:
+        raise RuntimeError(f"slot {slot_id} erase returned HTTP {status}: {response}")
+    return response if isinstance(response, dict) else {"response": response}
+
+
 def run_capture(command: list[str], env: dict[str, str] | None = None, timeout: float = 30) -> dict[str, Any]:
     try:
         completed = subprocess.run(
@@ -915,12 +945,23 @@ def preflight(
     available = meminfo().get("MemAvailable")
     if available is not None and available < int(defaults.get("warn_mem_available_bytes", 32 * 1024**3)):
         warnings.append(f"MemAvailable is only {available / 1024**3:.1f} GiB before model load")
+    cache_state = str(tier.get("cache_state", "unspecified"))
+    if cache_state not in {"unspecified", "hot", "cold"}:
+        errors.append(f"unsupported cache_state {cache_state!r}; expected hot, cold, or unspecified")
+    if cache_state == "hot":
+        if int(tier.get("warmups", 0)) < 1 or int(tier.get("warmup_depth", 0)) <= 0:
+            errors.append("hot tiers require at least one nonzero-depth warm-up")
+        if not bool(tier.get("erase_slot_between_requests", defaults.get("erase_slot_between_requests", False))):
+            errors.append("hot tiers must erase slot KV state between warm-up and measured requests")
+    if cache_state == "cold" and int(tier.get("warmups", 0)) != 0:
+        errors.append("cold tiers must set warmups to 0")
     report = {
         "ts": utc_now(),
         "version": VERSION,
         "host": host,
         "port": port,
         "tier": tier,
+        "cache_state": cache_state,
         "experiments": [item["name"] for item in experiments],
         "files": files,
         "drm_cards": discover_drm_cards(),
@@ -1078,6 +1119,9 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
     n_predict = int(tier.get("n_predict", 128))
     request_timeout_s = float(tier.get("request_timeout_s", defaults.get("request_timeout_s", 900)))
     warmups = int(tier.get("warmups", 1))
+    erase_between_requests = bool(
+        tier.get("erase_slot_between_requests", defaults.get("erase_slot_between_requests", False))
+    )
     extra_request = effective_request
     stop_event = threading.Event()
 
@@ -1130,14 +1174,34 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                         time.sleep(settle)
                     warmup_depth = int(tier.get("warmup_depth", 0))
                     warm_prompt = make_prompt(workloads_all[workload_names[0]], warmup_depth, corpus)
-                    for _ in range(warmups):
-                        completion_request(
+                    for warmup_index in range(warmups):
+                        mark = server.telemetry.mark() if server.telemetry else 0
+                        warm_response, warm_wall_ms = completion_request(
                             base_url + "/completion",
                             warm_prompt,
                             min(32, n_predict),
                             request_timeout_s,
                             extra_request,
                         )
+                        samples = server.telemetry.slice(mark) if server.telemetry else []
+                        warm_row = {
+                            "schema": 1,
+                            "status": "warmup",
+                            "ts": utc_now(),
+                            "run_id": run_id,
+                            "experiment": experiment["name"],
+                            "round": round_index,
+                            "warmup": warmup_index,
+                            "requested_depth_tokens": warmup_depth,
+                            "http_wall_ms": round(warm_wall_ms, 3),
+                            "timing": extract_timing(warm_response),
+                            "telemetry": aggregate_telemetry(samples),
+                        }
+                        if erase_between_requests:
+                            warm_row["slot_erase"] = erase_slot(
+                                base_url, response_slot_id(warm_response), request_timeout_s,
+                            )
+                        append_jsonl(run_dir / "warmups.jsonl", warm_row)
                     for workload, depth in pending:
                         if stop_event.is_set():
                             break
@@ -1154,6 +1218,10 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                         response_name = f"{suffix}-{safe_name(workload)}-d{depth}.json"
                         atomic_json(run_dir / "responses" / response_name, response)
                         row["response_file"] = str(pathlib.Path("responses") / response_name)
+                        if erase_between_requests:
+                            row["slot_erase"] = erase_slot(
+                                base_url, response_slot_id(response), request_timeout_s,
+                            )
                         append_jsonl(results_path, row)
                         completed.add((round_index, experiment["name"], workload, depth))
                         speed = row["timing"].get("predicted_per_second")
@@ -1250,6 +1318,7 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
                 matches.append(row["output_sha256"] == baseline_hashes[key])
         gpu_busy: dict[str, list[float]] = defaultdict(list)
         gpu_vram: dict[str, list[float]] = defaultdict(list)
+        gpu_gtt: dict[str, list[float]] = defaultdict(list)
         gpu_power: dict[str, list[float]] = defaultdict(list)
         gpu_temp: dict[str, list[float]] = defaultdict(list)
         gpu_pcie_rx: dict[str, list[float]] = defaultdict(list)
@@ -1260,6 +1329,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         rss_anon: list[float] = []
         storage_read: list[float] = []
         major_faults: list[float] = []
+        mem_available: list[float] = []
+        host_cached: list[float] = []
         for row in rows:
             telemetry = row.get("telemetry", {})
             if isinstance(telemetry.get("pid_rss_file_max_bytes"), (int, float)):
@@ -1270,11 +1341,17 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
                 storage_read.append(float(telemetry["pid_read_bytes_delta"]))
             if isinstance(telemetry.get("pid_major_faults_delta"), (int, float)):
                 major_faults.append(float(telemetry["pid_major_faults_delta"]))
+            if isinstance(telemetry.get("mem_available_min_bytes"), (int, float)):
+                mem_available.append(float(telemetry["mem_available_min_bytes"]))
+            if isinstance(telemetry.get("host_cached_max_bytes"), (int, float)):
+                host_cached.append(float(telemetry["host_cached_max_bytes"]))
             for bdf, gpu in telemetry.get("gpus", {}).items():
                 if isinstance(gpu.get("busy_mean_percent"), (int, float)):
                     gpu_busy[bdf].append(float(gpu["busy_mean_percent"]))
                 if isinstance(gpu.get("vram_used_max_bytes"), (int, float)):
                     gpu_vram[bdf].append(float(gpu["vram_used_max_bytes"]))
+                if isinstance(gpu.get("gtt_used_max_bytes"), (int, float)):
+                    gpu_gtt[bdf].append(float(gpu["gtt_used_max_bytes"]))
                 if isinstance(gpu.get("power_w_mean"), (int, float)):
                     gpu_power[bdf].append(float(gpu["power_w_mean"]))
                 if isinstance(gpu.get("temp_c_max"), (int, float)):
@@ -1308,8 +1385,11 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             "rss_anon_max_gib_median": median_or_none(value / 1024**3 for value in rss_anon),
             "storage_read_gib_median": median_or_none(value / 1024**3 for value in storage_read),
             "major_faults_median": median_or_none(major_faults),
+            "mem_available_min_gib_median": median_or_none(value / 1024**3 for value in mem_available),
+            "host_cached_max_gib_median": median_or_none(value / 1024**3 for value in host_cached),
             "gpu_busy_mean": json.dumps({bdf: round(statistics.fmean(vals), 2) for bdf, vals in gpu_busy.items()}, sort_keys=True),
             "gpu_vram_max_gib": json.dumps({bdf: round(max(vals) / 1024**3, 2) for bdf, vals in gpu_vram.items()}, sort_keys=True),
+            "gpu_gtt_max_gib": json.dumps({bdf: round(max(vals) / 1024**3, 2) for bdf, vals in gpu_gtt.items()}, sort_keys=True),
             "gpu_power_mean_w": json.dumps({bdf: round(statistics.fmean(vals), 2) for bdf, vals in gpu_power.items()}, sort_keys=True),
             "gpu_temp_max_c": json.dumps({bdf: round(max(vals), 1) for bdf, vals in gpu_temp.items()}, sort_keys=True),
             "gpu_pcie_rx_est_max_mib_s": json.dumps({bdf: round(max(vals) / 1024**2, 2) for bdf, vals in gpu_pcie_rx.items()}, sort_keys=True),
@@ -1366,6 +1446,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
     md = [
         f"# Benchmark summary: {run_dir.name}\n\n",
         f"Baseline for output hashes: `{baseline_name}`. Medians exclude warm-ups and degenerate responses.\n\n",
+        f"Declared cache state: `{load_json(run_dir / 'manifest.json').get('tier', {}).get('cache_state', 'unspecified')}`. "
+        "Physical storage reads and major faults remain authoritative; a declared hot run is not hot if those counters stay high.\n\n",
         "## Overall comparable-cell ranking\n\n",
         "| Experiment | Cells | Decode speedup | Prefill speedup | Balanced | Hash match | Median MTP accept |\n",
         "|---|---:|---:|---:|---:|---:|---:|\n",
@@ -1393,6 +1475,18 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             f"| {row['experiment']} | {row['workload']} | {row['depth_tokens_requested']} | {fmt(row['prefill_tokens_median'], 0)} | {row['samples']} | "
             f"{fmt(row['decode_tok_s_median'])} | {fmt(row['prompt_tok_s_median'])} | {fmt(row['prefill_ms_median'])} | {accept} | {match} | "
             f"{fmt(row['rss_file_max_gib_median'])} | {fmt(row['storage_read_gib_median'])} | {fmt(row['major_faults_median'], 0)} | {pcie} |\n"
+        )
+    md.extend([
+        "\n## Residency and capacity telemetry\n\n",
+        "Host available memory includes reclaimable cache. GPU maps are keyed by PCI BDF.\n\n",
+        "| Experiment | Workload | Depth | Host available min GiB | Host cached max GiB | Anon RSS GiB | GPU VRAM max GiB | GPU GTT max GiB |\n",
+        "|---|---:|---:|---:|---:|---:|---|---|\n",
+    ])
+    for row in ranked:
+        md.append(
+            f"| {row['experiment']} | {row['workload']} | {row['depth_tokens_requested']} | "
+            f"{fmt(row['mem_available_min_gib_median'])} | {fmt(row['host_cached_max_gib_median'])} | "
+            f"{fmt(row['rss_anon_max_gib_median'])} | {row['gpu_vram_max_gib']} | {row['gpu_gtt_max_gib']} |\n"
         )
     failures = [row for row in results if row.get("status") not in SUCCESS_STATES]
     if failures:
@@ -1463,7 +1557,7 @@ def self_test() -> None:
                 "read_bytes": 100,
                 "major_faults": 4,
             },
-            "host": {"MemAvailable": 100},
+            "host": {"MemAvailable": 100, "Cached": 50},
             "gpus": {"0000:01:00.0": {"gpu_busy_percent": 50, "vram_used_bytes": 20, "gtt_used_bytes": 2}},
             "pcie": {"speed_gt_s": 16.0, "width_lanes": 4},
         },
@@ -1475,7 +1569,7 @@ def self_test() -> None:
                 "read_bytes": 140,
                 "major_faults": 7,
             },
-            "host": {"MemAvailable": 90},
+            "host": {"MemAvailable": 90, "Cached": 60},
             "gpus": {},
             "pcie": {},
         },
@@ -1484,6 +1578,36 @@ def self_test() -> None:
     assert aggregate["pid_rss_file_max_bytes"] == 25
     assert aggregate["pid_read_bytes_delta"] == 40
     assert aggregate["pid_major_faults_delta"] == 3
+    assert aggregate["mem_available_min_bytes"] == 90
+    assert aggregate["host_cached_max_bytes"] == 60
+    assert response_slot_id({"id_slot": 3}) == 3
+    assert response_slot_id({}) == 0
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        summary_root = pathlib.Path(raw_tmp)
+        atomic_json(summary_root / "manifest.json", {"tier": {"cache_state": "hot"}})
+        append_jsonl(summary_root / "results.jsonl", {
+            "status": "ok",
+            "experiment": "test",
+            "workload": "code",
+            "requested_depth_tokens": 4096,
+            "round": 0,
+            "output_sha256": "abc",
+            "http_wall_ms": 1.0,
+            "server_startup_seconds": 2.0,
+            "degenerate": False,
+            "timing": {
+                "predicted_per_second": 10.0,
+                "prompt_per_second": 20.0,
+                "prompt_n": 4096,
+                "prompt_ms": 204.8,
+                "draft_acceptance": 0.75,
+            },
+            "telemetry": aggregate,
+        })
+        summarize(summary_root, {}, [{"name": "test", "baseline": True}])
+        rendered = (summary_root / "summary.md").read_text(encoding="utf-8")
+        assert "Declared cache state: `hot`" in rendered
+        assert "Residency and capacity telemetry" in rendered
     inherited = resolve_experiment_inheritance([
         {"name": "base", "args": ["a"], "env": {"X": "1"}},
         {"name": "child", "extends": "base", "args_append": ["b"], "env": {"Y": "2"}},
