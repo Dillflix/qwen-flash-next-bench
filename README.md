@@ -78,6 +78,20 @@ part of the recommended campaign.
 
 The expert experiments intentionally use `--split-mode layer --tensor-split 1,0`, even though they are not conventional layer splits. In llama.cpp, `--split-mode none` removes every model GPU except `--main-gpu` from the scheduler. Layer mode keeps both Vulkan/ROCm backends registered; `1,0` leaves all ordinary layers on device 0 while `--override-tensor` alone moves PLE and routed-expert tensors to device 1. The harness rejects non-CPU tensor overrides combined with split mode `none` during configuration loading.
 
+The original expert strategy does not move the shared experts. To directly test
+PLE plus routed and shared experts on the iGPU, with attention and remaining target
+tensors on the 7900 XT, run:
+
+```bash
+python3 qwen_bench.py preflight --tier vulkan-expert-shared
+./run-bench.sh --tier vulkan-expert-shared
+```
+
+This is a two-cell F16-KV A/B, not another broad placement sweep. The control moves
+only PLE and `ffn_*_exps`; the candidate additionally moves `ffn_*_shexp` and
+`ffn_gate_inp_shexp`. Both use identical code/prose prompts at approximately 4K
+and 16K depth, an excluded 16K warm-up, and 128 forced output tokens.
+
 Bring up the alternative Vulkan strategies with one short pass:
 
 ```bash
@@ -144,6 +158,26 @@ index 0 is the iGPU, so 100% of target weights remain there. Layer scheduling is
 enabled only to keep Vulkan0 registered for `--spec-draft-device Vulkan0`; Vulkan0
 is the 7900 XT and receives only the draft sidecar. All three configurations use
 the same workloads, base/~4K/~16K prompt depths, 32K context, and 128-token output.
+
+### F16 KV: MTP device and target-placement decision
+
+The earlier MTP tests always put the draft sidecar on Vulkan0 (the 7900 XT); they
+did not compare it with MTP on Vulkan1 (the iGPU). Run the direct six-cell matrix:
+
+```bash
+python3 qwen_bench.py preflight --tier vulkan-f16-mtp-placement
+./run-bench.sh --tier vulkan-f16-mtp-placement
+```
+
+This holds F16 K/V cache, prompts, and output length constant while crossing two
+target placements (entire target on the iGPU, or the proven 82/18 iGPU/dGPU layer
+split) with three draft choices (no MTP, MTP on the iGPU, or MTP on the 7900 XT).
+It measures code, JSON, and prose at approximately 4K and 16K prompt depth, with
+one excluded 16K warm-up and 512 forced output tokens. The longer output makes
+total request time, decode throughput, draft acceptance, and prefill overhead
+directly comparable. Fail-fast is intentionally omitted: the 82/18 target plus
+dGPU MTP cell may exceed the 7900 XT's available VRAM, and that failure is useful
+capacity data while the remaining cells continue.
 
 ### Focused 7900 XT prefill screen
 

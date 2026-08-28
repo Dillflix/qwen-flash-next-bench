@@ -36,7 +36,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.6.1"
+VERSION = "1.7.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",

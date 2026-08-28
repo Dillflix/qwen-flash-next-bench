@@ -281,6 +281,57 @@
       "startup_timeout_s": 600,
       "request_timeout_s": 600
     },
+    "vulkan-f16-mtp-placement": {
+      "description": "Direct F16-KV comparison of no MTP, iGPU MTP, and 7900 XT MTP for the all-iGPU and 82/18 target placements.",
+      "experiments": [
+        "apu_vk_f16kv_no_mtp",
+        "apu_vk_mtp_n4_f16kv_igpu",
+        "apu_vk_mtp_n4_f16kv_dgpu",
+        "layer_82_18_vk_f16kv_no_mtp",
+        "layer_82_18_vk_mtp_n4_f16kv_igpu",
+        "layer_82_18_vk_mtp_n4_f16kv_dgpu"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        4096,
+        16384
+      ],
+      "ctx_size": 32768,
+      "n_predict": 512,
+      "warmups": 1,
+      "warmup_depth": 16384,
+      "rounds": 1,
+      "settle_seconds": 2,
+      "startup_timeout_s": 600,
+      "request_timeout_s": 900
+    },
+    "vulkan-expert-shared": {
+      "description": "Focused F16-KV A/B of routed-expert-only versus routed-plus-shared-expert placement on the iGPU, with remaining target tensors on the 7900 XT.",
+      "experiments": [
+        "expert_vk_f16kv_no_mtp",
+        "expert_shared_vk_f16kv_no_mtp"
+      ],
+      "workloads": [
+        "code",
+        "prose"
+      ],
+      "depths": [
+        4096,
+        16384
+      ],
+      "ctx_size": 32768,
+      "n_predict": 128,
+      "warmups": 1,
+      "warmup_depth": 16384,
+      "rounds": 1,
+      "settle_seconds": 2,
+      "startup_timeout_s": 600,
+      "request_timeout_s": 900
+    },
     "vulkan-prefill": {
       "description": "Prefill-only screen of structurally distinct ways to use the 7900 XT with a fixed iGPU baseline.",
       "experiments": [
@@ -452,6 +503,24 @@
         "1,0",
         "--override-tensor",
         "^ple_ngram_embd\\.[0-9]+\\.weight$=Vulkan1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=Vulkan1"
+      ]
+    },
+    {
+      "name": "expert_shared_vk_no_mtp",
+      "description": "APU owns PLE, routed experts, shared-expert matrices, and the shared-expert gate; dGPU owns remaining target tensors.",
+      "backend": "vulkan",
+      "baseline": false,
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan0,Vulkan1",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "1,0",
+        "--override-tensor",
+        "^ple_ngram_embd\\.[0-9]+\\.weight$=Vulkan1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_(exps|shexp)\\.weight$=Vulkan1,^blk\\.[0-9]+\\.ffn_gate_inp_shexp\\.weight$=Vulkan1"
       ]
     },
     {
@@ -744,6 +813,17 @@
       ]
     },
     {
+      "name": "expert_shared_vk_f16kv_no_mtp",
+      "description": "Routed-plus-shared-expert placement with F16 K/V cache.",
+      "extends": "expert_shared_vk_no_mtp",
+      "args_append": [
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
+      ]
+    },
+    {
       "name": "layer_82_18_vk_no_mtp",
       "description": "Contiguous Vulkan layer split, APU first and dGPU second.",
       "backend": "vulkan",
@@ -939,6 +1019,26 @@
       ]
     },
     {
+      "name": "layer_82_18_vk_mtp_n4_f16kv_dgpu",
+      "description": "82/18 target placement with F16 K/V cache and Q8 MTP n=4 on the 7900 XT.",
+      "extends": "layer_82_18_vk_mtp_n4",
+      "args_append": [
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
+      ]
+    },
+    {
+      "name": "layer_82_18_vk_mtp_n4_f16kv_igpu",
+      "description": "82/18 target placement with F16 K/V cache and Q8 MTP n=4 on the iGPU.",
+      "extends": "layer_82_18_vk_mtp_n4_f16kv_dgpu",
+      "args_append": [
+        "--spec-draft-device",
+        "Vulkan1"
+      ]
+    },
+    {
       "name": "expert_vk_mtp_n4_f16kv",
       "description": "Expert MTP n=4 placement with F16 target K/V cache.",
       "extends": "expert_vk_mtp_n4",
@@ -1012,6 +1112,43 @@
       "description": "Entire target model on the iGPU with F16 K/V cache and the Q8 MTP sidecar on the 7900 XT.",
       "extends": "apu_vk_mtp_n4",
       "args_append": [
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
+      ]
+    },
+    {
+      "name": "apu_vk_mtp_n4_f16kv_dgpu",
+      "description": "Explicit alias for the all-iGPU target with F16 K/V cache and Q8 MTP n=4 on the 7900 XT.",
+      "extends": "apu_vk_mtp_n4_f16kv"
+    },
+    {
+      "name": "apu_vk_mtp_n4_f16kv_igpu",
+      "description": "Entire target model and Q8 MTP n=4 sidecar on the iGPU with F16 K/V cache.",
+      "backend": "vulkan",
+      "baseline": false,
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan1",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "none",
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "Vulkan1",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "4",
+        "--spec-draft-p-min",
+        "0.75",
         "--cache-type-k",
         "f16",
         "--cache-type-v",
