@@ -454,6 +454,20 @@ slow-lane decode, fairness, host cached GiB, storage-read GiB, and major faults.
 Q8 KV is a production candidate only if it restores residency and passes output
 quality validation; it is not assumed equivalent to F16.
 
+Once Q8 KV has eliminated storage reads, sweep the remaining greedy-prefill time
+slice without reintroducing the F16 memory bottleneck:
+
+```bash
+./run-bench.sh --tier production-concurrency-q8-timeslice --fail-fast
+```
+
+This compares matched batch/ubatch sizes 2048, 1024, 512, and 256. Smaller
+batches return control to the shared slot scheduler more frequently, which may
+protect a user's decode while the other user is prefilling, at the cost of some
+peak prompt throughput. Choose by slow-lane decode and end-to-end latency first,
+then conservative prefill; aggregate throughput alone can hide an unusable
+interactive lane.
+
 Only after smoke passes, validate the actual context target:
 
 ```bash

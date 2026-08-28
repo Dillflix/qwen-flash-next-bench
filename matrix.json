@@ -629,6 +629,33 @@
       "startup_timeout_s": 1800,
       "request_timeout_s": 3600
     },
+    "production-concurrency-q8-timeslice": {
+      "description": "Q8-KV two-user 32K sweep of matched logical/physical batches, trading prefill graph length for interactive decode fairness.",
+      "cache_state": "hot",
+      "experiments": [
+        "prod_88_12_vk_mtp_n4_q8kv_dgpu_b2048_ub2048_ple16_cpu",
+        "prod_88_12_vk_mtp_n4_q8kv_dgpu_b1024_ub1024_ple16_cpu",
+        "prod_88_12_vk_mtp_n4_q8kv_dgpu_b512_ub512_ple16_cpu",
+        "prod_88_12_vk_mtp_n4_q8kv_dgpu_b256_ub256_ple16_cpu"
+      ],
+      "workloads": [
+        "code",
+        "prose"
+      ],
+      "depths": [
+        32768
+      ],
+      "ctx_size": 524288,
+      "n_predict": 128,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "concurrency": 2,
+      "exact_prompt_tokens": true,
+      "settle_seconds": 5,
+      "startup_timeout_s": 1800,
+      "request_timeout_s": 3600
+    },
     "rocm-smoke": {
       "description": "Gated ROCm 10 APU-only bring-up with PLE mmap on CPU; never runs until the custom FP4 backend-op audit passes.",
       "require_rocm_audit": true,
@@ -1439,6 +1466,54 @@
         "q8_0",
         "--cache-type-v",
         "q8_0"
+      ]
+    },
+    {
+      "name": "prod_88_12_vk_mtp_n4_q8kv_dgpu_b2048_ub2048_ple16_cpu",
+      "description": "Separate Q8 target KV with the original matched batch and ubatch 2048.",
+      "extends": "prod_88_12_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu",
+      "baseline": true,
+      "args_append": [
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0"
+      ]
+    },
+    {
+      "name": "prod_88_12_vk_mtp_n4_q8kv_dgpu_b1024_ub1024_ple16_cpu",
+      "description": "Q8 target KV with a 1024-token prefill time slice.",
+      "extends": "prod_88_12_vk_mtp_n4_q8kv_dgpu_b2048_ub2048_ple16_cpu",
+      "baseline": false,
+      "args_append": [
+        "--batch-size",
+        "1024",
+        "--ubatch-size",
+        "1024"
+      ]
+    },
+    {
+      "name": "prod_88_12_vk_mtp_n4_q8kv_dgpu_b512_ub512_ple16_cpu",
+      "description": "Q8 target KV with a 512-token prefill time slice.",
+      "extends": "prod_88_12_vk_mtp_n4_q8kv_dgpu_b2048_ub2048_ple16_cpu",
+      "baseline": false,
+      "args_append": [
+        "--batch-size",
+        "512",
+        "--ubatch-size",
+        "512"
+      ]
+    },
+    {
+      "name": "prod_88_12_vk_mtp_n4_q8kv_dgpu_b256_ub256_ple16_cpu",
+      "description": "Q8 target KV with a 256-token prefill time slice, prioritizing decode latency over peak prefill throughput.",
+      "extends": "prod_88_12_vk_mtp_n4_q8kv_dgpu_b2048_ub2048_ple16_cpu",
+      "baseline": false,
+      "args_append": [
+        "--batch-size",
+        "256",
+        "--ubatch-size",
+        "256"
       ]
     },
     {
