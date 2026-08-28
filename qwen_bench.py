@@ -212,10 +212,16 @@ def parse_selector(selector: str | None) -> list[str]:
 
 def select_experiments(config: dict[str, Any], tier: dict[str, Any], selector: str | None) -> list[dict[str, Any]]:
     requested = parse_selector(selector)
-    tier_names = set(tier.get("experiments", []))
-    experiments = [item for item in config.get("experiments", []) if item.get("enabled", True)]
+    enabled = {
+        item["name"]: item for item in config.get("experiments", []) if item.get("enabled", True)
+    }
+    tier_names = list(tier.get("experiments", []))
     if tier_names:
-        experiments = [item for item in experiments if item["name"] in tier_names]
+        # Tier order is operational: cheap controls and likely-to-load cases can
+        # intentionally precede experimental placements when --fail-fast is used.
+        experiments = [enabled[name] for name in tier_names if name in enabled]
+    else:
+        experiments = list(enabled.values())
     if requested:
         experiments = [
             item for item in experiments
@@ -1260,6 +1266,12 @@ def self_test() -> None:
         pass
     else:
         raise AssertionError("non-primary tensor override with split-mode none was not rejected")
+    ordered = select_experiments(
+        {"experiments": [{"name": "a"}, {"name": "b"}]},
+        {"experiments": ["b", "a"]},
+        None,
+    )
+    assert [item["name"] for item in ordered] == ["b", "a"]
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 
