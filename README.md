@@ -145,6 +145,26 @@ enabled only to keep Vulkan0 registered for `--spec-draft-device Vulkan0`; Vulka
 is the 7900 XT and receives only the draft sidecar. All three configurations use
 the same workloads, base/~4K/~16K prompt depths, 32K context, and 128-token output.
 
+### Focused 7900 XT prefill screen
+
+MTP does not accelerate target-model prefill: the target remains on the iGPU and
+the draft model can add its own prompt-processing work. Test target prefill
+placement separately:
+
+```bash
+python3 qwen_bench.py preflight --tier vulkan-prefill
+./run-bench.sh --tier vulkan-prefill
+```
+
+This screen keeps Q8 KV and disables MTP everywhere. It compares APU-only against
+one representative contiguous split, the component/expert split, reverse layers,
+and both row modes. These are structurally distinct; neighboring layer ratios are
+not repeated. One fixed code prompt is measured at approximately 4K and 16K depth.
+Each server first processes the same 16K prompt as an excluded warm-up, preventing
+cold page-cache/shader effects from masquerading as a placement result. Generation
+is limited to eight forced tokens and is diagnostic only; rank this tier by prefill
+tok/s and prefill milliseconds.
+
 Bring up ROCm 10 separately before running a large cross-backend matrix:
 
 ```bash

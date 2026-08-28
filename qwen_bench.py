@@ -36,7 +36,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -1081,7 +1081,8 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                     settle = float(tier.get("settle_seconds", defaults.get("settle_seconds", 2)))
                     if settle > 0:
                         time.sleep(settle)
-                    warm_prompt = make_prompt(workloads_all[workload_names[0]], 0, corpus)
+                    warmup_depth = int(tier.get("warmup_depth", 0))
+                    warm_prompt = make_prompt(workloads_all[workload_names[0]], warmup_depth, corpus)
                     for _ in range(warmups):
                         completion_request(
                             base_url + "/completion",

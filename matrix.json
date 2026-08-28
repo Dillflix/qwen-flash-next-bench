@@ -281,6 +281,32 @@
       "startup_timeout_s": 600,
       "request_timeout_s": 600
     },
+    "vulkan-prefill": {
+      "description": "Prefill-only screen of structurally distinct ways to use the 7900 XT with a fixed iGPU baseline.",
+      "experiments": [
+        "apu_vk_no_mtp",
+        "layer_88_12_vk_no_mtp",
+        "expert_vk_no_mtp",
+        "layer_reverse_18_82_vk_no_mtp",
+        "row_86_14_main_apu_vk_no_mtp",
+        "row_86_14_main_dgpu_vk_no_mtp"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        4096,
+        16384
+      ],
+      "ctx_size": 32768,
+      "n_predict": 8,
+      "warmups": 1,
+      "warmup_depth": 16384,
+      "rounds": 1,
+      "settle_seconds": 2,
+      "startup_timeout_s": 600,
+      "request_timeout_s": 600
+    },
     "rocm-smoke": {
       "description": "One-pass ROCm 10 controls and heterogeneous placement bring-up.",
       "experiments": [
