@@ -1,0 +1,605 @@
+{
+  "version": 1,
+  "variables": {
+    "repo": "/srv/llm/src/llama-qwen4exp",
+    "model_dir": "/srv/llm/models/qwen-flash-next",
+    "model_ple16": "{model_dir}/Qwen3.8-Flash-Next-Q4_0-ROCmFP4-STRIX-PLE16.gguf",
+    "model_joined": "{model_dir}/Qwen3.8-Flash-Next-Q4_0-ROCmFP4-STRIX.gguf",
+    "mtp": "{model_dir}/mtp-Qwen3.8-Flash-Next-Q8_0.gguf",
+    "vulkan_server": "{repo}/build-vulkan/bin/llama-server",
+    "hip_server": "{repo}/build-hip10/bin/llama-server"
+  },
+  "workloads_file": "{config_dir}/prompts.json",
+  "context_sources": [
+    "{repo}/README.md",
+    "{repo}/docs/build.md",
+    "{repo}/examples/server/README.md"
+  ],
+  "defaults": {
+    "host": "127.0.0.1",
+    "port": 8189,
+    "startup_timeout_s": 1200,
+    "request_timeout_s": 1200,
+    "telemetry_interval_s": 1.0,
+    "settle_seconds": 3,
+    "pcie_upstream_bdf": "c5:00.0",
+    "warn_mem_available_bytes": 34359738368,
+    "server_args": [
+      "--n-gpu-layers",
+      "999",
+      "--flash-attn",
+      "on",
+      "--fit",
+      "off",
+      "--load-mode",
+      "mmap",
+      "--cache-type-k",
+      "q8_0",
+      "--cache-type-v",
+      "q8_0",
+      "--ubatch-size",
+      "512",
+      "--parallel",
+      "1",
+      "--threads",
+      "16",
+      "--jinja"
+    ],
+    "request": {
+      "top_k": 1,
+      "min_p": 0.0,
+      "top_p": 1.0
+    }
+  },
+  "tiers": {
+    "smoke": {
+      "description": "Two placement candidates, one short measured pass. Start here.",
+      "experiments": [
+        "expert_vk_no_mtp",
+        "layer_82_18_vk_no_mtp"
+      ],
+      "workloads": [
+        "code",
+        "json"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 2048,
+      "n_predict": 64,
+      "warmups": 1,
+      "rounds": 1,
+      "settle_seconds": 2
+    },
+    "short": {
+      "description": "Placement sweep plus MTP n=2/3/4 at shallow context.",
+      "experiments": [
+        "expert_vk_no_mtp",
+        "layer_85_15_vk_no_mtp",
+        "layer_82_18_vk_no_mtp",
+        "layer_80_20_vk_no_mtp",
+        "layer_78_22_vk_no_mtp",
+        "layer_75_25_vk_no_mtp",
+        "expert_vk_mtp_n2",
+        "expert_vk_mtp_n3",
+        "expert_vk_mtp_n4",
+        "layer_82_18_vk_mtp_n4"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 8192,
+      "n_predict": 256,
+      "warmups": 1,
+      "rounds": 3
+    },
+    "tuning": {
+      "description": "Vulkan wave-width and ubatch sweep for the expert placement.",
+      "experiments": [
+        "expert_vk_no_mtp",
+        "expert_vk_densew32_no_mtp",
+        "expert_vk_mmidw32_no_mtp",
+        "expert_vk_bothw32_no_mtp",
+        "expert_vk_ub1024_no_mtp",
+        "expert_vk_ub2048_no_mtp",
+        "expert_vk_bothw32_ub2048_no_mtp"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        0,
+        2048,
+        8192
+      ],
+      "ctx_size": 16384,
+      "n_predict": 128,
+      "warmups": 1,
+      "rounds": 3
+    },
+    "kv": {
+      "description": "Q8 versus F16 KV cache for likely expert/layer and MTP finalists.",
+      "experiments": [
+        "expert_vk_no_mtp",
+        "expert_vk_f16kv_no_mtp",
+        "expert_vk_mtp_n4",
+        "expert_vk_mtp_n4_f16kv",
+        "layer_82_18_vk_no_mtp",
+        "layer_82_18_vk_f16kv_no_mtp"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        0,
+        4096,
+        16384
+      ],
+      "ctx_size": 32768,
+      "n_predict": 256,
+      "warmups": 1,
+      "rounds": 3
+    },
+    "context": {
+      "description": "Four likely finalists over increasing prompt depth.",
+      "experiments": [
+        "expert_vk_no_mtp",
+        "expert_vk_mtp_n4",
+        "layer_82_18_vk_no_mtp",
+        "layer_82_18_vk_mtp_n4"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        0,
+        4096,
+        16384
+      ],
+      "ctx_size": 32768,
+      "n_predict": 256,
+      "warmups": 1,
+      "rounds": 3
+    },
+    "backend": {
+      "description": "Vulkan and ROCm controls plus experimental mixed ROCm placement.",
+      "experiments": [
+        "expert_vk_no_mtp",
+        "layer_82_18_vk_no_mtp",
+        "apu_vk_no_mtp",
+        "apu_hip_joined_no_mtp",
+        "expert_hip_no_mtp"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 8192,
+      "n_predict": 256,
+      "warmups": 1,
+      "rounds": 3
+    },
+    "full": {
+      "description": "Expensive validation matrix; run only after pruning with short/context.",
+      "experiments": [
+        "expert_vk_no_mtp",
+        "layer_85_15_vk_no_mtp",
+        "layer_82_18_vk_no_mtp",
+        "layer_80_20_vk_no_mtp",
+        "layer_78_22_vk_no_mtp",
+        "layer_75_25_vk_no_mtp",
+        "expert_vk_mtp_n2",
+        "expert_vk_mtp_n3",
+        "expert_vk_mtp_n4",
+        "layer_82_18_vk_mtp_n4",
+        "apu_vk_no_mtp",
+        "apu_hip_joined_no_mtp",
+        "expert_hip_no_mtp"
+      ],
+      "workloads": [
+        "code",
+        "json",
+        "prose"
+      ],
+      "depths": [
+        0,
+        4096,
+        16384,
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 512,
+      "warmups": 1,
+      "rounds": 5,
+      "startup_timeout_s": 1800,
+      "request_timeout_s": 1800
+    }
+  },
+  "experiments": [
+    {
+      "name": "expert_vk_no_mtp",
+      "description": "dGPU owns shared/dense/attention tensors; APU owns PLE and non-shared routed experts.",
+      "backend": "vulkan",
+      "baseline": true,
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan0,Vulkan1",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "none",
+        "--override-tensor",
+        "^ple_ngram_embd\\.[0-9]+\\.weight$=Vulkan1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=Vulkan1"
+      ]
+    },
+    {
+      "name": "layer_85_15_vk_no_mtp",
+      "description": "Contiguous Vulkan layer split, APU first and dGPU second.",
+      "backend": "vulkan",
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan1,Vulkan0",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "85,15"
+      ]
+    },
+    {
+      "name": "expert_vk_densew32_no_mtp",
+      "description": "Expert placement with the fork's dense Vulkan wave32 retile enabled.",
+      "extends": "expert_vk_no_mtp",
+      "baseline": false,
+      "env": {
+        "GGML_VK_DENSE_WAVE32": "1"
+      }
+    },
+    {
+      "name": "expert_vk_mmidw32_no_mtp",
+      "description": "Expert placement with Vulkan mul_mat_id wave32 enabled.",
+      "extends": "expert_vk_no_mtp",
+      "baseline": false,
+      "env": {
+        "GGML_VK_MMID_WAVE32": "1"
+      }
+    },
+    {
+      "name": "expert_vk_bothw32_no_mtp",
+      "description": "Expert placement with dense and mul_mat_id Vulkan wave32 paths enabled.",
+      "extends": "expert_vk_no_mtp",
+      "baseline": false,
+      "env": {
+        "GGML_VK_DENSE_WAVE32": "1",
+        "GGML_VK_MMID_WAVE32": "1"
+      }
+    },
+    {
+      "name": "expert_vk_ub1024_no_mtp",
+      "description": "Expert placement with ubatch 1024.",
+      "extends": "expert_vk_no_mtp",
+      "baseline": false,
+      "args_append": [
+        "--ubatch-size",
+        "1024"
+      ]
+    },
+    {
+      "name": "expert_vk_ub2048_no_mtp",
+      "description": "Expert placement with ubatch 2048; restricted to the mid-context tuning tier.",
+      "extends": "expert_vk_no_mtp",
+      "baseline": false,
+      "args_append": [
+        "--ubatch-size",
+        "2048"
+      ]
+    },
+    {
+      "name": "expert_vk_bothw32_ub2048_no_mtp",
+      "description": "Both wave32 paths plus ubatch 2048.",
+      "extends": "expert_vk_bothw32_no_mtp",
+      "baseline": false,
+      "args_append": [
+        "--ubatch-size",
+        "2048"
+      ]
+    },
+    {
+      "name": "expert_vk_f16kv_no_mtp",
+      "description": "Expert placement with F16 K/V cache as the maximum-KV-fidelity control.",
+      "extends": "expert_vk_no_mtp",
+      "baseline": false,
+      "args_append": [
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
+      ]
+    },
+    {
+      "name": "layer_82_18_vk_no_mtp",
+      "description": "Contiguous Vulkan layer split, APU first and dGPU second.",
+      "backend": "vulkan",
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan1,Vulkan0",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "82,18"
+      ]
+    },
+    {
+      "name": "layer_80_20_vk_no_mtp",
+      "description": "Contiguous Vulkan layer split, APU first and dGPU second.",
+      "backend": "vulkan",
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan1,Vulkan0",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "80,20"
+      ]
+    },
+    {
+      "name": "layer_82_18_vk_f16kv_no_mtp",
+      "description": "82/18 layer placement with F16 K/V cache.",
+      "extends": "layer_82_18_vk_no_mtp",
+      "args_append": [
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
+      ]
+    },
+    {
+      "name": "layer_78_22_vk_no_mtp",
+      "description": "Contiguous Vulkan layer split, APU first and dGPU second.",
+      "backend": "vulkan",
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan1,Vulkan0",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "78,22"
+      ]
+    },
+    {
+      "name": "layer_75_25_vk_no_mtp",
+      "description": "Contiguous Vulkan layer split, APU first and dGPU second.",
+      "backend": "vulkan",
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan1,Vulkan0",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "75,25"
+      ]
+    },
+    {
+      "name": "expert_vk_mtp_n2",
+      "description": "Expert Vulkan placement with Q8 MTP sidecar and two-token draft window.",
+      "backend": "vulkan",
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan0,Vulkan1",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "none",
+        "--override-tensor",
+        "^ple_ngram_embd\\.[0-9]+\\.weight$=Vulkan1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=Vulkan1",
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "Vulkan0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "2",
+        "--spec-draft-p-min",
+        "0.75"
+      ]
+    },
+    {
+      "name": "expert_vk_mtp_n3",
+      "description": "Expert Vulkan placement with Q8 MTP sidecar and three-token draft window.",
+      "backend": "vulkan",
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan0,Vulkan1",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "none",
+        "--override-tensor",
+        "^ple_ngram_embd\\.[0-9]+\\.weight$=Vulkan1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=Vulkan1",
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "Vulkan0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "3",
+        "--spec-draft-p-min",
+        "0.75"
+      ]
+    },
+    {
+      "name": "expert_vk_mtp_n4",
+      "description": "Expert Vulkan placement with Q8 MTP sidecar and four-token draft window.",
+      "backend": "vulkan",
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan0,Vulkan1",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "none",
+        "--override-tensor",
+        "^ple_ngram_embd\\.[0-9]+\\.weight$=Vulkan1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=Vulkan1",
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "Vulkan0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "4",
+        "--spec-draft-p-min",
+        "0.75"
+      ]
+    },
+    {
+      "name": "layer_82_18_vk_mtp_n4",
+      "description": "82/18 contiguous layer split with MTP sidecar on the dGPU.",
+      "backend": "vulkan",
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan1,Vulkan0",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "82,18",
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "Vulkan0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "4",
+        "--spec-draft-p-min",
+        "0.75"
+      ]
+    },
+    {
+      "name": "expert_vk_mtp_n4_f16kv",
+      "description": "Expert MTP n=4 placement with F16 target K/V cache.",
+      "extends": "expert_vk_mtp_n4",
+      "args_append": [
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
+      ]
+    },
+    {
+      "name": "apu_vk_no_mtp",
+      "description": "APU-only Vulkan control using the PLE16 model.",
+      "backend": "vulkan",
+      "server": "{vulkan_server}",
+      "model": "{model_ple16}",
+      "args": [
+        "--device",
+        "Vulkan1",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "none"
+      ]
+    },
+    {
+      "name": "apu_hip_joined_no_mtp",
+      "description": "APU-only ROCm control; joined PLE is valid because HIP does not have Vulkan's 4 GiB storage-buffer limit.",
+      "backend": "rocm",
+      "server": "{hip_server}",
+      "model": "{model_joined}",
+      "env": {
+        "ROCM_PATH": "/opt/rocm-10.0.0",
+        "HIP_PATH": "/opt/rocm-10.0.0",
+        "LD_LIBRARY_PATH": "/opt/rocm-10.0.0/lib:/opt/rocm-10.0.0/lib/rocm_sysdeps/lib",
+        "ROCR_VISIBLE_DEVICES": "1",
+        "GGML_CUDA_ENABLE_UNIFIED_MEMORY": "1"
+      },
+      "args": [
+        "--device",
+        "ROCm0",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "none"
+      ]
+    },
+    {
+      "name": "expert_hip_no_mtp",
+      "description": "Experimental heterogeneous ROCm placement without global managed-memory fallback.",
+      "backend": "rocm",
+      "server": "{hip_server}",
+      "model": "{model_ple16}",
+      "env": {
+        "ROCM_PATH": "/opt/rocm-10.0.0",
+        "HIP_PATH": "/opt/rocm-10.0.0",
+        "LD_LIBRARY_PATH": "/opt/rocm-10.0.0/lib:/opt/rocm-10.0.0/lib/rocm_sysdeps/lib"
+      },
+      "args": [
+        "--device",
+        "ROCm0,ROCm1",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "none",
+        "--override-tensor",
+        "^ple_ngram_embd\\.[0-9]+\\.weight$=ROCm1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=ROCm1"
+      ]
+    }
+  ]
+}

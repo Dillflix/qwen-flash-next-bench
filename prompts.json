@@ -1,0 +1,5 @@
+{
+  "code": "Complete the Python function below. Return only the complete function, without Markdown fences.\n\ndef merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:\n    \"\"\"Merge overlapping closed intervals; do not mutate the input.\"\"\"\n",
+  "json": "Return only valid compact JSON with exactly these keys: summary, risks, checks. summary must be a string, risks must be an array of three strings, and checks must be an array of three objects with name and command string fields. Create a deployment-readiness response for a local inference server running a very large mixture-of-experts model across two AMD GPUs.",
+  "prose": "Write a concise technical explanation of why a tensor placement that minimizes bytes transferred over PCIe can outperform a placement that maximizes arithmetic work on the discrete GPU. Discuss synchronization, token-by-token decode, and mixture-of-experts routing. Do not use headings."
+}

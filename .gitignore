@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
+
+# Benchmark runs can be very large and contain host-specific diagnostics.
+results/
+preflight/
