@@ -438,6 +438,22 @@ per-lane phase times; separate overlap-upper-bound columns are reported because
 per-request timing alone cannot prove that two prefill or decode phases overlapped.
 The slow-lane decode rate and fairness ratio are the primary admission criteria.
 
+If unified KV does not improve fairness, keep separate KV and isolate scheduler
+admission from memory pressure:
+
+```bash
+./run-bench.sh --tier production-concurrency-scheduler-memory-smoke --fail-fast
+```
+
+This tier first raises only the logical batch from 2048 to 4096 while keeping
+the physical ubatch at 2048. A logical batch of 2048 can be consumed by one
+slot's 2048-token prompt chunk; the larger logical batch tests whether both
+slots can be admitted without requesting the unstable 4096-token physical
+ubatch. The second experiment changes only target KV from F16 to Q8_0. Compare
+slow-lane decode, fairness, host cached GiB, storage-read GiB, and major faults.
+Q8 KV is a production candidate only if it restores residency and passes output
+quality validation; it is not assumed equivalent to F16.
+
 Only after smoke passes, validate the actual context target:
 
 ```bash

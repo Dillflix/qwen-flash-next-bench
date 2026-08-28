@@ -604,6 +604,31 @@
       "startup_timeout_s": 1800,
       "request_timeout_s": 3600
     },
+    "production-concurrency-scheduler-memory-smoke": {
+      "description": "Two synchronized 32K prompts comparing a 4096-token logical batch at fixed ubatch 2048, then Q8 KV to relieve PLE page-cache pressure.",
+      "cache_state": "hot",
+      "experiments": [
+        "prod_88_12_vk_mtp_n4_f16kv_dgpu_b4096_ub2048_ple16_cpu",
+        "prod_88_12_vk_mtp_n4_q8kv_dgpu_b4096_ub2048_ple16_cpu"
+      ],
+      "workloads": [
+        "code",
+        "prose"
+      ],
+      "depths": [
+        32768
+      ],
+      "ctx_size": 524288,
+      "n_predict": 128,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "concurrency": 2,
+      "exact_prompt_tokens": true,
+      "settle_seconds": 5,
+      "startup_timeout_s": 1800,
+      "request_timeout_s": 3600
+    },
     "rocm-smoke": {
       "description": "Gated ROCm 10 APU-only bring-up with PLE mmap on CPU; never runs until the custom FP4 backend-op audit passes.",
       "require_rocm_audit": true,
@@ -1392,6 +1417,28 @@
       "baseline": true,
       "args_append": [
         "--kv-unified"
+      ]
+    },
+    {
+      "name": "prod_88_12_vk_mtp_n4_f16kv_dgpu_b4096_ub2048_ple16_cpu",
+      "description": "Separate-KV F16 production layout with logical batch 4096 and physical ubatch 2048, leaving admission room for both prompt slots.",
+      "extends": "prod_88_12_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu",
+      "baseline": true,
+      "args_append": [
+        "--batch-size",
+        "4096"
+      ]
+    },
+    {
+      "name": "prod_88_12_vk_mtp_n4_q8kv_dgpu_b4096_ub2048_ple16_cpu",
+      "description": "Matched batch-4096 production layout with Q8 target KV to return unified memory to the mmap-backed PLE page cache.",
+      "extends": "prod_88_12_vk_mtp_n4_f16kv_dgpu_b4096_ub2048_ple16_cpu",
+      "baseline": false,
+      "args_append": [
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q8_0"
       ]
     },
     {
