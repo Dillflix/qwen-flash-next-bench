@@ -423,6 +423,21 @@ The runner reports per-user latency plus aggregate prefill, aggregate decode, an
 end-to-end throughput in `concurrency.csv` and `summary.md`; this is not two
 serial requests against a parallel server.
 
+The default production candidate uses `--no-kv-unified` for isolated per-slot KV.
+If the server log shows one prompt monopolizing batching while the other slot
+barely advances—or a decode-fairness ratio far below 1.0—test the matched unified
+KV candidate before changing precision or batch size:
+
+```bash
+./run-bench.sh --tier production-concurrency-unified-smoke --fail-fast
+```
+
+The harness removes the inherited `--no-kv-unified` flag, so the command contains
+only `--kv-unified`. Conservative aggregate rates divide total work by the sum of
+per-lane phase times; separate overlap-upper-bound columns are reported because
+per-request timing alone cannot prove that two prefill or decode phases overlapped.
+The slow-lane decode rate and fairness ratio are the primary admission criteria.
+
 Only after smoke passes, validate the actual context target:
 
 ```bash

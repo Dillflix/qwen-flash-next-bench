@@ -580,6 +580,30 @@
       "startup_timeout_s": 1800,
       "request_timeout_s": 7200
     },
+    "production-concurrency-unified-smoke": {
+      "description": "Two synchronized 32K prompts with unified KV, testing whether shared batching eliminates separate-slot prompt/decode starvation.",
+      "cache_state": "hot",
+      "experiments": [
+        "prod_88_12_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu_kv_unified"
+      ],
+      "workloads": [
+        "code",
+        "prose"
+      ],
+      "depths": [
+        32768
+      ],
+      "ctx_size": 524288,
+      "n_predict": 128,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "concurrency": 2,
+      "exact_prompt_tokens": true,
+      "settle_seconds": 5,
+      "startup_timeout_s": 1800,
+      "request_timeout_s": 3600
+    },
     "rocm-smoke": {
       "description": "Gated ROCm 10 APU-only bring-up with PLE mmap on CPU; never runs until the custom FP4 backend-op audit passes.",
       "require_rocm_audit": true,
@@ -1359,6 +1383,15 @@
       "args_append": [
         "--tensor-split",
         "90,10"
+      ]
+    },
+    {
+      "name": "prod_88_12_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu_kv_unified",
+      "description": "88/12 production candidate with one unified multi-sequence KV allocation to test true shared prompt batching.",
+      "extends": "prod_88_12_vk_mtp_n4_f16kv_dgpu_ub2048_ple16_cpu",
+      "baseline": true,
+      "args_append": [
+        "--kv-unified"
       ]
     },
     {

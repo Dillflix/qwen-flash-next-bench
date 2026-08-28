@@ -39,7 +39,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.13.0"
+VERSION = "1.14.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -429,6 +429,15 @@ def canonicalize_server_args(args: list[str]) -> list[str]:
         else:
             result.append(token)
             index += 1
+    mutually_exclusive = (
+        {"--kv-unified", "--no-kv-unified"},
+        {"--cont-batching", "--no-cont-batching"},
+        {"--context-shift", "--no-context-shift"},
+    )
+    for group in mutually_exclusive:
+        last = max((index for index, token in enumerate(result) if token in group), default=-1)
+        if last >= 0:
+            result = [token for index, token in enumerate(result) if token not in group or index == last]
     return result
 
 
@@ -960,17 +969,37 @@ def concurrent_metrics(responses: list[dict[str, Any]], wall_ms: float) -> dict[
     predicted_ms = [float(item["predicted_ms"]) for item in timings if isinstance(item.get("predicted_ms"), (int, float))]
     prompt_n = [float(item["prompt_n"]) for item in timings if isinstance(item.get("prompt_n"), (int, float))]
     prompt_ms = [float(item["prompt_ms"]) for item in timings if isinstance(item.get("prompt_ms"), (int, float))]
+    lane_decode = [
+        float(item["predicted_per_second"])
+        for item in timings if isinstance(item.get("predicted_per_second"), (int, float))
+    ]
+    lane_prefill = [
+        float(item["prompt_per_second"])
+        for item in timings if isinstance(item.get("prompt_per_second"), (int, float))
+    ]
     return {
         "lanes": len(responses),
         "wall_ms": round(wall_ms, 3),
         "predicted_n_total": int(sum(predicted_n)) if predicted_n else None,
         "prompt_n_total": int(sum(prompt_n)) if prompt_n else None,
         "aggregate_decode_tok_s": (
-            sum(predicted_n) * 1000.0 / max(predicted_ms) if predicted_n and predicted_ms and max(predicted_ms) > 0 else None
+            sum(predicted_n) * 1000.0 / sum(predicted_ms) if predicted_n and predicted_ms and sum(predicted_ms) > 0 else None
         ),
         "aggregate_prefill_tok_s": (
+            sum(prompt_n) * 1000.0 / sum(prompt_ms) if prompt_n and prompt_ms and sum(prompt_ms) > 0 else None
+        ),
+        "overlap_upper_decode_tok_s": (
+            sum(predicted_n) * 1000.0 / max(predicted_ms) if predicted_n and predicted_ms and max(predicted_ms) > 0 else None
+        ),
+        "overlap_upper_prefill_tok_s": (
             sum(prompt_n) * 1000.0 / max(prompt_ms) if prompt_n and prompt_ms and max(prompt_ms) > 0 else None
         ),
+        "lane_decode_min_tok_s": min(lane_decode) if lane_decode else None,
+        "lane_decode_max_tok_s": max(lane_decode) if lane_decode else None,
+        "decode_fairness_ratio": min(lane_decode) / max(lane_decode) if lane_decode and max(lane_decode) > 0 else None,
+        "lane_prefill_min_tok_s": min(lane_prefill) if lane_prefill else None,
+        "lane_prefill_max_tok_s": max(lane_prefill) if lane_prefill else None,
+        "prefill_fairness_ratio": min(lane_prefill) / max(lane_prefill) if lane_prefill and max(lane_prefill) > 0 else None,
         "end_to_end_output_tok_s": (
             sum(predicted_n) * 1000.0 / wall_ms if predicted_n and wall_ms > 0 else None
         ),
@@ -2041,10 +2070,34 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         row for row in read_jsonl(run_dir / "concurrency-groups.jsonl")
         if row.get("status") == "ok"
     ]
+    # v1.13 and earlier persisted the overlap upper bound under the aggregate
+    # field names. Recompute from the archived per-lane timings so summarizing
+    # an older run cannot silently relabel optimistic values as conservative.
+    lanes_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in valid:
+        group_id = row.get("concurrency_group_id")
+        if isinstance(group_id, str) and group_id:
+            lanes_by_group[group_id].append(row)
+    normalized_groups: list[dict[str, Any]] = []
+    for group in concurrent_groups:
+        group_id = group.get("group_id")
+        lane_rows = lanes_by_group.get(group_id, []) if isinstance(group_id, str) else []
+        if lane_rows:
+            responses = [
+                {"timings": row.get("timing", {})}
+                for row in sorted(lane_rows, key=lambda row: int(row.get("lane", 0)))
+            ]
+            metrics = concurrent_metrics(responses, float(group.get("wall_ms", 0)))
+            group = {**group, **metrics}
+        normalized_groups.append(group)
+    concurrent_groups = normalized_groups
     if concurrent_groups:
         concurrency_fields = [
             "experiment", "round", "requested_depth_tokens", "lanes", "prompt_n_total",
             "predicted_n_total", "aggregate_prefill_tok_s", "aggregate_decode_tok_s",
+            "overlap_upper_prefill_tok_s", "overlap_upper_decode_tok_s",
+            "lane_prefill_min_tok_s", "lane_prefill_max_tok_s", "prefill_fairness_ratio",
+            "lane_decode_min_tok_s", "lane_decode_max_tok_s", "decode_fairness_ratio",
             "end_to_end_output_tok_s", "wall_ms",
         ]
         with (run_dir / "concurrency.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -2053,16 +2106,17 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             writer.writerows(concurrent_groups)
         md.extend([
             "\n## True concurrent-request throughput\n\n",
-            "Aggregate prefill and decode divide both lanes' tokens by the longest overlapping phase; end-to-end output includes prompt processing.\n\n",
-            "| Experiment | Round | Depth/lane | Lanes | Prompt n total | Output n total | Aggregate prefill tok/s | Aggregate decode tok/s | End-to-end output tok/s | Wall s |\n",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+            "Conservative aggregate rates divide total tokens by the sum of per-lane phase times. The overlap upper bound divides by the longest lane phase and is achievable only when those phases truly overlap. End-to-end output includes prompt processing.\n\n",
+            "| Experiment | Round | Depth/lane | Lanes | Conservative prefill | Prefill overlap upper | Conservative decode | Decode overlap upper | Slow lane decode | Decode fairness | End-to-end output | Wall s |\n",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
         ])
         for group in concurrent_groups:
             md.append(
                 f"| {group['experiment']} | {int(group.get('round', 0)) + 1} | "
                 f"{group.get('requested_depth_tokens', '')} | {group.get('lanes', '')} | "
-                f"{group.get('prompt_n_total', '')} | {group.get('predicted_n_total', '')} | "
-                f"{fmt(group.get('aggregate_prefill_tok_s'))} | {fmt(group.get('aggregate_decode_tok_s'))} | "
+                f"{fmt(group.get('aggregate_prefill_tok_s'))} | {fmt(group.get('overlap_upper_prefill_tok_s'))} | "
+                f"{fmt(group.get('aggregate_decode_tok_s'))} | {fmt(group.get('overlap_upper_decode_tok_s'))} | "
+                f"{fmt(group.get('lane_decode_min_tok_s'))} | {fmt(group.get('decode_fairness_ratio'), 3)} | "
                 f"{fmt(group.get('end_to_end_output_tok_s'))} | {fmt(float(group.get('wall_ms', 0)) / 1000.0, 1)} |\n"
             )
     failures = [row for row in results if row.get("status") not in SUCCESS_STATES]
@@ -2134,8 +2188,9 @@ def self_test() -> None:
     canonical = canonicalize_server_args([
         "--cache-type-k", "q8_0", "--jinja", "--cache-type-k", "f16",
         "--spec-draft-n-max", "2", "--spec-draft-n-max", "4",
+        "--no-kv-unified", "--kv-unified",
     ])
-    assert canonical == ["--jinja", "--cache-type-k", "f16", "--spec-draft-n-max", "4"]
+    assert canonical == ["--jinja", "--cache-type-k", "f16", "--spec-draft-n-max", "4", "--kv-unified"]
     short = probe_row(
         "self-test", {"name": "test", "backend": "cpu"}, 0, "code", 0, 128,
         {"content": "", "timings": {"predicted_n": 0}}, 1.0, None, {},
@@ -2188,11 +2243,15 @@ def self_test() -> None:
     assert response_slot_id({}) == 0
     assert response_slot_id({}, 1) == 1
     concurrent = concurrent_metrics([
-        {"timings": {"predicted_n": 100, "predicted_ms": 5000, "prompt_n": 1000, "prompt_ms": 2000}},
-        {"timings": {"predicted_n": 100, "predicted_ms": 4000, "prompt_n": 1000, "prompt_ms": 2500}},
+        {"timings": {"predicted_n": 100, "predicted_ms": 5000, "predicted_per_second": 20, "prompt_n": 1000, "prompt_ms": 2000, "prompt_per_second": 500}},
+        {"timings": {"predicted_n": 100, "predicted_ms": 4000, "predicted_per_second": 25, "prompt_n": 1000, "prompt_ms": 2500, "prompt_per_second": 400}},
     ], 8000)
-    assert concurrent["aggregate_decode_tok_s"] == 40.0
-    assert concurrent["aggregate_prefill_tok_s"] == 800.0
+    assert math.isclose(concurrent["aggregate_decode_tok_s"], 200000 / 9000)
+    assert math.isclose(concurrent["aggregate_prefill_tok_s"], 2000000 / 4500)
+    assert concurrent["overlap_upper_decode_tok_s"] == 40.0
+    assert concurrent["overlap_upper_prefill_tok_s"] == 800.0
+    assert concurrent["decode_fairness_ratio"] == 0.8
+    assert concurrent["prefill_fairness_ratio"] == 0.8
     assert concurrent["end_to_end_output_tok_s"] == 25.0
     passed, passed_n, total_n = backend_ops_passed({
         "returncode": 0, "stdout": "43/43 tests passed", "stderr": "",
@@ -2216,15 +2275,42 @@ def self_test() -> None:
             "workload": "code",
             "requested_depth_tokens": 4096,
             "round": 0,
+            "lane": 0,
+            "concurrency_group_id": "test-group",
             "output_sha256": "abc",
             "http_wall_ms": 1.0,
             "server_startup_seconds": 2.0,
             "degenerate": False,
             "timing": {
-                "predicted_per_second": 10.0,
-                "prompt_per_second": 20.0,
-                "prompt_n": 4096,
-                "prompt_ms": 204.8,
+                "predicted_n": 100,
+                "predicted_ms": 5000.0,
+                "predicted_per_second": 20.0,
+                "prompt_n": 1000,
+                "prompt_ms": 2000.0,
+                "prompt_per_second": 500.0,
+                "draft_acceptance": 0.75,
+            },
+            "telemetry": aggregate,
+        })
+        append_jsonl(summary_root / "results.jsonl", {
+            "status": "ok",
+            "experiment": "test",
+            "workload": "code",
+            "requested_depth_tokens": 4096,
+            "round": 0,
+            "lane": 1,
+            "concurrency_group_id": "test-group",
+            "output_sha256": "abc",
+            "http_wall_ms": 1.0,
+            "server_startup_seconds": 2.0,
+            "degenerate": False,
+            "timing": {
+                "predicted_n": 100,
+                "predicted_ms": 4000.0,
+                "predicted_per_second": 25.0,
+                "prompt_n": 1000,
+                "prompt_ms": 2500.0,
+                "prompt_per_second": 400.0,
                 "draft_acceptance": 0.75,
             },
             "telemetry": aggregate,
@@ -2232,15 +2318,16 @@ def self_test() -> None:
         append_jsonl(summary_root / "concurrency-groups.jsonl", {
             "status": "ok",
             "experiment": "test",
+            "group_id": "test-group",
             "round": 0,
             "requested_depth_tokens": 4096,
             "lanes": 2,
-            "prompt_n_total": 8192,
-            "predicted_n_total": 256,
-            "aggregate_prefill_tok_s": 40.0,
-            "aggregate_decode_tok_s": 20.0,
-            "end_to_end_output_tok_s": 10.0,
-            "wall_ms": 25600.0,
+            "prompt_n_total": 2000,
+            "predicted_n_total": 200,
+            "aggregate_prefill_tok_s": 800.0,
+            "aggregate_decode_tok_s": 40.0,
+            "end_to_end_output_tok_s": 25.0,
+            "wall_ms": 8000.0,
         })
         summarize(summary_root, {}, [{"name": "test", "baseline": True}])
         rendered = (summary_root / "summary.md").read_text(encoding="utf-8")
@@ -2248,6 +2335,10 @@ def self_test() -> None:
         assert "Residency and capacity telemetry" in rendered
         assert "True concurrent-request throughput" in rendered
         assert (summary_root / "concurrency.csv").is_file()
+        concurrency_csv = (summary_root / "concurrency.csv").read_text(encoding="utf-8")
+        assert "22.22222222222222" in concurrency_csv
+        assert "444.44444444444446" in concurrency_csv
+        assert ",800.0,40.0," in concurrency_csv
     with tempfile.TemporaryDirectory() as raw_tmp:
         archive_root = pathlib.Path(raw_tmp)
         archived_run = archive_root / "example-run"
