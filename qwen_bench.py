@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.33.2"
+VERSION = "1.33.3"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -1111,7 +1111,10 @@ def probability_metrics(response: dict[str, Any]) -> dict[str, Any]:
         probabilities, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
     first = probabilities[0] if isinstance(probabilities[0], dict) else {}
-    candidates = first.get("probs", []) if isinstance(first, dict) else []
+    candidates = (
+        first.get("top_logprobs", first.get("probs", []))
+        if isinstance(first, dict) else []
+    )
     compact: list[dict[str, Any]] = []
     if isinstance(candidates, list):
         for candidate in candidates[:20]:
@@ -1119,7 +1122,7 @@ def probability_metrics(response: dict[str, Any]) -> dict[str, Any]:
                 continue
             compact.append({
                 key: candidate[key]
-                for key in ("id", "tok_str", "prob")
+                for key in ("id", "token", "tok_str", "logprob", "prob")
                 if key in candidate
             })
     return {
@@ -2848,6 +2851,18 @@ def self_test() -> None:
     assert probability["probability_steps"] == 1
     assert probability["first_token_probabilities"][0]["id"] == 1
     assert len(probability["probabilities_sha256"]) == 64
+    current_probability = probability_metrics({"completion_probabilities": [{
+        "id": 271,
+        "token": "\n\n",
+        "logprob": -0.25,
+        "top_logprobs": [
+            {"id": 271, "token": "\n\n", "logprob": -0.25},
+            {"id": 262, "token": "   ", "logprob": -2.0},
+        ],
+    }]})
+    assert current_probability["first_token_probabilities"][0] == {
+        "id": 271, "token": "\n\n", "logprob": -0.25,
+    }
     with tempfile.TemporaryDirectory() as raw_tmp:
         preflight_report = preflight(
             {"defaults": {"host": "127.0.0.1", "port": 0}},

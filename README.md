@@ -1032,6 +1032,17 @@ measured here: `n_probs` adds overhead, and four tokens cannot reach a function
 signature after a reasoning preamble. If the no-MTP probability fingerprints
 diverge, the target's chunked Gated DeltaNet prefill/state path is implicated.
 
+The interrupted v1.33.1 run `20260829-171001-rocm-ubatch-target-fingerprint`
+already captured one complete round with 32 probability-bearing tokens. Ubatch
+2048, 1536, and 1024 produced byte-identical text; ubatch 1792 differed only by
+leading whitespace. Nevertheless, the first-token probability distributions
+changed materially: the selected newline had log probability -0.349 at ubatch
+2048, -0.262 at 1536, and -0.692 at 1024. At ubatch 1792, three spaces narrowly
+won a near tie at -1.049 versus -1.052 for an empty control token and -1.226 for
+newline. This proves ubatch-dependent target-logit drift without yet proving
+semantic corruption. Exact probability hashes are deliberately strict and must
+be interpreted together with token rank, margin, and the full-output control.
+
 Next run the full-output no-MTP control without `n_probs` instrumentation:
 
 ```bash
