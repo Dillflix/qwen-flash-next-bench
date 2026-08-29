@@ -849,12 +849,12 @@
       "request_timeout_s": 1800
     },
     "vision-mtp": {
-      "description": "Three-round Q8 projector comparison with and without MTP on the 7900 XT after projector correctness is established.",
+      "description": "Three-round BF16 projector comparison with and without MTP sharing the 7900 XT.",
       "mode": "vision",
       "cache_state": "hot",
       "experiments": [
-        "vision_q8_dgpu_no_mtp",
-        "vision_q8_dgpu_mtp_n4"
+        "vision_bf16_dgpu_no_mtp",
+        "vision_bf16_dgpu_mtp_n4"
       ],
       "vision_cases": [
         "shapes",
@@ -2040,6 +2040,26 @@
       },
       "args_append": [
         "--mmproj-offload"
+      ]
+    },
+    {
+      "name": "vision_bf16_dgpu_mtp_n4",
+      "description": "BF16 vision projector and Q8 MTP sidecar resident on the RX 7900 XT; the phases execute sequentially but share VRAM.",
+      "extends": "vision_bf16_dgpu_no_mtp",
+      "baseline": false,
+      "args_append": [
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "Vulkan0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "4",
+        "--spec-draft-p-min",
+        "0.75"
       ]
     },
     {

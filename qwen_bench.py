@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.19.1"
+VERSION = "1.20.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -2330,6 +2330,11 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
     experiment_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in summary_rows:
         experiment_groups[row["experiment"]].append(row)
+    vision_quality: dict[str, list[bool]] = defaultdict(list)
+    for row in results:
+        quality_pass = row.get("vision", {}).get("quality_pass")
+        if isinstance(quality_pass, bool):
+            vision_quality[row["experiment"]].append(quality_pass)
     overall: list[dict[str, Any]] = []
     for experiment, rows in experiment_groups.items():
         decode_speedups = [float(row["decode_speedup_vs_baseline"]) for row in rows if row["decode_speedup_vs_baseline"] and row["decode_speedup_vs_baseline"] > 0]
@@ -2338,6 +2343,9 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         accepts = [float(row["mtp_acceptance_median"]) for row in rows if row["mtp_acceptance_median"] is not None]
         decode_geomean = math.exp(statistics.fmean(math.log(value) for value in decode_speedups)) if decode_speedups else None
         prefill_geomean = math.exp(statistics.fmean(math.log(value) for value in prefill_speedups)) if prefill_speedups else None
+        quality = vision_quality.get(experiment, [])
+        quality_passes = sum(quality)
+        quality_eligible = not quality or quality_passes == len(quality)
         overall.append({
             "experiment": experiment,
             "cells": len(rows),
@@ -2346,24 +2354,38 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             "balanced_geomean_speedup": math.sqrt(decode_geomean * prefill_geomean) if decode_geomean and prefill_geomean else None,
             "hash_match": statistics.fmean(matches) if matches else None,
             "mtp_acceptance": statistics.median(accepts) if accepts else None,
+            "vision_quality_passes": quality_passes,
+            "vision_quality_samples": len(quality),
+            "quality_eligible": quality_eligible,
         })
-    overall.sort(key=lambda row: row["balanced_geomean_speedup"] or -1, reverse=True)
+    overall.sort(
+        key=lambda row: (row["quality_eligible"], row["balanced_geomean_speedup"] or -1),
+        reverse=True,
+    )
     md = [
         f"# Benchmark summary: {run_dir.name}\n\n",
         f"Baseline for output hashes: `{baseline_name}`. Medians exclude warm-ups and degenerate responses.\n\n",
         f"Declared cache state: `{load_json(run_dir / 'manifest.json').get('tier', {}).get('cache_state', 'unspecified')}`. "
         "Physical storage reads and major faults remain authoritative; a declared hot run is not hot if those counters stay high.\n\n",
         "## Overall comparable-cell ranking\n\n",
-        "| Experiment | Cells | Decode speedup | Prefill speedup | Balanced | Hash match | Median MTP accept |\n",
-        "|---|---:|---:|---:|---:|---:|---:|\n",
+        "Vision experiments with any measured anchor failure are disqualified from the overall speed ranking. Their raw passing-cell throughput remains visible for diagnosis.\n\n",
+        "| Experiment | Cells | Decode speedup | Prefill speedup | Balanced | Vision quality | Hash match | Median MTP accept |\n",
+        "|---|---:|---:|---:|---:|---:|---:|---:|\n",
     ]
     for row in overall:
         decode_speedup = "" if row["decode_geomean_speedup"] is None else f"{row['decode_geomean_speedup']:.3f}x"
         prefill_speedup = "" if row["prefill_geomean_speedup"] is None else f"{row['prefill_geomean_speedup']:.3f}x"
-        balanced = "" if row["balanced_geomean_speedup"] is None else f"{row['balanced_geomean_speedup']:.3f}x"
+        balanced = (
+            "DISQUALIFIED"
+            if not row["quality_eligible"]
+            else ("" if row["balanced_geomean_speedup"] is None else f"{row['balanced_geomean_speedup']:.3f}x")
+        )
+        quality = ""
+        if row["vision_quality_samples"]:
+            quality = f"{row['vision_quality_passes']}/{row['vision_quality_samples']} ({row['vision_quality_passes'] / row['vision_quality_samples']:.0%})"
         match = "" if row["hash_match"] is None else f"{row['hash_match']:.0%}"
         accept = "" if row["mtp_acceptance"] is None else f"{row['mtp_acceptance']:.1%}"
-        md.append(f"| {row['experiment']} | {row['cells']} | {decode_speedup} | {prefill_speedup} | {balanced} | {match} | {accept} |\n")
+        md.append(f"| {row['experiment']} | {row['cells']} | {decode_speedup} | {prefill_speedup} | {balanced} | {quality} | {match} | {accept} |\n")
     md.extend([
         "\n## Per-workload results\n\n",
         "| Experiment | Workload | Requested depth | Prompt n | Samples | Decode tok/s | Prefill tok/s | Prefill ms | MTP accept | Hash match | File RSS GiB | Storage read GiB | Major faults | PCIe |\n",
@@ -2675,6 +2697,7 @@ def self_test() -> None:
             "telemetry": aggregate,
             "vision": {
                 "anchor_score": 1.0,
+                "quality_pass": True,
                 "image_encode_ms": 12.5,
                 "image_decode_ms": 3.5,
                 "image_process_ms": 16.2,
@@ -2704,6 +2727,7 @@ def self_test() -> None:
             "telemetry": aggregate,
             "vision": {
                 "anchor_score": 1.0,
+                "quality_pass": True,
                 "image_encode_ms": 13.5,
                 "image_decode_ms": 4.5,
                 "image_process_ms": 18.2,
@@ -2723,12 +2747,23 @@ def self_test() -> None:
             "end_to_end_output_tok_s": 25.0,
             "wall_ms": 8000.0,
         })
+        append_jsonl(summary_root / "results.jsonl", {
+            "status": "ok",
+            "experiment": "test",
+            "workload": "failed-vision-case",
+            "requested_depth_tokens": 0,
+            "round": 0,
+            "degenerate": True,
+            "quality_failure": True,
+            "vision": {"anchor_score": 0.5, "quality_pass": False},
+        })
         summarize(summary_root, {}, [{"name": "test", "baseline": True}])
         rendered = (summary_root / "summary.md").read_text(encoding="utf-8")
         assert "Declared cache state: `hot`" in rendered
         assert "Residency and capacity telemetry" in rendered
         assert "Vision correctness and image processing" in rendered
         assert "100% | 13.00 | 4.00 | 17.20" in rendered
+        assert "DISQUALIFIED | 2/3 (67%)" in rendered
         assert "True concurrent-request throughput" in rendered
         assert (summary_root / "concurrency.csv").is_file()
         concurrency_csv = (summary_root / "concurrency.csv").read_text(encoding="utf-8")

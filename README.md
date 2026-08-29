@@ -100,7 +100,7 @@ Qwen3.8-Flash-Next is multimodal, but llama.cpp stores its vision encoder/projec
 separately from the language-model GGUF. The `kingjones777` ROCmFP4 repository does
 not include that projector. This harness uses the matching BF16 projector from
 Unsloth as the quality reference and the matching Q8 projector published by
-`ggml-org` as the likely production winner.
+`ggml-org` as a memory/performance control.
 
 Prepare both checksum-pinned projectors and three deterministic local PNG fixtures:
 
@@ -136,8 +136,11 @@ The dGPU experiments set `MTMD_BACKEND_DEVICE=Vulkan0` explicitly. `--main-gpu`
 does not select the projector device. All experiments keep the target model on the
 88/12 iGPU/dGPU split, PLE16 on CPU mmap, Q8 target KV, and a 2048-token batch.
 
-If smoke succeeds and the anchor scores agree, run the complete fixture set and
-then test MTP:
+Run the complete fixture set before selecting a projector. The measured 7900 XT
+result chose BF16: all six samples passed, projector prefill was about 7.1x the
+CPU reference, and Q8 repeatedly mistranscribed `UNSLOTH 42` as `UN5LOTH 42` while
+saving only about 0.3 GiB of VRAM. Q8 is therefore not a production candidate for
+this model/build. Test MTP only with the passing BF16 projector:
 
 ```bash
 ./run-bench.sh --tier vision
@@ -158,7 +161,9 @@ degenerate and excluded from rankings.
 
 Every vision tier also declares a minimum anchor score. Responses below that gate
 are visibly marked as quality failures and excluded from performance rankings, so
-a fast but incomplete description cannot win. The shapes fixture requests a compact
+a fast but incomplete description cannot win. An experiment with any measured
+anchor failure is also marked `DISQUALIFIED` in the overall table; its passing-cell
+throughput remains visible for diagnosis. The shapes fixture requests a compact
 one-line answer to ensure all known facts fit inside the fixed decode budget.
 
 The MTP tier is deliberately separate. Multimodal plus MTP has had model- and
