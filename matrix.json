@@ -709,6 +709,29 @@
       "startup_timeout_s": 1200,
       "request_timeout_s": 1800
     },
+    "backend-smoke-matched": {
+      "description": "Semantically matched Vulkan/ROCm APU-only comparison with explicit mmap, CPU PLE, Q8 KV, batch 2048, ubatch 512, and flash attention off/on.",
+      "require_rocm_audit": true,
+      "cache_state": "hot",
+      "experiments": [
+        "apu_vk_ple16_cpu_no_mtp_no_fa",
+        "apu_hip_ple16_cpu_no_mtp_no_fa",
+        "apu_vk_ple16_cpu_no_mtp",
+        "apu_hip_ple16_cpu_no_mtp"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        0,
+        512
+      ],
+      "ctx_size": 4096,
+      "n_predict": 64,
+      "warmups": 1,
+      "rounds": 1,
+      "settle_seconds": 2
+    },
     "rocm-placement": {
       "description": "Three-round ROCm 10 APU, expert, layer-order, ratio, and row sweep.",
       "require_rocm_audit": true,
@@ -1672,6 +1695,28 @@
       ]
     },
     {
+      "name": "apu_vk_ple16_cpu_no_mtp",
+      "description": "Vulkan APU-only control matched to the ROCm smoke deployment: CPU-mmap PLE16, Q8 KV, batch 2048, ubatch 512, and no MTP.",
+      "extends": "apu_vk_no_mtp",
+      "baseline": false,
+      "args_append": [
+        "--override-tensor",
+        "^ple_ngram_embd\\.[0-9]+\\.weight$=CPU",
+        "--batch-size",
+        "2048"
+      ]
+    },
+    {
+      "name": "apu_vk_ple16_cpu_no_mtp_no_fa",
+      "description": "Matched Vulkan APU-only control with flash attention disabled.",
+      "extends": "apu_vk_ple16_cpu_no_mtp",
+      "baseline": true,
+      "args_append": [
+        "--flash-attn",
+        "off"
+      ]
+    },
+    {
       "name": "apu_vk_f16kv_no_mtp",
       "description": "Entire target model on the iGPU with F16 K/V cache and no MTP.",
       "extends": "apu_vk_no_mtp",
@@ -1765,9 +1810,13 @@
       "name": "apu_hip_joined_no_mtp",
       "description": "APU-only ROCm control; joined PLE is valid because HIP does not have Vulkan's 4 GiB storage-buffer limit.",
       "backend": "rocm",
-      "remove_server_options": [
-        "--load-mode"
-      ],
+      "translate_server_options": {
+        "--load-mode": {
+          "mmap": [
+            "--mmap"
+          ]
+        }
+      },
       "server": "{hip_server}",
       "model": "{model_joined}",
       "env": {
@@ -1790,9 +1839,13 @@
       "name": "expert_hip_no_mtp",
       "description": "Experimental heterogeneous ROCm placement without global managed-memory fallback.",
       "backend": "rocm",
-      "remove_server_options": [
-        "--load-mode"
-      ],
+      "translate_server_options": {
+        "--load-mode": {
+          "mmap": [
+            "--mmap"
+          ]
+        }
+      },
       "server": "{hip_server}",
       "model": "{model_ple16}",
       "env": {
@@ -1822,9 +1875,13 @@
       "description": "Clean ROCm diagnostic: APU only, no managed-memory fallback, split PLE mmap on CPU, no dGPU, and no MTP.",
       "backend": "rocm",
       "baseline": false,
-      "remove_server_options": [
-        "--load-mode"
-      ],
+      "translate_server_options": {
+        "--load-mode": {
+          "mmap": [
+            "--mmap"
+          ]
+        }
+      },
       "server": "{hip_server}",
       "model": "{model_ple16}",
       "env": {
@@ -1841,14 +1898,16 @@
         "--split-mode",
         "none",
         "--override-tensor",
-        "^ple_ngram_embd\\.[0-9]+\\.weight$=CPU"
+        "^ple_ngram_embd\\.[0-9]+\\.weight$=CPU",
+        "--batch-size",
+        "2048"
       ]
     },
     {
       "name": "apu_hip_ple16_cpu_no_mtp_no_fa",
       "description": "Matched APU-only ROCm diagnostic with flash attention disabled to isolate the attention path from ROCmFP4 matrix kernels.",
       "extends": "apu_hip_ple16_cpu_no_mtp",
-      "baseline": true,
+      "baseline": false,
       "args_append": [
         "--flash-attn",
         "off"

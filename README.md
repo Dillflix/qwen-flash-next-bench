@@ -688,9 +688,21 @@ test only shallow 0/512-token depths. If only the enabled experiment collapses,
 the remaining defect is isolated to the attention path rather than the ROCmFP4
 matrix kernels.
 
-The pinned ROCmFPX revision uses the older `--mmap`/`--no-mmap` interface and has
-mmap enabled by default. ROCm experiments therefore remove the newer Vulkan fork's
-`--load-mode mmap` option from inherited defaults; they do not disable mmap.
+The pinned ROCmFPX revision uses the older `--mmap`/`--no-mmap` interface. The
+harness explicitly translates the Vulkan fork's `--load-mode mmap` into ROCmFPX's
+`--mmap`; it does not rely on an implicit backend default. An unknown load mode is
+a hard configuration error rather than being silently removed.
+
+The APU-only tier above is fault isolation, not a Vulkan/ROCm performance A/B.
+After it passes, run the semantically matched control:
+
+```bash
+./run-bench.sh --tier backend-smoke-matched --fail-fast
+```
+
+That tier holds CPU-mapped PLE, Q8 KV, batch 2048, ubatch 512, context, prompts,
+decode length, and flash-attention state constant. Only the backend/device spelling
+and the equivalent mmap syntax differ.
 
 If shallow performance is sane, localize the previously reported context cliff:
 
