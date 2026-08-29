@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.22.2"
+VERSION = "1.22.3"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -2874,14 +2874,41 @@ def self_test() -> None:
         if cache_state == "cold":
             assert int(tier.get("warmups", 0)) == 0, f"{tier_name}: cold tier has warm-ups"
     expanded_shipped_config = load_config(pathlib.Path(__file__).with_name("matrix.json"))
+    for experiment in expanded_shipped_config["experiments"]:
+        if experiment.get("backend") != "rocm":
+            continue
+        assert not str(experiment["model"]).endswith("-PLE16.gguf"), (
+            f"{experiment['name']}: ROCm must use the native joined PLE model"
+        )
+        rocm_override = option_value(list(experiment.get("args", [])), "--override-tensor") or ""
+        assert "ple_ngram_embd" not in rocm_override, (
+            f"{experiment['name']}: split-PLE overrides are Vulkan-only"
+        )
     matched_tier = expanded_shipped_config["tiers"]["backend-smoke-matched"]
     matched_experiments = select_experiments(expanded_shipped_config, matched_tier, None)
     assert len(matched_experiments) == 4
+    matched_backends: defaultdict[str, int] = defaultdict(int)
     for experiment in matched_experiments:
         matched_args = server_command(expanded_shipped_config, matched_tier, experiment)[1:]
+        backend = str(experiment["backend"])
+        matched_backends[backend] += 1
         assert option_value(matched_args, "--cache-type-k") == "f16"
         assert option_value(matched_args, "--cache-type-v") == "f16"
         assert not server_arg_compatibility_errors(matched_args)
+        model = option_value(matched_args, "-m") or ""
+        override = option_value(matched_args, "--override-tensor") or ""
+        if backend == "vulkan":
+            assert model.endswith("-PLE16.gguf")
+            assert "ple_ngram_embd" in override and "=CPU" in override
+            assert option_value(matched_args, "--load-mode") == "mmap"
+        elif backend == "rocm":
+            assert model.endswith("-STRIX.gguf") and not model.endswith("-PLE16.gguf")
+            assert "ple_ngram_embd" not in override
+            assert "per_layer_token_embd" not in override
+            assert "--mmap" in matched_args and "--load-mode" not in matched_args
+        else:
+            raise AssertionError(f"unexpected matched-tier backend: {backend}")
+    assert dict(matched_backends) == {"vulkan": 2, "rocm": 2}
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 

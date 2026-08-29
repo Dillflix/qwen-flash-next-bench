@@ -661,6 +661,8 @@ python3 qwen_bench.py rocm-audit --run-ops
 
 Both commands create one `.tar.gz` plus a SHA-256 file automatically. The audit
 archive is written even when a gate fails, so failed numerical output is preserved.
+Any rebuild changes the server/HIP-library fingerprints, so the audit must be rerun
+before model benchmarks.
 
 The audit has two independent functional gates on both GPUs:
 
@@ -681,12 +683,11 @@ python3 qwen_bench.py preflight --tier rocm-smoke
 ```
 
 This path hides the 7900 XT with `ROCR_VISIBLE_DEVICES=1` (therefore the physical
-8060S becomes logical `ROCm0`), disables managed-memory fallback, keeps the split
-PLE table CPU-mapped, and uses neither MTP nor heterogeneous placement. It first
-runs with flash attention disabled, then repeats with it enabled. Both experiments
-test only shallow 0/512-token depths. If only the enabled experiment collapses,
-the remaining defect is isolated to the attention path rather than the ROCmFP4
-matrix kernels.
+8060S becomes logical `ROCm0`), uses the original joined GGUF with its native mmap
+placement, and uses neither MTP nor heterogeneous placement. It first runs with
+flash attention disabled, then repeats with it enabled. Both experiments test only
+shallow 0/512-token depths. If only the enabled experiment collapses, the remaining
+defect is isolated to the attention path rather than the ROCmFP4 matrix kernels.
 
 The pinned ROCmFPX revision uses the older `--mmap`/`--no-mmap` interface. The
 harness explicitly translates the Vulkan fork's `--load-mode mmap` into ROCmFPX's
@@ -700,9 +701,12 @@ After it passes, run the semantically matched control:
 ./run-bench.sh --tier backend-smoke-matched --fail-fast
 ```
 
-That tier holds CPU-mapped PLE, F16 KV, batch 2048, ubatch 512, context, prompts,
-decode length, and flash-attention state constant. Only the backend/device spelling
-and the equivalent mmap syntax differ.
+That tier holds the quantized weights, F16 KV, batch 2048, ubatch 512, context,
+prompts, decode length, and flash-attention state constant. Each backend uses the
+PLE representation it actually supports: Vulkan uses the PLE16 GGUF with the split
+tables CPU-mapped, while ROCm uses the original joined GGUF with native mmap
+placement. PLE16 exists only to work around Vulkan's per-buffer allocation limit;
+it is not a separate quality variant and must not be forced into the ROCm path.
 
 If shallow performance is sane, localize the previously reported context cliff:
 

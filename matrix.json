@@ -661,11 +661,11 @@
       "request_timeout_s": 3600
     },
     "rocm-smoke": {
-      "description": "Gated ROCm 10 APU-only bring-up comparing flash attention off/on with PLE mmap on CPU.",
+      "description": "Gated ROCm 10 APU-only bring-up using the native joined PLE under mmap and comparing flash attention off/on.",
       "require_rocm_audit": true,
       "experiments": [
-        "apu_hip_ple16_cpu_no_mtp_no_fa",
-        "apu_hip_ple16_cpu_no_mtp"
+        "apu_hip_joined_f16kv_no_mtp_no_fa",
+        "apu_hip_joined_f16kv_no_mtp"
       ],
       "workloads": [
         "code"
@@ -685,7 +685,7 @@
       "require_rocm_audit": true,
       "cache_state": "hot",
       "experiments": [
-        "apu_hip_ple16_cpu_no_mtp"
+        "apu_hip_joined_f16kv_no_mtp"
       ],
       "workloads": [
         "code"
@@ -710,14 +710,14 @@
       "request_timeout_s": 1800
     },
     "backend-smoke-matched": {
-      "description": "Semantically matched Vulkan/ROCm APU-only comparison with explicit mmap, CPU PLE, F16 KV, batch 2048, ubatch 512, and flash attention off/on.",
+      "description": "Backend-compatible Vulkan/ROCm APU-only comparison using identical quantized weights and inference settings: PLE16 CPU mmap for Vulkan, joined mmap/native PLE placement for ROCm, F16 KV, batch 2048, ubatch 512, and flash attention off/on.",
       "require_rocm_audit": true,
       "cache_state": "hot",
       "experiments": [
         "apu_vk_ple16_cpu_no_mtp_no_fa",
-        "apu_hip_ple16_cpu_no_mtp_no_fa",
+        "apu_hip_joined_f16kv_no_mtp_no_fa",
         "apu_vk_ple16_cpu_no_mtp",
-        "apu_hip_ple16_cpu_no_mtp"
+        "apu_hip_joined_f16kv_no_mtp"
       ],
       "workloads": [
         "code"
@@ -738,7 +738,6 @@
       "require_rocm_audit": true,
       "experiments": [
         "apu_hip_joined_no_mtp",
-        "apu_hip_ple16_no_mtp",
         "expert_hip_no_mtp",
         "layer_90_10_hip_no_mtp",
         "layer_88_12_hip_no_mtp",
@@ -795,8 +794,7 @@
         "layer_82_18_vk_no_mtp",
         "layer_82_18_hip_no_mtp",
         "apu_vk_no_mtp",
-        "apu_hip_joined_no_mtp",
-        "apu_hip_ple16_no_mtp"
+        "apu_hip_joined_no_mtp"
       ],
       "workloads": [
         "code",
@@ -1828,8 +1826,7 @@
         "ROCM_PATH": "/opt/rocm-10.0.0",
         "HIP_PATH": "/opt/rocm-10.0.0",
         "LD_LIBRARY_PATH": "/opt/rocm-10.0.0/lib:/opt/rocm-10.0.0/lib/rocm_sysdeps/lib",
-        "ROCR_VISIBLE_DEVICES": "1",
-        "GGML_CUDA_ENABLE_UNIFIED_MEMORY": "1"
+        "ROCR_VISIBLE_DEVICES": "1"
       },
       "args": [
         "--device",
@@ -1842,7 +1839,7 @@
     },
     {
       "name": "expert_hip_no_mtp",
-      "description": "Experimental heterogeneous ROCm placement without global managed-memory fallback.",
+      "description": "Experimental heterogeneous ROCm placement using the native joined PLE under mmap without global managed-memory fallback.",
       "backend": "rocm",
       "translate_server_options": {
         "--load-mode": {
@@ -1852,7 +1849,7 @@
         }
       },
       "server": "{hip_server}",
-      "model": "{model_ple16}",
+      "model": "{model_joined}",
       "env": {
         "ROCM_PATH": "/opt/rocm-10.0.0",
         "HIP_PATH": "/opt/rocm-10.0.0",
@@ -1866,44 +1863,15 @@
         "--tensor-split",
         "1,0",
         "--override-tensor",
-        "^ple_ngram_embd\\.[0-9]+\\.weight$=ROCm1,^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=ROCm1"
+        "^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=ROCm1"
       ]
     },
     {
-      "name": "apu_hip_ple16_no_mtp",
-      "description": "APU-only ROCm control using the PLE16 file for a structure-matched comparison.",
+      "name": "apu_hip_joined_f16kv_no_mtp",
+      "description": "Clean ROCm diagnostic: APU only, native joined PLE under mmap, F16 KV, batch 2048, no dGPU, and no MTP.",
       "extends": "apu_hip_joined_no_mtp",
-      "model": "{model_ple16}"
-    },
-    {
-      "name": "apu_hip_ple16_cpu_no_mtp",
-      "description": "Clean ROCm diagnostic: APU only, no managed-memory fallback, split PLE mmap on CPU, F16 KV, no dGPU, and no MTP.",
-      "backend": "rocm",
       "baseline": false,
-      "translate_server_options": {
-        "--load-mode": {
-          "mmap": [
-            "--mmap"
-          ]
-        }
-      },
-      "server": "{hip_server}",
-      "model": "{model_ple16}",
-      "env": {
-        "ROCM_PATH": "/opt/rocm-10.0.0",
-        "HIP_PATH": "/opt/rocm-10.0.0",
-        "LD_LIBRARY_PATH": "/opt/rocm-10.0.0/lib:/opt/rocm-10.0.0/lib/rocm_sysdeps/lib",
-        "ROCR_VISIBLE_DEVICES": "1"
-      },
-      "args": [
-        "--device",
-        "ROCm0",
-        "--main-gpu",
-        "0",
-        "--split-mode",
-        "none",
-        "--override-tensor",
-        "^ple_ngram_embd\\.[0-9]+\\.weight$=CPU",
+      "args_append": [
         "--batch-size",
         "2048",
         "--cache-type-k",
@@ -1913,9 +1881,9 @@
       ]
     },
     {
-      "name": "apu_hip_ple16_cpu_no_mtp_no_fa",
-      "description": "Matched APU-only ROCm diagnostic with flash attention disabled to isolate the attention path from ROCmFP4 matrix kernels.",
-      "extends": "apu_hip_ple16_cpu_no_mtp",
+      "name": "apu_hip_joined_f16kv_no_mtp_no_fa",
+      "description": "Joined-model APU-only ROCm diagnostic with flash attention disabled to isolate the attention path from ROCmFP4 matrix kernels.",
+      "extends": "apu_hip_joined_f16kv_no_mtp",
       "baseline": false,
       "args_append": [
         "--flash-attn",
