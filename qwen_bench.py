@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.19.0"
+VERSION = "1.19.1"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -2494,6 +2494,19 @@ def execute_rocm_audit(args: argparse.Namespace) -> pathlib.Path:
         raise ValueError("--devices must select at least one ROCm backend")
     report = run_rocm_audit(config, output, args.run_ops, devices, args.timeout)
     print(json.dumps(report, indent=2))
+    archive_path = output.parent / f"rocm-audit-{stamp()}.tar.gz"
+    audit_logs = output.parent / "rocm-audit-logs"
+    with tarfile.open(archive_path, "w:gz", compresslevel=6) as archive:
+        if output.is_file():
+            archive.add(output, arcname=output.name)
+        if audit_logs.is_dir():
+            archive.add(audit_logs, arcname=audit_logs.name)
+    digest = sha256_file(archive_path)
+    archive_path.with_name(archive_path.name + ".sha256").write_text(
+        f"{digest}  {archive_path.name}\n", encoding="ascii",
+    )
+    print(f"Archive: {archive_path}")
+    print(f"Checksum: {archive_path}.sha256")
     if not report["ready_for_model_benchmarks"]:
         raise RuntimeError(
             "ROCm audit did not prove the build safe for model benchmarks; inspect "

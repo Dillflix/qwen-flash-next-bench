@@ -654,6 +654,9 @@ python3 qwen_rocm.py collect \
 python3 qwen_bench.py rocm-audit --run-ops
 ```
 
+Both commands create one `.tar.gz` plus a SHA-256 file automatically. The audit
+archive is written even when a gate fails, so failed numerical output is preserved.
+
 The audit has two independent functional gates on both GPUs:
 
 1. ordinary Q8_0 `MUL_MAT` and `MUL_MAT_ID`, proving ROCm 10 and the generic HIP
