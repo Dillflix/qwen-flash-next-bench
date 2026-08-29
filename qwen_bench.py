@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.27.0"
+VERSION = "1.28.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -71,6 +71,8 @@ SINGLE_VALUE_SERVER_OPTIONS = {
     "--spec-draft-ngl",
     "--spec-draft-n-max",
     "--spec-draft-p-min",
+    "--spec-draft-type-k",
+    "--spec-draft-type-v",
     "--spec-type",
     "--split-mode",
     "--slot-save-path",
@@ -3090,6 +3092,64 @@ def self_test() -> None:
     for args in (finalist_args[2], finalist_args[4]):
         assert option_value(args, "--spec-draft-type-k") == "q8_0"
         assert option_value(args, "--spec-draft-type-v") == "q8_0"
+    rocm_ple_tier = expanded_shipped_config["tiers"]["rocm-ple-ssd"]
+    assert rocm_ple_tier.get("require_rocm_audit") is True
+    assert rocm_ple_tier.get("require_rocm_mtp") is True
+    assert int(rocm_ple_tier["warmup_depth"]) >= max(int(x) for x in rocm_ple_tier["depths"])
+    rocm_ple_experiments = select_experiments(expanded_shipped_config, rocm_ple_tier, None)
+    assert [item["name"] for item in rocm_ple_experiments] == [
+        "expert_hip_f16kv_mtp_n3_dgpu_ub2048",
+        "expert_hip_f16kv_mtp_n3_dgpu_ub2048_ple_cpu",
+    ]
+    rocm_ple_args = [
+        server_command(expanded_shipped_config, rocm_ple_tier, item)[1:]
+        for item in rocm_ple_experiments
+    ]
+    assert all("--mmap" in args and "--load-mode" not in args for args in rocm_ple_args)
+    assert all(option_value(args, "--spec-draft-device") == "ROCm0" for args in rocm_ple_args)
+    assert all(option_value(args, "--spec-draft-n-max") == "3" for args in rocm_ple_args)
+    assert all(option_value(args, "--spec-draft-type-k") == "f16" for args in rocm_ple_args)
+    assert all(option_value(args, "--spec-draft-type-v") == "f16" for args in rocm_ple_args)
+    rocm_ple_override = option_value(rocm_ple_args[1], "--override-tensor") or ""
+    assert "ffn_(down|gate|up)_exps" in rocm_ple_override
+    assert "per_layer_token_embd" in rocm_ple_override and "=CPU" in rocm_ple_override
+    rocm_vision_smoke = expanded_shipped_config["tiers"]["rocm-vision-smoke"]
+    assert rocm_vision_smoke.get("mode") == "vision"
+    assert rocm_vision_smoke.get("require_rocm_audit") is True
+    assert rocm_vision_smoke.get("require_rocm_mtp") is True
+    rocm_vision_experiments = select_experiments(
+        expanded_shipped_config, rocm_vision_smoke, None,
+    )
+    assert [item["name"] for item in rocm_vision_experiments] == [
+        "vision_bf16_cpu_hip_no_mtp",
+        "vision_bf16_dgpu_hip_no_mtp",
+        "vision_bf16_dgpu_hip_mtp_n3",
+    ]
+    rocm_vision_args = [
+        server_command(expanded_shipped_config, rocm_vision_smoke, item)[1:]
+        for item in rocm_vision_experiments
+    ]
+    assert all(item.get("backend") == "rocm" for item in rocm_vision_experiments)
+    assert all(option_value(args, "--mmproj").endswith("-BF16.gguf") for args in rocm_vision_args)
+    assert "--no-mmproj-offload" in rocm_vision_args[0]
+    assert all("--mmproj-offload" in args for args in rocm_vision_args[1:])
+    assert all(
+        item.get("env", {}).get("MTMD_BACKEND_DEVICE") == "ROCm0"
+        for item in rocm_vision_experiments[1:]
+    )
+    rocm_vision_mtp_args = rocm_vision_args[-1]
+    assert option_value(rocm_vision_mtp_args, "--spec-draft-device") == "ROCm0"
+    assert option_value(rocm_vision_mtp_args, "--spec-draft-n-max") == "3"
+    assert option_value(rocm_vision_mtp_args, "--spec-draft-type-k") == "f16"
+    assert option_value(rocm_vision_mtp_args, "--spec-draft-type-v") == "f16"
+    for tier_name in ("rocm-ple-ssd", "rocm-vision-smoke", "rocm-vision"):
+        production_tier = expanded_shipped_config["tiers"][tier_name]
+        for experiment in select_experiments(expanded_shipped_config, production_tier, None):
+            production_args = server_command(
+                expanded_shipped_config, production_tier, experiment,
+            )[1:]
+            assert option_value(production_args, "--spec-draft-type-k") != "q8_0"
+            assert option_value(production_args, "--spec-draft-type-v") != "q8_0"
     mtp_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-qwen4exp-mtp.patch"
     assert mtp_patch.is_file()
     mtp_patch_text = mtp_patch.read_text(encoding="utf-8")

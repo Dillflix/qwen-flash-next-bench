@@ -840,7 +840,7 @@
       "request_timeout_s": 1800
     },
     "rocm-mtp-finalists": {
-      "description": "Matched final ROCm controls for n=3 MTP: no-MTP versus F16/Q8 draft KV at ubatch 2048, plus a bounded batch/ubatch 4096 probe.",
+      "description": "Historical matched ROCm finalist run. Q8 draft KV and MTP batch/ubatch 4096 were rejected; production tiers use n=3, F16 draft KV, and batch/ubatch 2048.",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
       "cache_state": "hot",
@@ -864,6 +864,32 @@
       "warmup_depth": 32768,
       "rounds": 2,
       "settle_seconds": 2,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
+    },
+    "rocm-ple-ssd": {
+      "description": "Hot joined-PLE ROCm A/B: automatic placement versus explicit CPU mmap/SSD backing, both on the production n=3 F16-draft-KV topology.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "expert_hip_f16kv_mtp_n3_dgpu_ub2048",
+        "expert_hip_f16kv_mtp_n3_dgpu_ub2048_ple_cpu"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        4096,
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 512,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 2,
+      "settle_seconds": 2,
+      "telemetry_interval_s": 0.2,
       "startup_timeout_s": 1200,
       "request_timeout_s": 1800
     },
@@ -981,6 +1007,71 @@
       "vision_min_anchor_score": 1.0,
       "warmups": 1,
       "rounds": 3,
+      "settle_seconds": 2,
+      "telemetry_interval_s": 0.2,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
+    },
+    "rocm-vision-smoke": {
+      "description": "BF16 ROCm vision bring-up: CPU projector reference, 7900 XT projector, then 7900 XT projector plus production n=3 MTP with F16 target and draft KV.",
+      "mode": "vision",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "vision_bf16_cpu_hip_no_mtp",
+        "vision_bf16_dgpu_hip_no_mtp",
+        "vision_bf16_dgpu_hip_mtp_n3"
+      ],
+      "vision_cases": [
+        "shapes"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 8192,
+      "n_predict": 64,
+      "request": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "vision_min_anchor_score": 1.0,
+      "warmups": 1,
+      "rounds": 1,
+      "settle_seconds": 2,
+      "telemetry_interval_s": 0.2,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1200
+    },
+    "rocm-vision": {
+      "description": "Two-round BF16 ROCm vision validation on the 7900 XT projector with and without production n=3 MTP.",
+      "mode": "vision",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "vision_bf16_dgpu_hip_no_mtp",
+        "vision_bf16_dgpu_hip_mtp_n3"
+      ],
+      "vision_cases": [
+        "shapes",
+        "invoice",
+        "chart"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 16384,
+      "n_predict": 128,
+      "request": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "vision_min_anchor_score": 1.0,
+      "warmups": 1,
+      "rounds": 2,
       "settle_seconds": 2,
       "telemetry_interval_s": 0.2,
       "startup_timeout_s": 1200,
@@ -2036,7 +2127,20 @@
       "extends": "expert_hip_f16kv_mtp_n3_dgpu",
       "args_append": [
         "--ubatch-size",
-        "2048"
+        "2048",
+        "--spec-draft-type-k",
+        "f16",
+        "--spec-draft-type-v",
+        "f16"
+      ]
+    },
+    {
+      "name": "expert_hip_f16kv_mtp_n3_dgpu_ub2048_ple_cpu",
+      "description": "Production ROCm topology with the joined 51.2B-parameter PLE tensor explicitly assigned to CPU under mmap so its pages remain reclaimable and SSD-backed.",
+      "extends": "expert_hip_f16kv_mtp_n3_dgpu_ub2048",
+      "args_append": [
+        "--override-tensor",
+        "^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=ROCm1,^per_layer_token_embd\\.weight$=CPU"
       ]
     },
     {
@@ -2415,6 +2519,57 @@
         "4",
         "--spec-draft-p-min",
         "0.75"
+      ]
+    },
+    {
+      "name": "vision_bf16_cpu_hip_no_mtp",
+      "description": "BF16 vision projector on CPU as the ROCm numerical reference; the joined target uses routed experts on the iGPU and all remaining eligible tensors on the 7900 XT.",
+      "extends": "expert_hip_f16kv_no_mtp_ub2048",
+      "baseline": true,
+      "args_append": [
+        "--mmproj",
+        "{mmproj_bf16}",
+        "--no-mmproj-offload",
+        "--image-min-tokens",
+        "1024",
+        "--image-max-tokens",
+        "2240"
+      ]
+    },
+    {
+      "name": "vision_bf16_dgpu_hip_no_mtp",
+      "description": "BF16 vision projector explicitly pinned to the RX 7900 XT through MTMD_BACKEND_DEVICE on the production ROCm target placement.",
+      "extends": "vision_bf16_cpu_hip_no_mtp",
+      "baseline": false,
+      "env": {
+        "MTMD_BACKEND_DEVICE": "ROCm0"
+      },
+      "args_append": [
+        "--mmproj-offload"
+      ]
+    },
+    {
+      "name": "vision_bf16_dgpu_hip_mtp_n3",
+      "description": "BF16 projector and Q8 MTP weights on the RX 7900 XT using n=3 and F16 target/draft KV; Q8 draft KV is deliberately excluded.",
+      "extends": "vision_bf16_dgpu_hip_no_mtp",
+      "baseline": false,
+      "args_append": [
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "ROCm0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "3",
+        "--spec-draft-p-min",
+        "0.75",
+        "--spec-draft-type-k",
+        "f16",
+        "--spec-draft-type-v",
+        "f16"
       ]
     }
   ]

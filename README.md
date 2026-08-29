@@ -171,6 +171,30 @@ backend-specific failures in llama.cpp, so a successful projector-only run is a
 hard prerequisite; `vision-mtp` is a compatibility gate, not an assumption that
 the combination is safe.
 
+The Vulkan tiers above remain useful historical controls. Production ROCm vision
+has its own bring-up path using the native joined model, BF16 projector, routed
+experts on the iGPU, and the rest of the target on the 7900 XT. It tests the CPU
+projector first, then `MTMD_BACKEND_DEVICE=ROCm0`, and finally combines that
+projector placement with the winning n=3 MTP topology:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-vision-smoke
+./run-bench.sh --tier rocm-vision-smoke
+```
+
+Do not use `--fail-fast` for initial bring-up: the three isolated starts identify
+whether a failure belongs to ROCm vision support, projector GPU offload, or the
+vision-plus-MTP combination. Once all three pass, run the complete fixture set:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-vision
+./run-bench.sh --tier rocm-vision
+```
+
+Both ROCm tiers explicitly use F16 target KV and F16 draft KV. Q8 draft KV is not
+present. The Q8 projector is also excluded because the earlier Vulkan run failed
+the OCR quality gate; that is independent of the draft-KV decision.
+
 If the projector plus target allocation exceeds 20 GB on the 7900 XT, first change
 the vision experiments from `--tensor-split 88,12` to `90,10`. If that is still
 insufficient, reduce batch and ubatch together to 1024. Do not move the projector to
@@ -834,6 +858,42 @@ It uses two rounds and 512 generated tokens. Do not use `--fail-fast`: a failed
 python3 qwen_bench.py preflight --tier rocm-mtp-finalists
 ./run-bench.sh --tier rocm-mtp-finalists
 ```
+
+Run `20260829-131616-rocm-mtp-finalists` makes the production decision. At
+batch/ubatch 2048, F16 draft KV reached 51.23 tok/s decode and 652.08 tok/s
+prefill at 4K, and 50.11/535.16 tok/s at 32K, with about 88% MTP acceptance.
+Q8 draft KV saved only 0.07 GiB of 7900 XT VRAM at 4K and 0.36 GiB at 32K while
+slightly reducing throughput and acceptance, so it is excluded from every
+production ROCm tier.
+
+The no-MTP batch/ubatch-4096 control improved prefill by roughly 2-3%, but the
+MTP-4096 probe exhausted 7900 XT memory while allocating a 4,080 MiB compute
+buffer even with the smaller Q8 draft cache. F16 draft KV needs at least as much
+memory, so repeating the same topology with F16 would not be a meaningful test.
+The production MTP configuration is therefore n=3, F16 target and draft KV, and
+batch/ubatch 2048. A future 4096 MTP experiment must first move more target
+tensors off the 7900 XT or reduce another allocation.
+
+Validate joined-PLE SSD backing separately from the MTP decision:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-ple-ssd
+./run-bench.sh --tier rocm-ple-ssd
+```
+
+This compares automatic placement with a candidate that keeps the routed experts
+on `ROCm1` and additionally applies
+`^per_layer_token_embd\.weight$=CPU` under `--mmap`. The 51.2B-parameter PLE is
+then file-backed through the Linux page cache: hot pages can occupy RAM, but they
+are reclaimable and can be faulted from SSD instead of consuming a permanent GTT
+allocation. This is SSD backing, not direct I/O or a promise that every access
+hits the SSD.
+
+Both candidates receive the same excluded 32K warm-up, followed by slot erasure,
+before measured 4K and 32K requests. Compare prefill/decode, file versus anonymous
+RSS, GTT/VRAM, `MemAvailable`, physical read bytes, and major faults. The explicit
+CPU candidate is successful only if it materially reduces device/GTT residency
+without an unacceptable hot-throughput regression.
 
 Benchmark the fork-specific Vulkan kernel and prefill knobs on the representative 88/12 placement:
 
