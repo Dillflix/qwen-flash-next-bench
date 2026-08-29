@@ -25,6 +25,18 @@ grep -Rq 'Q4_0_ROCMFP4_FAST' "$SOURCE_DIR/ggml/src/ggml-cuda" \
 grep -q 'rocmfp4_hip.cu' "$SOURCE_DIR/ggml/src/ggml-hip/CMakeLists.txt" \
     || fail "HIP CMake does not compile ggml/rocmfp4/rocmfp4_hip.cu"
 
+C_COMPILER=""
+for candidate in \
+    "$ROCM_ROOT/llvm/bin/clang" \
+    "$ROCM_ROOT/lib/llvm/bin/clang" \
+    "$ROCM_ROOT/bin/amdclang"; do
+    if [[ -x "$candidate" ]]; then
+        C_COMPILER="$candidate"
+        break
+    fi
+done
+[[ -n "$C_COMPILER" ]] || fail "could not find ROCm clang under $ROCM_ROOT"
+
 HIP_COMPILER=""
 for candidate in \
     "$ROCM_ROOT/llvm/bin/clang++" \
@@ -37,13 +49,19 @@ for candidate in \
 done
 [[ -n "$HIP_COMPILER" ]] || fail "could not find ROCm clang++ under $ROCM_ROOT"
 
+cmake_fresh=()
 if [[ -f "$BUILD_DIR/CMakeCache.txt" ]]; then
     cached_source="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$BUILD_DIR/CMakeCache.txt" | head -1)"
     cached_arch="$(sed -n 's/^CMAKE_HIP_ARCHITECTURES:[^=]*=//p' "$BUILD_DIR/CMakeCache.txt" | head -1)"
+    cached_c="$(sed -n 's/^CMAKE_C_COMPILER:FILEPATH=//p' "$BUILD_DIR/CMakeCache.txt" | head -1)"
     [[ "$cached_source" == "$SOURCE_DIR" ]] \
         || fail "$BUILD_DIR belongs to $cached_source; choose a new QWEN_HIP_BUILD directory"
     [[ "$cached_arch" == 'gfx1100;gfx1151' ]] \
         || fail "$BUILD_DIR was configured for '$cached_arch'; choose a new empty QWEN_HIP_BUILD directory"
+    if [[ "$cached_c" != "$C_COMPILER" ]]; then
+        echo "Refreshing CMake cache: C compiler was ${cached_c:-unset}; switching to $C_COMPILER"
+        cmake_fresh=(--fresh)
+    fi
 fi
 
 export ROCM_PATH="$ROCM_ROOT"
@@ -51,8 +69,9 @@ export HIP_PATH="$ROCM_ROOT"
 export PATH="$ROCM_ROOT/bin:$ROCM_ROOT/llvm/bin:$ROCM_ROOT/lib/llvm/bin:$PATH"
 export LD_LIBRARY_PATH="$ROCM_ROOT/lib:$ROCM_ROOT/lib64:$ROCM_ROOT/lib/rocm_sysdeps/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-cmake -S "$SOURCE_DIR" -B "$BUILD_DIR" -G Ninja \
+cmake "${cmake_fresh[@]}" -S "$SOURCE_DIR" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER="$C_COMPILER" \
     -DCMAKE_CXX_COMPILER="$HIP_COMPILER" \
     -DCMAKE_HIP_COMPILER="$HIP_COMPILER" \
     -DCMAKE_HIP_COMPILER_ROCM_ROOT="$ROCM_ROOT" \
