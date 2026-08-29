@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.33.0"
+VERSION = "1.33.1"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -1740,7 +1740,8 @@ def preflight(
         if vision_mode or not isinstance(text_quality_anchors, dict):
             errors.append("text_quality_anchors must be a workload-to-anchor-list mapping on a text tier")
         else:
-            unknown = sorted(set(text_quality_anchors) - set(workload_names))
+            selected_workloads = set(str(value) for value in tier.get("workloads", []))
+            unknown = sorted(set(text_quality_anchors) - selected_workloads)
             if unknown:
                 errors.append(f"text quality anchors reference unselected workloads: {unknown}")
             for workload, anchors in text_quality_anchors.items():
@@ -2834,6 +2835,18 @@ def self_test() -> None:
     assert probability["probability_steps"] == 1
     assert probability["first_token_probabilities"][0]["id"] == 1
     assert len(probability["probabilities_sha256"]) == 64
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        preflight_report = preflight(
+            {"defaults": {"host": "127.0.0.1", "port": 0}},
+            {
+                "workloads": ["code"],
+                "text_quality_anchors": {"code": ["def merge_intervals("]},
+                "text_quality_min_anchor_score": 1.0,
+                "warmups": 0,
+            },
+            [], pathlib.Path(raw_tmp), allow_busy=True, skip_path_check=True,
+        )
+        assert preflight_report["errors"] == []
     vision_log = extract_vision_log_metrics(
         "image/slice encoded in 12.5 ms\nimage decoded (batch 1/1) in 3.5 ms\nimage processed in 16.2 ms\n"
     )
