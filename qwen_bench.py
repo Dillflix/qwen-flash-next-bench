@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.36.1"
+VERSION = "1.36.2"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -56,6 +56,7 @@ SINGLE_VALUE_SERVER_OPTIONS = {
     "--cache-type-v",
     "--ctx-size",
     "--ctx-checkpoints",
+    "--checkpoint-every-n-tokens",
     "--device",
     "--fit",
     "--flash-attn",
@@ -68,7 +69,6 @@ SINGLE_VALUE_SERVER_OPTIONS = {
     "--n-gpu-layers",
     "--override-tensor",
     "--parallel",
-    "--checkpoint-min-step",
     "--port",
     "--spec-draft-device",
     "--spec-draft-ngl",
@@ -1946,6 +1946,12 @@ def preflight(
         effective_args = server_command(config, tier, experiment)[1:]
         for error in server_arg_compatibility_errors(effective_args):
             errors.append(f"{experiment['name']}: {error}")
+        if HOST_CHECKPOINT_MARKER in experiment.get("env", {}):
+            if option_value(effective_args, "--checkpoint-every-n-tokens") is None:
+                errors.append(
+                    f"{experiment['name']}: host-checkpoint experiments require "
+                    "--checkpoint-every-n-tokens"
+                )
         for kind in ("server", "model"):
             path = pathlib.Path(str(experiment[kind]))
             entry = {"experiment": experiment["name"], "kind": kind, "path": str(path)}
@@ -2080,6 +2086,24 @@ def preflight(
                 help_text = str(capture.get("stdout", "")) + str(capture.get("stderr", ""))
                 if capture.get("returncode") != 0 or "--mmproj" not in help_text:
                     errors.append(f"{server_path}: build does not advertise --mmproj support")
+    if require_host_checkpoints and not skip_path_check:
+        checked_servers: set[str] = set()
+        for experiment in experiments:
+            server_path = str(experiment["server"])
+            if server_path in checked_servers or not pathlib.Path(server_path).is_file():
+                continue
+            checked_servers.add(server_path)
+            capture = run_capture([server_path, "--help"], env=merged_env(config, experiment), timeout=60)
+            help_text = str(capture.get("stdout", "")) + str(capture.get("stderr", ""))
+            missing = [
+                option for option in ("--ctx-checkpoints", "--checkpoint-every-n-tokens")
+                if option not in help_text
+            ]
+            if capture.get("returncode") != 0 or missing:
+                errors.append(
+                    f"{server_path}: build does not advertise required checkpoint options: "
+                    + ", ".join(missing)
+                )
     if tier.get("startup_only") and (int(tier.get("warmups", 0)) != 0 or concurrency != 1):
         errors.append("startup-only tiers require warmups 0 and concurrency 1")
     if tier.get("require_rocm_audit") or require_host_checkpoints:
@@ -2346,9 +2370,10 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                     HOST_CHECKPOINT_MARKER in experiment.get("env", {})
                     and int(option_value(effective_args, "--ctx-checkpoints") or "32") > 0
                 )
-                checkpoint_min_step = int(
-                    option_value(effective_args, "--checkpoint-min-step") or "8192"
+                checkpoint_every_nt = int(
+                    option_value(effective_args, "--checkpoint-every-n-tokens") or "-1"
                 )
+                checkpoint_verification_threshold = checkpoint_every_nt if checkpoint_every_nt > 0 else 64
                 print(f"\n=== {experiment['name']} round {round_index + 1}/{rounds} ===", flush=True)
                 print(command_text(command), flush=True)
                 server = ManagedServer(
@@ -2461,14 +2486,14 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             return
                         prompt_counts = [extract_timing(response).get("prompt_n") for response in responses]
                         if not any(
-                            isinstance(value, (int, float)) and int(value) >= checkpoint_min_step
+                            isinstance(value, (int, float)) and int(value) >= checkpoint_verification_threshold
                             for value in prompt_counts
                         ):
                             return
                         log_text = server.log_path.read_text(encoding="utf-8", errors="ignore")
                         if "forcing checkpoint state to host memory" not in log_text:
                             raise RuntimeError(
-                                "a prompt crossed --checkpoint-min-step, but the runtime did not confirm "
+                                "a prompt crossed the configured checkpoint interval, but the runtime did not confirm "
                                 "host-resident checkpoints; this production run is invalid"
                             )
                         host_checkpoint_runtime_verified = True
@@ -3923,7 +3948,8 @@ def self_test() -> None:
     )[1:]
     assert option_value(production_base_args, "--cache-ram") == "0"
     assert option_value(production_base_args, "--ctx-checkpoints") == "8"
-    assert option_value(production_base_args, "--checkpoint-min-step") == "32768"
+    assert option_value(production_base_args, "--checkpoint-every-n-tokens") == "32768"
+    assert "--checkpoint-min-step" not in production_base_args
     assert production_base.get("env", {}).get(HOST_CHECKPOINT_MARKER) == "1"
     ple_storage_screen = expanded_shipped_config["tiers"]["rocm-ple-storage-screen"]
     ple_ram_capacity = expanded_shipped_config["tiers"]["rocm-ple-ram-capacity"]

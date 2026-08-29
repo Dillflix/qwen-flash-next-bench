@@ -1184,7 +1184,7 @@ storage from consuming 7900 XT VRAM. This is the pinned-fork adaptation of the
 host-checkpoint workaround validated in
 [llama.cpp issue #23719](https://github.com/ggml-org/llama.cpp/issues/23719).
 Production bounds the subsystem to eight
-checkpoints with `--ctx-checkpoints 8 --checkpoint-min-step 32768`. A near-full
+checkpoints with `--ctx-checkpoints 8 --checkpoint-every-n-tokens 32768`. A near-full
 253952-token prompt crosses seven such
 boundaries, so no useful checkpoint is evicted in the one-slot 256K proof. The
 server log records both the environment setting and, at the first checkpoint,

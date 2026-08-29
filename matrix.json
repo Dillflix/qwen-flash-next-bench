@@ -2610,7 +2610,7 @@
         "--cont-batching",
         "--ctx-checkpoints",
         "8",
-        "--checkpoint-min-step",
+        "--checkpoint-every-n-tokens",
         "32768",
         "--no-context-shift"
       ]
