@@ -729,6 +729,7 @@
       "ctx_size": 4096,
       "n_predict": 64,
       "warmups": 1,
+      "warmup_depth": 512,
       "rounds": 1,
       "settle_seconds": 2
     },

@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.22.0"
+VERSION = "1.22.1"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -2835,6 +2835,22 @@ def self_test() -> None:
         None,
     )
     assert [item["name"] for item in ordered] == ["b", "a"]
+    shipped_config = load_json(pathlib.Path(__file__).with_name("matrix.json"))
+    shipped_defaults = shipped_config.get("defaults", {})
+    for tier_name, tier in shipped_config.get("tiers", {}).items():
+        cache_state = str(tier.get("cache_state", "unspecified"))
+        if cache_state == "hot":
+            assert int(tier.get("warmups", 0)) >= 1, f"{tier_name}: hot tier has no warm-up"
+            if str(tier.get("mode", "text")) != "vision":
+                assert int(tier.get("warmup_depth", 0)) > 0, (
+                    f"{tier_name}: hot text tier has no nonzero warm-up depth"
+                )
+            assert bool(tier.get(
+                "erase_slot_between_requests",
+                shipped_defaults.get("erase_slot_between_requests", False),
+            )), f"{tier_name}: hot tier does not erase slot KV state"
+        if cache_state == "cold":
+            assert int(tier.get("warmups", 0)) == 0, f"{tier_name}: cold tier has warm-ups"
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 
