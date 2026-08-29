@@ -1000,21 +1000,63 @@ initialized, but allocation alone is not the acceptance criterion. Exact peak
 production margins. The same 88/12 placement retained 1118 MiB at ubatch 1536
 and 2837 MiB at ubatch 1024.
 
-The quality tier therefore keeps all three 88/12 ubatch variants so 1792 records
-the speed ceiling, but excludes the three low-headroom layer splits. It repeats
-the 4K/32K deterministic quality and throughput screen before any near-full
-request:
+The initial quality tier kept all three 88/12 ubatch variants so 1792 could
+record the speed ceiling while excluding the three low-headroom layer splits:
 
 ```bash
 python3 qwen_bench.py preflight --tier rocm-256k-fit-quality
 ./run-bench.sh --tier rocm-256k-fit-quality
 ```
 
-The 1792 arm is not eligible for the final production proof because its 262 MiB
-startup margin is too small, irrespective of its 64K speed. After the quality
-archive selects between ubatch 1536 and 1024, `rocm-256k-fit-full` performs
-exact-token 128K and 253952-token prompts, leaving 8192 tokens of the native
-262144 window for generation and server overhead:
+Run `20260829-163847-rocm-256k-fit-quality` invalidated a simple throughput or
+MTP-acceptance ranking. At 32K, ubatch 1792 still answered the requested
+`merge_intervals` task and accepted 94.8% of draft tokens. Ubatch 1536 answered
+an unrelated Chinese llama-server question at 83.4%, while ubatch 1024 emitted
+incoherent unrelated code at 69.7%. The result is deterministic task/state
+divergence, not an ordinary acceptance-rate fluctuation. SSD traffic, page
+faults, and temperature did not correlate with correctness.
+
+Do not run the final 256K tier yet. First remove MTP from the equation and
+fingerprint the target model's next-token distribution across the same ubatches:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-ubatch-target-fingerprint
+./run-bench.sh --tier rocm-ubatch-target-fingerprint --fail-fast
+```
+
+This runs two fresh-server rounds at 32K for ubatch 2048, 1792, 1536, and 1024.
+It requests the top 20 probabilities, stores a compact first-token view plus a
+distribution hash in `results.jsonl`, retains the complete response, and marks
+loss of the `merge_intervals` task as invalid. If these no-MTP fingerprints or
+task anchors diverge, the target's chunked Gated DeltaNet prefill/state path is
+the root problem; MTP acceptance is only reporting the changed target stream.
+
+Then repeat the full n=3 MTP path under the identical placement and F16 target
+and draft KV conditions:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-ubatch-mtp-repeatability
+./run-bench.sh --tier rocm-ubatch-mtp-repeatability --fail-fast
+```
+
+This uses two fresh-server rounds and 512-token decodes. Compare task-anchor
+pass/fail, output hashes, draft counts, and acceptance within each ubatch—not
+acceptance alone across different outputs. Historical run
+`20260829-131616-rocm-mtp-finalists` produced identical hashes and acceptance in
+both ubatch-2048 rounds, which argues for deterministic configuration-dependent
+state divergence rather than random ROCm instability.
+
+The symptom closely parallels open llama.cpp correctness reports for hybrid
+Gated DeltaNet models: [issue #27237](https://github.com/ggml-org/llama.cpp/issues/27237)
+reports batch/ubatch-dependent garbage, including with MTP disabled, and
+[issue #27556](https://github.com/ggml-org/llama.cpp/issues/27556) reports
+deterministic HIP context loss on gfx1151 while individual backend-op tests pass.
+
+The 1792 arm still is not eligible for production because its 262 MiB startup
+margin is too small. The 1536 and 1024 arms are quarantined for observed task
+loss. Only after the diagnostic tiers identify a correctness-safe candidate may
+`rocm-256k-fit-full` perform exact-token 128K and 253952-token prompts, leaving
+8192 tokens of the native 262144 window for generation and server overhead:
 
 ```bash
 ./run-bench.sh --tier rocm-256k-fit-full \

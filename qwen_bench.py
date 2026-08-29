@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.32.0"
+VERSION = "1.33.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -1102,6 +1102,33 @@ def anchor_metrics(content: str, anchors: list[str]) -> dict[str, Any]:
     }
 
 
+def probability_metrics(response: dict[str, Any]) -> dict[str, Any]:
+    """Fingerprint optional llama-server n_probs output without inflating results.jsonl."""
+    probabilities = response.get("completion_probabilities")
+    if not isinstance(probabilities, list) or not probabilities:
+        return {}
+    canonical = json.dumps(
+        probabilities, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    first = probabilities[0] if isinstance(probabilities[0], dict) else {}
+    candidates = first.get("probs", []) if isinstance(first, dict) else []
+    compact: list[dict[str, Any]] = []
+    if isinstance(candidates, list):
+        for candidate in candidates[:20]:
+            if not isinstance(candidate, dict):
+                continue
+            compact.append({
+                key: candidate[key]
+                for key in ("id", "tok_str", "prob")
+                if key in candidate
+            })
+    return {
+        "probability_steps": len(probabilities),
+        "probabilities_sha256": hashlib.sha256(canonical).hexdigest(),
+        "first_token_probabilities": compact,
+    }
+
+
 def file_mark(path: pathlib.Path) -> int:
     try:
         return path.stat().st_size
@@ -1708,6 +1735,22 @@ def preflight(
                 errors.append(
                     f"{experiment['name']}: tier concurrency is {concurrency}, but effective --parallel is {parallel}"
                 )
+    text_quality_anchors = tier.get("text_quality_anchors")
+    if text_quality_anchors is not None:
+        if vision_mode or not isinstance(text_quality_anchors, dict):
+            errors.append("text_quality_anchors must be a workload-to-anchor-list mapping on a text tier")
+        else:
+            unknown = sorted(set(text_quality_anchors) - set(workload_names))
+            if unknown:
+                errors.append(f"text quality anchors reference unselected workloads: {unknown}")
+            for workload, anchors in text_quality_anchors.items():
+                if not isinstance(anchors, list) or not anchors or not all(
+                    isinstance(anchor, str) and anchor for anchor in anchors
+                ):
+                    errors.append(f"text quality anchors for {workload!r} must be a non-empty string list")
+        minimum = tier.get("text_quality_min_anchor_score")
+        if not isinstance(minimum, (int, float)) or not 0.0 <= float(minimum) <= 1.0:
+            errors.append("text_quality_min_anchor_score must be between 0 and 1")
     if vision_mode:
         if concurrency != 1:
             errors.append("vision tiers currently require concurrency 1")
@@ -1855,6 +1898,7 @@ def probe_row(
         "degenerate": degenerate,
         "timing": timing,
         "telemetry": telemetry,
+        **probability_metrics(response),
     }
 
 
@@ -2216,6 +2260,22 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                         )
                         if exact_prompt_tokens:
                             row["constructed_prompt_tokens"] = constructed_prompt_tokens
+                        text_anchors = tier.get("text_quality_anchors", {}).get(workload, [])
+                        if text_anchors:
+                            text_quality = anchor_metrics(response_content(response), list(text_anchors))
+                            minimum = float(tier.get("text_quality_min_anchor_score", 1.0))
+                            score = text_quality.get("anchor_score")
+                            quality_failure = (
+                                not isinstance(score, (int, float)) or float(score) < minimum
+                            )
+                            text_quality.update({
+                                "minimum_anchor_score": minimum,
+                                "quality_pass": not quality_failure,
+                            })
+                            row["text_quality"] = text_quality
+                            row["quality_failure"] = quality_failure
+                            if quality_failure:
+                                row["degenerate"] = True
                         if vision_mode:
                             row["vision"] = vision_metrics
                             min_anchor_score = float(tier.get("vision_min_anchor_score", 0.0))
@@ -2245,7 +2305,11 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                         draft = row["timing"].get("draft_acceptance")
                         predicted_n = row["timing"].get("predicted_n")
                         status_parts: list[str] = []
-                        if row.get("quality_failure"):
+                        if row.get("text_quality") and row.get("quality_failure"):
+                            score = row["text_quality"].get("anchor_score")
+                            score_text = f"{score:.0%}" if isinstance(score, (int, float)) else "unavailable"
+                            status_parts.append(f"INVALID text quality ({score_text} anchors)")
+                        elif row.get("quality_failure"):
                             score = vision_metrics.get("anchor_score")
                             score_text = f"{score:.0%}" if isinstance(score, (int, float)) else "unavailable"
                             status_parts.append(f"INVALID vision quality ({score_text} anchors)")
@@ -2474,11 +2538,13 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
     experiment_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in summary_rows:
         experiment_groups[row["experiment"]].append(row)
-    vision_quality: dict[str, list[bool]] = defaultdict(list)
+    gated_quality: dict[str, list[bool]] = defaultdict(list)
     for row in results:
-        quality_pass = row.get("vision", {}).get("quality_pass")
+        quality_pass = row.get("text_quality", {}).get("quality_pass")
+        if not isinstance(quality_pass, bool):
+            quality_pass = row.get("vision", {}).get("quality_pass")
         if isinstance(quality_pass, bool):
-            vision_quality[row["experiment"]].append(quality_pass)
+            gated_quality[row["experiment"]].append(quality_pass)
     overall: list[dict[str, Any]] = []
     for experiment, rows in experiment_groups.items():
         decode_speedups = [float(row["decode_speedup_vs_baseline"]) for row in rows if row["decode_speedup_vs_baseline"] and row["decode_speedup_vs_baseline"] > 0]
@@ -2487,7 +2553,7 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         accepts = [float(row["mtp_acceptance_median"]) for row in rows if row["mtp_acceptance_median"] is not None]
         decode_geomean = math.exp(statistics.fmean(math.log(value) for value in decode_speedups)) if decode_speedups else None
         prefill_geomean = math.exp(statistics.fmean(math.log(value) for value in prefill_speedups)) if prefill_speedups else None
-        quality = vision_quality.get(experiment, [])
+        quality = gated_quality.get(experiment, [])
         quality_passes = sum(quality)
         quality_eligible = not quality or quality_passes == len(quality)
         overall.append({
@@ -2498,8 +2564,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             "balanced_geomean_speedup": math.sqrt(decode_geomean * prefill_geomean) if decode_geomean and prefill_geomean else None,
             "hash_match": statistics.fmean(matches) if matches else None,
             "mtp_acceptance": statistics.median(accepts) if accepts else None,
-            "vision_quality_passes": quality_passes,
-            "vision_quality_samples": len(quality),
+            "quality_passes": quality_passes,
+            "quality_samples": len(quality),
             "quality_eligible": quality_eligible,
         })
     overall.sort(
@@ -2512,8 +2578,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         f"Declared cache state: `{load_json(run_dir / 'manifest.json').get('tier', {}).get('cache_state', 'unspecified')}`. "
         "Physical storage reads and major faults remain authoritative; a declared hot run is not hot if those counters stay high.\n\n",
         "## Overall comparable-cell ranking\n\n",
-        "Vision experiments with any measured anchor failure are disqualified from the overall speed ranking. Their raw passing-cell throughput remains visible for diagnosis.\n\n",
-        "| Experiment | Cells | Decode speedup | Prefill speedup | Balanced | Vision quality | Hash match | Median MTP accept |\n",
+        "Experiments with any measured text or vision anchor failure are disqualified from the overall speed ranking. Their raw passing-cell throughput remains visible for diagnosis.\n\n",
+        "| Experiment | Cells | Decode speedup | Prefill speedup | Balanced | Quality gates | Hash match | Median MTP accept |\n",
         "|---|---:|---:|---:|---:|---:|---:|---:|\n",
     ]
     for row in overall:
@@ -2525,8 +2591,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             else ("" if row["balanced_geomean_speedup"] is None else f"{row['balanced_geomean_speedup']:.3f}x")
         )
         quality = ""
-        if row["vision_quality_samples"]:
-            quality = f"{row['vision_quality_passes']}/{row['vision_quality_samples']} ({row['vision_quality_passes'] / row['vision_quality_samples']:.0%})"
+        if row["quality_samples"]:
+            quality = f"{row['quality_passes']}/{row['quality_samples']} ({row['quality_passes'] / row['quality_samples']:.0%})"
         match = "" if row["hash_match"] is None else f"{row['hash_match']:.0%}"
         accept = "" if row["mtp_acceptance"] is None else f"{row['mtp_acceptance']:.1%}"
         md.append(f"| {row['experiment']} | {row['cells']} | {decode_speedup} | {prefill_speedup} | {balanced} | {quality} | {match} | {accept} |\n")
@@ -2561,6 +2627,27 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
                 f"{fmt(row['vision_encode_ms_median'])} | {fmt(row['vision_decode_ms_median'])} | "
                 f"{fmt(row['vision_process_ms_median'])} | {fmt(row['prefill_tokens_median'], 0)} | "
                 f"{fmt(row['prefill_ms_median'])} | {fmt(row['http_wall_ms_median'])} |\n"
+            )
+    quality_failures = [
+        row for row in results
+        if row.get("status") in SUCCESS_STATES and row.get("quality_failure")
+    ]
+    if quality_failures:
+        md.extend([
+            "\n## Quality failures\n\n",
+            "These requests completed normally but lost required task or image anchors. They are excluded from all speed rankings.\n\n",
+            "| Experiment | Round | Workload | Depth | Gate | Score | Matched anchors |\n",
+            "|---|---:|---:|---:|---:|---:|---|\n",
+        ])
+        for row in quality_failures:
+            gate = row.get("text_quality") or row.get("vision") or {}
+            kind = "text" if row.get("text_quality") else "vision"
+            score = gate.get("anchor_score")
+            matched = ", ".join(str(value) for value in gate.get("anchors_matched", []))
+            md.append(
+                f"| {row.get('experiment', '')} | {int(row.get('round', 0)) + 1} | "
+                f"{row.get('workload', '')} | {row.get('requested_depth_tokens', '')} | {kind} | "
+                f"{fmt(100.0 * score, 0) + '%' if isinstance(score, (int, float)) else ''} | {matched} |\n"
             )
     md.extend([
         "\n## Residency and capacity telemetry\n\n",
@@ -2737,6 +2824,16 @@ def self_test() -> None:
     assert response_text_parts(reasoning_only) == ("", "visible reasoning")
     anchors = anchor_metrics(response_content(oai), ["red", "circle", "blue", "UNSLOTH 42"])
     assert anchors["anchor_score"] == 0.75
+    probability = probability_metrics({"completion_probabilities": [{
+        "content": "x",
+        "probs": [
+            {"id": 1, "tok_str": "x", "prob": 0.75},
+            {"id": 2, "tok_str": "y", "prob": 0.25},
+        ],
+    }]})
+    assert probability["probability_steps"] == 1
+    assert probability["first_token_probabilities"][0]["id"] == 1
+    assert len(probability["probabilities_sha256"]) == 64
     vision_log = extract_vision_log_metrics(
         "image/slice encoded in 12.5 ms\nimage decoded (batch 1/1) in 3.5 ms\nimage processed in 16.2 ms\n"
     )
@@ -3170,6 +3267,18 @@ def self_test() -> None:
         "prod_hip_256k_tail_88_12_ub1536",
         "prod_hip_256k_tail_88_12_ub1024",
     ]
+    target_fingerprint_names = [
+        "prod_hip_256k_tail_88_12_no_mtp_ub2048",
+        "prod_hip_256k_tail_88_12_no_mtp_ub1792",
+        "prod_hip_256k_tail_88_12_no_mtp_ub1536",
+        "prod_hip_256k_tail_88_12_no_mtp_ub1024",
+    ]
+    mtp_repeatability_names = [
+        "prod_hip_256k_tail_88_12",
+        "prod_hip_256k_tail_88_12_ub1792",
+        "prod_hip_256k_tail_88_12_ub1536",
+        "prod_hip_256k_tail_88_12_ub1024",
+    ]
     placement_screen = expanded_shipped_config["tiers"]["rocm-256k-placement-screen"]
     tail_screen = expanded_shipped_config["tiers"]["rocm-256k-tail-screen"]
     capacity_screen = expanded_shipped_config["tiers"]["rocm-256k-capacity"]
@@ -3177,6 +3286,8 @@ def self_test() -> None:
     fit_capacity = expanded_shipped_config["tiers"]["rocm-256k-fit-capacity"]
     fit_quality = expanded_shipped_config["tiers"]["rocm-256k-fit-quality"]
     fit_full = expanded_shipped_config["tiers"]["rocm-256k-fit-full"]
+    target_fingerprint = expanded_shipped_config["tiers"]["rocm-ubatch-target-fingerprint"]
+    mtp_repeatability = expanded_shipped_config["tiers"]["rocm-ubatch-mtp-repeatability"]
     assert placement_screen["experiments"] == placement_names
     assert tail_screen["experiments"] == tail_names
     assert capacity_screen["experiments"] == tail_names
@@ -3184,6 +3295,8 @@ def self_test() -> None:
     assert fit_capacity["experiments"] == fit_capacity_names
     assert fit_quality["experiments"] == fit_quality_names
     assert fit_full["experiments"] == fit_full_names
+    assert target_fingerprint["experiments"] == target_fingerprint_names
+    assert mtp_repeatability["experiments"] == mtp_repeatability_names
     assert int(placement_screen["ctx_size"]) == 65536
     assert int(tail_screen["ctx_size"]) == 65536
     assert int(capacity_screen["ctx_size"]) == 262144
@@ -3200,6 +3313,11 @@ def self_test() -> None:
     assert int(fit_full["ctx_size"]) == 262144
     assert fit_full.get("exact_prompt_tokens") is True
     assert max(int(value) for value in fit_full["depths"]) == 253952
+    assert target_fingerprint["depths"] == [32768]
+    assert int(target_fingerprint["rounds"]) == 2
+    assert int(target_fingerprint["request"]["n_probs"]) == 20
+    assert mtp_repeatability["depths"] == [32768]
+    assert int(mtp_repeatability["rounds"]) == 2
     placement_experiments = select_experiments(
         expanded_shipped_config, placement_screen, None,
     )
@@ -3269,6 +3387,42 @@ def self_test() -> None:
         override = option_value(args, "--override-tensor") or ""
         assert "ffn_(down|gate|up)_exps" in override and "=ROCm1" in override
         assert "per_layer_token_embd" in override and "=CPU" in override
+    target_experiments = select_experiments(
+        expanded_shipped_config, target_fingerprint, None,
+    )
+    target_args = [
+        server_command(expanded_shipped_config, target_fingerprint, item)[1:]
+        for item in target_experiments
+    ]
+    assert [option_value(args, "--ubatch-size") for args in target_args] == [
+        "2048", "1792", "1536", "1024",
+    ]
+    for args in target_args:
+        assert "-md" not in args
+        assert option_value(args, "--tensor-split") == "88,12"
+        assert option_value(args, "--cache-ram") == "0"
+        assert option_value(args, "--cache-type-k") == "f16"
+        assert option_value(args, "--cache-type-v") == "f16"
+        override = option_value(args, "--override-tensor") or ""
+        assert "ffn_(down|gate|up)_exps" in override and "=ROCm1" in override
+        assert "per_layer_token_embd" in override and "=CPU" in override
+    mtp_experiments = select_experiments(
+        expanded_shipped_config, mtp_repeatability, None,
+    )
+    mtp_args = [
+        server_command(expanded_shipped_config, mtp_repeatability, item)[1:]
+        for item in mtp_experiments
+    ]
+    assert [option_value(args, "--ubatch-size") for args in mtp_args] == [
+        "2048", "1792", "1536", "1024",
+    ]
+    for args in mtp_args:
+        assert "-md" in args
+        assert option_value(args, "--tensor-split") == "88,12"
+        assert option_value(args, "--spec-draft-device") == "ROCm0"
+        assert option_value(args, "--spec-draft-n-max") == "3"
+        assert option_value(args, "--spec-draft-type-k") == "f16"
+        assert option_value(args, "--spec-draft-type-v") == "f16"
     rocm_vision_smoke = expanded_shipped_config["tiers"]["rocm-vision-smoke"]
     assert rocm_vision_smoke.get("mode") == "vision"
     assert rocm_vision_smoke.get("require_rocm_audit") is True

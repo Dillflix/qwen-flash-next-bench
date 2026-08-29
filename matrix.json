@@ -1034,7 +1034,7 @@
       "startup_timeout_s": 1800
     },
     "rocm-256k-fit-quality": {
-      "description": "64K throughput and deterministic long-reference quality screen for capacity-qualified fine-placement candidates; select only candidates that passed rocm-256k-fit-capacity.",
+      "description": "Initial 64K ubatch screen. Run 20260829-163847 exposed deterministic long-prompt task loss at ubatch 1536/1024, so its MTP acceptance values are diagnostic rather than candidate rankings.",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
       "cache_state": "hot",
@@ -1060,8 +1060,78 @@
       "startup_timeout_s": 1200,
       "request_timeout_s": 1800
     },
+    "rocm-ubatch-target-fingerprint": {
+      "description": "No-MTP isolation of ubatch-dependent long-prompt target state. Two fresh-server rounds capture top-20 next-token probabilities and task anchors at identical 88/12 placement.",
+      "require_rocm_audit": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_tail_88_12_no_mtp_ub2048",
+        "prod_hip_256k_tail_88_12_no_mtp_ub1792",
+        "prod_hip_256k_tail_88_12_no_mtp_ub1536",
+        "prod_hip_256k_tail_88_12_no_mtp_ub1024"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 32,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 2,
+      "request": {
+        "n_probs": 20
+      },
+      "text_quality_anchors": {
+        "code": [
+          "def merge_intervals(",
+          "intervals"
+        ]
+      },
+      "text_quality_min_anchor_score": 1.0,
+      "settle_seconds": 5,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
+    },
+    "rocm-ubatch-mtp-repeatability": {
+      "description": "Two fresh-server repetitions of the n=3 F16-draft-KV MTP path at the same 88/12 placement and 32K prompt, with task-anchor gating so fluent prompt loss cannot rank as a valid result.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_tail_88_12",
+        "prod_hip_256k_tail_88_12_ub1792",
+        "prod_hip_256k_tail_88_12_ub1536",
+        "prod_hip_256k_tail_88_12_ub1024"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 512,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 2,
+      "text_quality_anchors": {
+        "code": [
+          "def merge_intervals(",
+          "return"
+        ]
+      },
+      "text_quality_min_anchor_score": 1.0,
+      "settle_seconds": 5,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
+    },
     "rocm-256k-fit-full": {
-      "description": "Final one-slot 256K proof for candidates that passed both fine capacity and 64K quality screens; always use an explicit experiment selector.",
+      "description": "Quarantined final one-slot 256K proof. Do not run until the ubatch target-fingerprint and MTP-repeatability tiers identify a correctness-safe candidate.",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
       "cache_state": "hot",
@@ -2441,7 +2511,7 @@
     },
     {
       "name": "prod_hip_256k_tail_88_12_ub1792",
-      "description": "Quality-safe 88/12 placement with a minimally reduced prompt microbatch to shrink target and MTP compute reserves while retaining most ubatch-2048 prefill throughput.",
+      "description": "88/12 placement with a minimally reduced prompt microbatch. It was coherent in one 32K run but needs repeatability testing and has only 262 MiB measured 256K startup headroom.",
       "extends": "prod_hip_256k_tail_88_12",
       "args_append": [
         "--ubatch-size",
@@ -2450,7 +2520,7 @@
     },
     {
       "name": "prod_hip_256k_tail_88_12_ub1536",
-      "description": "Quality-safe 88/12 placement with ubatch 1536 as a higher-headroom prompt-compute fallback.",
+      "description": "88/12 placement with ubatch 1536 and 1118 MiB measured 256K startup headroom; one 32K run lost the final task and is quarantined pending target/MTP isolation.",
       "extends": "prod_hip_256k_tail_88_12",
       "args_append": [
         "--ubatch-size",
@@ -2459,8 +2529,47 @@
     },
     {
       "name": "prod_hip_256k_tail_88_12_ub1024",
-      "description": "Quality-safe 88/12 placement with the conservative power-of-two ubatch 1024 fallback.",
+      "description": "88/12 placement with ubatch 1024 and 2837 MiB measured 256K startup headroom; one 32K run produced incoherent code and is quarantined pending target/MTP isolation.",
       "extends": "prod_hip_256k_tail_88_12",
+      "args_append": [
+        "--ubatch-size",
+        "1024"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_88_12_no_mtp_ub2048",
+      "description": "Matched no-MTP target control: 88/12 target split, routed experts on ROCm1, joined PLE CPU-mapped, F16 target KV, and ubatch 2048.",
+      "extends": "expert_hip_f16kv_no_mtp_ub2048_ple_cpu",
+      "args_append": [
+        "--no-kv-unified",
+        "--cont-batching",
+        "--no-context-shift",
+        "--tensor-split",
+        "88,12"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_88_12_no_mtp_ub1792",
+      "description": "Matched no-MTP 88/12 target control with ubatch 1792.",
+      "extends": "prod_hip_256k_tail_88_12_no_mtp_ub2048",
+      "args_append": [
+        "--ubatch-size",
+        "1792"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_88_12_no_mtp_ub1536",
+      "description": "Matched no-MTP 88/12 target control with ubatch 1536.",
+      "extends": "prod_hip_256k_tail_88_12_no_mtp_ub2048",
+      "args_append": [
+        "--ubatch-size",
+        "1536"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_88_12_no_mtp_ub1024",
+      "description": "Matched no-MTP 88/12 target control with ubatch 1024.",
+      "extends": "prod_hip_256k_tail_88_12_no_mtp_ub2048",
       "args_append": [
         "--ubatch-size",
         "1024"
