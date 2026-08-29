@@ -1005,6 +1005,95 @@
       "startup_timeout_s": 1800,
       "request_timeout_s": 7200
     },
+    "rocm-256k-fit-capacity": {
+      "description": "Allocation-only 256K fine screen after 88/12 proved quality-safe but narrowly OOM and 84/16 allocated with unacceptable quality/performance. Tests intermediate layer boundaries and smaller ubatches on 88/12.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "experiments": [
+        "prod_hip_256k_tail_87_13",
+        "prod_hip_256k_tail_86_14",
+        "prod_hip_256k_tail_85_15",
+        "prod_hip_256k_tail_88_12_ub1792",
+        "prod_hip_256k_tail_88_12_ub1536",
+        "prod_hip_256k_tail_88_12_ub1024"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 262144,
+      "n_predict": 0,
+      "warmups": 0,
+      "rounds": 1,
+      "startup_only": true,
+      "erase_slot_between_requests": false,
+      "settle_seconds": 10,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1800
+    },
+    "rocm-256k-fit-quality": {
+      "description": "64K throughput and deterministic long-reference quality screen for capacity-qualified fine-placement candidates; select only candidates that passed rocm-256k-fit-capacity.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_tail_87_13",
+        "prod_hip_256k_tail_86_14",
+        "prod_hip_256k_tail_85_15",
+        "prod_hip_256k_tail_88_12_ub1792",
+        "prod_hip_256k_tail_88_12_ub1536",
+        "prod_hip_256k_tail_88_12_ub1024"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        4096,
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 512,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "settle_seconds": 5,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
+    },
+    "rocm-256k-fit-full": {
+      "description": "Final one-slot 256K proof for candidates that passed both fine capacity and 64K quality screens; always use an explicit experiment selector.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_tail_87_13",
+        "prod_hip_256k_tail_86_14",
+        "prod_hip_256k_tail_85_15",
+        "prod_hip_256k_tail_88_12_ub1792",
+        "prod_hip_256k_tail_88_12_ub1536",
+        "prod_hip_256k_tail_88_12_ub1024"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        131072,
+        253952
+      ],
+      "ctx_size": 262144,
+      "n_predict": 256,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "exact_prompt_tokens": true,
+      "settle_seconds": 5,
+      "telemetry_interval_s": 1.0,
+      "startup_timeout_s": 1800,
+      "request_timeout_s": 7200
+    },
     "backend": {
       "description": "Matched Vulkan and ROCm controls and heterogeneous placements.",
       "require_rocm_audit": true,
@@ -2328,6 +2417,60 @@
       "args_append": [
         "--tensor-split",
         "76,24"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_87_13",
+      "description": "Fine capacity candidate between 88/12 and 84/16, retaining ubatch 2048 and all production placement invariants.",
+      "extends": "prod_hip_256k_base",
+      "args_append": [
+        "--tensor-split",
+        "87,13"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_86_14",
+      "description": "Fine capacity candidate between 88/12 and 84/16, retaining ubatch 2048 and all production placement invariants.",
+      "extends": "prod_hip_256k_base",
+      "args_append": [
+        "--tensor-split",
+        "86,14"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_85_15",
+      "description": "Fine capacity candidate immediately above the allocation-qualified but quality-disqualified 84/16 boundary.",
+      "extends": "prod_hip_256k_base",
+      "args_append": [
+        "--tensor-split",
+        "85,15"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_88_12_ub1792",
+      "description": "Quality-safe 88/12 placement with a minimally reduced prompt microbatch to shrink target and MTP compute reserves while retaining most ubatch-2048 prefill throughput.",
+      "extends": "prod_hip_256k_tail_88_12",
+      "args_append": [
+        "--ubatch-size",
+        "1792"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_88_12_ub1536",
+      "description": "Quality-safe 88/12 placement with ubatch 1536 as a higher-headroom prompt-compute fallback.",
+      "extends": "prod_hip_256k_tail_88_12",
+      "args_append": [
+        "--ubatch-size",
+        "1536"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_88_12_ub1024",
+      "description": "Quality-safe 88/12 placement with the conservative power-of-two ubatch 1024 fallback.",
+      "extends": "prod_hip_256k_tail_88_12",
+      "args_append": [
+        "--ubatch-size",
+        "1024"
       ]
     },
     {

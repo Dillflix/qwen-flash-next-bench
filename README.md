@@ -972,21 +972,49 @@ python3 qwen_bench.py preflight --tier rocm-256k-capacity \
   --experiments 'prod_hip_256k_tail_88_12,prod_hip_256k_tail_84_16'
 ```
 
-Finally select only allocation-qualified finalists. This performs an exact-token
-128K prompt and a 253952-token prompt, leaving 8192 tokens of the native 262144
-window for generation and server overhead:
+Runs `20260829-151825-rocm-256k-tail-screen` and
+`20260829-153929-rocm-256k-capacity` establish that the coarse endpoints are not
+production finalists. The 88/12 split retained base-class 32K throughput and task
+following, but 256K initialization failed while ROCm0 attempted to reserve a
+3565232128-byte MTP compute buffer. The 84/16 split initialized in 67.1 seconds,
+but consumed 19.79 GiB of the 19.98 GiB 7900 XT allocation, reduced 32K decode
+from 50.65 to 30.14 tok/s, dropped MTP acceptance to 68.9%, and answered an
+unrelated question from the reference corpus. Allocation success does not override
+that quality failure.
+
+The next screen searches both sides of that tradeoff: 87/13, 86/14, and 85/15
+retain ubatch 2048, while three 88/12 candidates reduce only ubatch to 1792, 1536,
+or 1024. The latter preserve the known-good layer boundary and test whether a
+smaller prompt/MTP graph reserve is cheaper than moving another target layer:
 
 ```bash
-python3 qwen_bench.py preflight --tier rocm-256k-full \
-  --experiments 'prod_hip_256k_tail_84_16'
-./run-bench.sh --tier rocm-256k-full \
-  --experiments 'prod_hip_256k_tail_84_16'
+python3 qwen_bench.py preflight --tier rocm-256k-fit-capacity
+./run-bench.sh --tier rocm-256k-fit-capacity
 ```
 
-The startup-only tier proves model/context initialization, not populated KV
-residency. Only the near-full request proves the operational capacity. Do not use
-`--fail-fast` during screening: a failed low-migration candidate should not suppress
-the higher-migration fallbacks.
+Do not use `--fail-fast`: expected OOMs must not suppress later candidates. After
+that archive identifies which candidates allocate and how much dGPU headroom they
+retain, pass only those names to `rocm-256k-fit-quality`. It repeats the 4K/32K
+quality and throughput screen before any near-full request:
+
+```bash
+./run-bench.sh --tier rocm-256k-fit-quality \
+  --experiments 'CAPACITY_QUALIFIED_NAMES'
+```
+
+Finally pass only candidates that qualified in both stages to
+`rocm-256k-fit-full`. This performs exact-token 128K and 253952-token prompts,
+leaving 8192 tokens of the native 262144 window for generation and server overhead:
+
+```bash
+./run-bench.sh --tier rocm-256k-fit-full \
+  --experiments 'CAPACITY_AND_QUALITY_QUALIFIED_NAMES'
+```
+
+The startup-only tier proves allocation, not operational stability. Only the
+near-full request proves populated-KV operation. A candidate also needs practical
+headroom; merely reaching the health endpoint at nearly 100% VRAM is not a
+production pass.
 
 The in-memory prompt-response cache is disabled in every candidate with
 `--cache-ram 0`. Disk-backed prompt caching remains valuable, but `--slot-save-path`

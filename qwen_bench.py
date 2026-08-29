@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.30.0"
+VERSION = "1.31.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -3153,14 +3153,28 @@ def self_test() -> None:
         "prod_hip_256k_tail_84_16",
         "prod_hip_256k_tail_76_24",
     ]
+    fit_names = [
+        "prod_hip_256k_tail_87_13",
+        "prod_hip_256k_tail_86_14",
+        "prod_hip_256k_tail_85_15",
+        "prod_hip_256k_tail_88_12_ub1792",
+        "prod_hip_256k_tail_88_12_ub1536",
+        "prod_hip_256k_tail_88_12_ub1024",
+    ]
     placement_screen = expanded_shipped_config["tiers"]["rocm-256k-placement-screen"]
     tail_screen = expanded_shipped_config["tiers"]["rocm-256k-tail-screen"]
     capacity_screen = expanded_shipped_config["tiers"]["rocm-256k-capacity"]
     full_context = expanded_shipped_config["tiers"]["rocm-256k-full"]
+    fit_capacity = expanded_shipped_config["tiers"]["rocm-256k-fit-capacity"]
+    fit_quality = expanded_shipped_config["tiers"]["rocm-256k-fit-quality"]
+    fit_full = expanded_shipped_config["tiers"]["rocm-256k-fit-full"]
     assert placement_screen["experiments"] == placement_names
     assert tail_screen["experiments"] == tail_names
     assert capacity_screen["experiments"] == tail_names
     assert full_context["experiments"] == tail_names
+    assert fit_capacity["experiments"] == fit_names
+    assert fit_quality["experiments"] == fit_names
+    assert fit_full["experiments"] == fit_names
     assert int(placement_screen["ctx_size"]) == 65536
     assert int(tail_screen["ctx_size"]) == 65536
     assert int(capacity_screen["ctx_size"]) == 262144
@@ -3169,6 +3183,14 @@ def self_test() -> None:
     assert int(full_context["ctx_size"]) == 262144
     assert full_context.get("exact_prompt_tokens") is True
     assert max(int(value) for value in full_context["depths"]) == 253952
+    assert int(fit_capacity["ctx_size"]) == 262144
+    assert fit_capacity.get("startup_only") is True
+    assert int(fit_capacity["warmups"]) == 0
+    assert int(fit_quality["ctx_size"]) == 65536
+    assert int(fit_quality["warmup_depth"]) == 32768
+    assert int(fit_full["ctx_size"]) == 262144
+    assert fit_full.get("exact_prompt_tokens") is True
+    assert max(int(value) for value in fit_full["depths"]) == 253952
     placement_experiments = select_experiments(
         expanded_shipped_config, placement_screen, None,
     )
@@ -3214,6 +3236,30 @@ def self_test() -> None:
     assert [option_value(args, "--tensor-split") for args in tail_args] == [
         "1,0", "88,12", "84,16", "76,24",
     ]
+    fit_experiments = select_experiments(expanded_shipped_config, fit_capacity, None)
+    fit_args = [
+        server_command(expanded_shipped_config, fit_capacity, item)[1:]
+        for item in fit_experiments
+    ]
+    assert all(option_value(args, "--device") == "ROCm0,ROCm1" for args in fit_args)
+    assert [option_value(args, "--tensor-split") for args in fit_args] == [
+        "87,13", "86,14", "85,15", "88,12", "88,12", "88,12",
+    ]
+    assert [option_value(args, "--ubatch-size") for args in fit_args] == [
+        "2048", "2048", "2048", "1792", "1536", "1024",
+    ]
+    for args in fit_args:
+        assert option_value(args, "--cache-ram") == "0"
+        assert option_value(args, "--batch-size") == "2048"
+        assert option_value(args, "--cache-type-k") == "f16"
+        assert option_value(args, "--cache-type-v") == "f16"
+        assert option_value(args, "--spec-draft-type-k") == "f16"
+        assert option_value(args, "--spec-draft-type-v") == "f16"
+        assert option_value(args, "--spec-draft-device") == "ROCm0"
+        assert option_value(args, "--spec-draft-n-max") == "3"
+        override = option_value(args, "--override-tensor") or ""
+        assert "ffn_(down|gate|up)_exps" in override and "=ROCm1" in override
+        assert "per_layer_token_embd" in override and "=CPU" in override
     rocm_vision_smoke = expanded_shipped_config["tiers"]["rocm-vision-smoke"]
     assert rocm_vision_smoke.get("mode") == "vision"
     assert rocm_vision_smoke.get("require_rocm_audit") is True
