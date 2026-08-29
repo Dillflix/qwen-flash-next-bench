@@ -1124,6 +1124,15 @@ near-full request proves populated-KV operation. A candidate also needs practica
 headroom; merely reaching the health endpoint at nearly 100% VRAM is not a
 production pass.
 
+The first ubatch-1536 near-full attempt exposed a separate hidden VRAM consumer,
+not a microbatch failure. Although `--cache-ram 0` disabled the inter-request
+prompt cache, llama-server still created per-slot context checkpoints every 8192
+tokens using its independent default of 32. After checkpoints of 141.4, 157.6,
+and 173.7 MiB, the 32K warm-up aborted while requesting another 114.5 MiB ROCm0
+buffer. Every 256K production candidate therefore also sets
+`--ctx-checkpoints 0`. This is the supported master switch for the per-slot
+checkpoint subsystem and is independent of `--cache-ram`.
+
 The in-memory prompt-response cache is disabled in every candidate with
 `--cache-ram 0`. Disk-backed prompt caching remains valuable, but `--slot-save-path`
 only enables explicit slot actions; it is not an automatic bounded SSD cache. This

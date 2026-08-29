@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.34.1"
+VERSION = "1.34.2"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -3806,6 +3806,17 @@ def self_test() -> None:
         "prod_hip_256k_tail_88_12_ub1024",
         "prod_hip_256k_tail_88_12_ub512",
     ]
+    production_base = next(
+        item for item in expanded_shipped_config["experiments"]
+        if item["name"] == "prod_hip_256k_base"
+    )
+    production_base_args = server_command(
+        expanded_shipped_config,
+        expanded_shipped_config["tiers"]["rocm-256k-fit-full"],
+        production_base,
+    )[1:]
+    assert option_value(production_base_args, "--cache-ram") == "0"
+    assert option_value(production_base_args, "--ctx-checkpoints") == "0"
     placement_screen = expanded_shipped_config["tiers"]["rocm-256k-placement-screen"]
     tail_screen = expanded_shipped_config["tiers"]["rocm-256k-tail-screen"]
     capacity_screen = expanded_shipped_config["tiers"]["rocm-256k-capacity"]

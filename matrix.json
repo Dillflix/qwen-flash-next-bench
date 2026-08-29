@@ -2525,6 +2525,8 @@
       "args_append": [
         "--no-kv-unified",
         "--cont-batching",
+        "--ctx-checkpoints",
+        "0",
         "--no-context-shift"
       ]
     },
