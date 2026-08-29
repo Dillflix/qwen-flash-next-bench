@@ -41,9 +41,10 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.25.0"
+VERSION = "1.25.1"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
+QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
     "-md",
@@ -1325,10 +1326,15 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["llama_library"]["qwen4exp_mtp_marker"] = (
                 QWEN4EXP_MTP_MARKER.encode("ascii") in llama_library.read_bytes()
             )
+            result["llama_library"]["qwen4exp_mtp_scheduling_marker"] = (
+                QWEN4EXP_MTP_SCHED_MARKER.encode("ascii") in llama_library.read_bytes()
+            )
         except OSError:
             result["llama_library"]["qwen4exp_mtp_marker"] = False
+            result["llama_library"]["qwen4exp_mtp_scheduling_marker"] = False
     else:
         result["llama_library"]["qwen4exp_mtp_marker"] = False
+        result["llama_library"]["qwen4exp_mtp_scheduling_marker"] = False
     return result
 
 
@@ -1366,6 +1372,7 @@ def inspect_qwen4exp_mtp_sources(repo: pathlib.Path) -> dict[str, Any]:
             "LLM_GRAPH_TYPE_DECODER_MTP",
             "llm_graph_input_embd_h",
             QWEN4EXP_MTP_MARKER,
+            QWEN4EXP_MTP_SCHED_MARKER,
             "nextn.eh_proj",
             "t_h_pre_norm",
         ),
@@ -1471,7 +1478,8 @@ def run_rocm_audit(
     )
     functional_pass = standard_control_pass and custom_functional_pass
     compiled_qwen4exp_mtp = bool(
-        fingerprint.get("llama_library", {}).get("qwen4exp_mtp_marker")
+        fingerprint.get("llama_library", {}).get("qwen4exp_mtp_marker") and
+        fingerprint.get("llama_library", {}).get("qwen4exp_mtp_scheduling_marker")
     )
     ready_for_model_benchmarks = bool(
         source["static_dispatch_ready"] and dual_arch_ready and functional_pass
@@ -1496,9 +1504,9 @@ def run_rocm_audit(
     if not qwen4exp_mtp_source["ready"]:
         mtp_reasons.append("the pinned source tree lacks the complete qwen4exp MTP sidecar integration")
     if not compiled_qwen4exp_mtp:
-        mtp_reasons.append("libllama.so lacks the compiled qwen4exp MTP integration marker; rebuild with build-rocm10-dual.sh")
+        mtp_reasons.append("libllama.so lacks the compiled qwen4exp MTP integration or hidden-state scheduling marker; rebuild with build-rocm10-dual.sh")
     report = {
-        "schema": 3,
+        "schema": 4,
         "ts": utc_now(),
         "harness_version": VERSION,
         "ready_for_model_benchmarks": ready_for_model_benchmarks,
@@ -1542,6 +1550,10 @@ def validate_rocm_audit(
         actual = current.get(key, {}).get("sha256")
         if not expected or expected != actual:
             return report, f"ROCm audit is stale because {key} changed; rerun `python3 qwen_bench.py rocm-audit --run-ops`"
+    if require_mtp and int(report.get("schema", 0)) < 4:
+        return report, "ROCm audit predates the hidden-state scheduling gate; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
+    if require_mtp and not current.get("llama_library", {}).get("qwen4exp_mtp_scheduling_marker"):
+        return report, "current libllama.so lacks the qwen4exp hidden-state scheduling fix; rerun `./build-rocm10-dual.sh` and the ROCm audit"
     if require_mtp and not report.get("ready_for_mtp_benchmarks"):
         reasons = "; ".join(str(item) for item in report.get("mtp_reasons", []))
         return report, f"ROCm audit has not proven qwen4exp MTP support: {reasons}"
@@ -3027,9 +3039,13 @@ def self_test() -> None:
     assert QWEN4EXP_MTP_MARKER in mtp_patch_text
     assert "src/models/qwen4exp.cpp" in mtp_patch_text
     assert "src/llama-model.cpp" in mtp_patch_text
+    mtp_sched_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-qwen4exp-mtp-schedule-output.patch"
+    assert mtp_sched_patch.is_file()
+    assert QWEN4EXP_MTP_SCHED_MARKER in mtp_sched_patch.read_text(encoding="utf-8")
     build_script = pathlib.Path(__file__).with_name("build-rocm10-dual.sh").read_text(encoding="utf-8")
     assert "git -C \"$SOURCE_DIR\" apply" in build_script
     assert QWEN4EXP_MTP_MARKER in build_script
+    assert QWEN4EXP_MTP_SCHED_MARKER in build_script
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 

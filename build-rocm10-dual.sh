@@ -10,6 +10,7 @@ JOBS="${JOBS:-16}"
 EXPECTED_REV="${ROCMFPX_REV:-36e9acd40e10a87cd3c3ef8ec734668757dc8520}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 QWEN4EXP_MTP_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp.patch"
+QWEN4EXP_MTP_SCHED_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
 
 fail() {
     echo "ERROR: $*" >&2
@@ -21,18 +22,35 @@ actual_rev="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
 [[ "$actual_rev" == "$EXPECTED_REV" ]] \
     || fail "ROCmFPX is at $actual_rev, expected pinned revision $EXPECTED_REV"
 [[ -f "$QWEN4EXP_MTP_PATCH" ]] || fail "missing qwen4exp MTP patch: $QWEN4EXP_MTP_PATCH"
+[[ -f "$QWEN4EXP_MTP_SCHED_PATCH" ]] || fail "missing qwen4exp MTP scheduling patch: $QWEN4EXP_MTP_SCHED_PATCH"
 
 # The pinned ROCmFPX commit has the generic MTP engine, but not the qwen4exp
 # sidecar loader/graph. Apply our reviewed integration exactly once and reject
 # source drift instead of silently building a partially compatible runtime.
-if git -C "$SOURCE_DIR" apply --check "$QWEN4EXP_MTP_PATCH"; then
-    git -C "$SOURCE_DIR" apply "$QWEN4EXP_MTP_PATCH"
-    echo "Applied qwen4exp MTP integration patch."
-elif git -C "$SOURCE_DIR" apply --reverse --check "$QWEN4EXP_MTP_PATCH"; then
-    echo "qwen4exp MTP integration patch is already applied."
-else
-    fail "qwen4exp MTP patch does not apply cleanly; restore the pinned source or inspect local changes"
-fi
+apply_patch_once() {
+    local patch_path="$1"
+    local patch_label="$2"
+    local source_marker="$3"
+    if grep -Fq "$source_marker" "$SOURCE_DIR/src/models/qwen4exp.cpp"; then
+        echo "$patch_label is already applied."
+    elif git -C "$SOURCE_DIR" apply --check "$patch_path"; then
+        git -C "$SOURCE_DIR" apply "$patch_path"
+        echo "Applied $patch_label."
+    elif git -C "$SOURCE_DIR" apply --reverse --check "$patch_path"; then
+        echo "$patch_label is already applied."
+    else
+        fail "$patch_label does not apply cleanly; restore the pinned source or inspect local changes"
+    fi
+}
+
+apply_patch_once \
+    "$QWEN4EXP_MTP_PATCH" \
+    "qwen4exp MTP integration patch" \
+    "qwen4exp MTP requires exactly one appended prediction layer"
+apply_patch_once \
+    "$QWEN4EXP_MTP_SCHED_PATCH" \
+    "qwen4exp MTP hidden-state scheduling patch" \
+    "qwen4exp_mtp_h_pre_norm_scheduled"
 
 [[ -x "$ROCM_ROOT/bin/hipcc" ]] || fail "ROCm compiler is missing at $ROCM_ROOT/bin/hipcc"
 [[ -f "$SOURCE_DIR/src/models/qwen4exp.cpp" ]] || fail "source tree does not contain src/models/qwen4exp.cpp"
@@ -123,6 +141,8 @@ LLAMA_LIBRARY="$BUILD_DIR/bin/libllama.so"
 [[ -f "$LLAMA_LIBRARY" ]] || fail "build completed without libllama.so"
 grep -aFq 'qwen4exp MTP requires exactly one appended prediction layer' "$LLAMA_LIBRARY" \
     || fail "libllama.so lacks the compiled qwen4exp MTP integration marker"
+grep -aFq 'qwen4exp_mtp_h_pre_norm_scheduled' "$LLAMA_LIBRARY" \
+    || fail "libllama.so lacks the compiled qwen4exp MTP hidden-state scheduling marker"
 
 targets="$(strings "$HIP_LIBRARY" | grep -oE 'gfx[0-9a-f]{3,5}[a-z]*' | sort -u | tr '\n' ' ')"
 [[ " $targets " == *' gfx1100 '* ]] || fail "libggml-hip.so lacks a gfx1100 code object"

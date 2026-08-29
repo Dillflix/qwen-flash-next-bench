@@ -1,0 +1,21 @@
+diff --git a/src/models/qwen4exp.cpp b/src/models/qwen4exp.cpp
+--- a/src/models/qwen4exp.cpp
++++ b/src/models/qwen4exp.cpp
+@@ -322,6 +322,8 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
+             res->t_h_pre_norm = ggml_get_rows(ctx0, res->t_h_pre_norm, inp_out_ids);
+         }
+         cb(res->t_h_pre_norm, "h_pre_norm", -1);
++        ggml_set_name(res->t_h_pre_norm, "qwen4exp_mtp_h_pre_norm_scheduled");
++        ggml_build_forward_expand(gf, res->t_h_pre_norm);
+     }
+
+     if (inp_out_ids) {
+@@ -505,6 +507,8 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
+             res->t_h_pre_norm = ggml_get_rows(ctx0, res->t_h_pre_norm, inp_out_ids);
+         }
+         cb(res->t_h_pre_norm, "h_pre_norm", -1);
++        ggml_set_name(res->t_h_pre_norm, "qwen4exp_mtp_h_pre_norm_scheduled");
++        ggml_build_forward_expand(gf, res->t_h_pre_norm);
+     }
+
+     // the final mixer is the output norm: there is no separate one

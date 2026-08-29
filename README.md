@@ -641,10 +641,11 @@ Revision `36e9acd40e10a87cd3c3ef8ec734668757dc8520` is pinned so a moving fork c
 silently change the experiment. The build script refuses another revision, the
 wrong source family, an incompatible existing CMake cache, or a library that does
 not contain both required code objects. It also applies
-`patches/rocmfpx-qwen4exp-mtp.patch` idempotently. That patch adds only the missing
-Qwen4Exp MTP sidecar loader/graph integration; it does not replace the ROCmFP4
-kernels or change Vulkan. The script rejects source drift if the exact patch can
-neither be applied nor recognized as already applied. It configures an isolated HIP-only build
+`patches/rocmfpx-qwen4exp-mtp.patch` and its hidden-state scheduling follow-up
+idempotently. This also upgrades a source tree that already has the initial patch.
+The patches add only the missing Qwen4Exp MTP sidecar loader/graph integration; they
+do not replace the ROCmFP4 kernels or change Vulkan. The script rejects source drift
+if an exact patch can neither be applied nor recognized as already applied. It configures an isolated HIP-only build
 against `/opt/rocm-10.0.0` with:
 
 - Qwen4Exp plus ROCmFP4/ROCmFP4_FAST runtime dispatch;
@@ -764,7 +765,9 @@ python3 qwen_bench.py preflight --tier rocm-mtp
 The patch keeps the 48-layer trunk optional when loading an MTP-only GGUF, loads the
 single appended draft block, passes the target's four-stream hidden state to it,
 uses an attention-only KV cache for that block, and enables recurrent-state rollback
-during speculative verification. Preflight now refuses an older unpatched binary,
+during speculative verification. The hidden-state handoff is registered as an
+explicit graph output so the scheduler assigns it a backend before the speculative
+driver copies it. Preflight now refuses an older unpatched binary,
 so the previous two-minute startup failures cannot recur unnoticed.
 
 The ROCm MTP tier fixes the target at the routed-expert placement: the joined PLE
