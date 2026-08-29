@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.33.1"
+VERSION = "1.33.2"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -1752,6 +1752,11 @@ def preflight(
         minimum = tier.get("text_quality_min_anchor_score")
         if not isinstance(minimum, (int, float)) or not 0.0 <= float(minimum) <= 1.0:
             errors.append("text_quality_min_anchor_score must be between 0 and 1")
+    if tier.get("require_probability_metrics"):
+        request = dict(defaults.get("request", {}))
+        request.update(tier.get("request", {}))
+        if not isinstance(request.get("n_probs"), int) or int(request["n_probs"]) < 1:
+            errors.append("require_probability_metrics requires request.n_probs >= 1")
     if vision_mode:
         if concurrency != 1:
             errors.append("vision tiers currently require concurrency 1")
@@ -2259,6 +2264,11 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             run_id, experiment, round_index, workload, depth, n_predict,
                             response, wall_ms, server.startup_seconds, aggregate_telemetry(samples),
                         )
+                        if tier.get("require_probability_metrics") and not row.get("probabilities_sha256"):
+                            raise RuntimeError(
+                                "llama-server omitted completion_probabilities despite request.n_probs; "
+                                "this run cannot fingerprint the prompt state"
+                            )
                         if exact_prompt_tokens:
                             row["constructed_prompt_tokens"] = constructed_prompt_tokens
                         text_anchors = tier.get("text_quality_anchors", {}).get(workload, [])
@@ -2332,6 +2342,9 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             status_parts.append("prefill unavailable")
                         if isinstance(draft, (int, float)):
                             status_parts.append(f"MTP accept {draft:.1%}")
+                        probability_hash = row.get("probabilities_sha256")
+                        if isinstance(probability_hash, str):
+                            status_parts.append(f"probability hash {probability_hash[:12]}")
                         if vision_mode:
                             image_ms = vision_metrics.get("image_process_ms")
                             anchor_score = vision_metrics.get("anchor_score")
@@ -3300,6 +3313,7 @@ def self_test() -> None:
     fit_quality = expanded_shipped_config["tiers"]["rocm-256k-fit-quality"]
     fit_full = expanded_shipped_config["tiers"]["rocm-256k-fit-full"]
     target_fingerprint = expanded_shipped_config["tiers"]["rocm-ubatch-target-fingerprint"]
+    target_correctness = expanded_shipped_config["tiers"]["rocm-ubatch-target-correctness"]
     mtp_repeatability = expanded_shipped_config["tiers"]["rocm-ubatch-mtp-repeatability"]
     assert placement_screen["experiments"] == placement_names
     assert tail_screen["experiments"] == tail_names
@@ -3309,6 +3323,7 @@ def self_test() -> None:
     assert fit_quality["experiments"] == fit_quality_names
     assert fit_full["experiments"] == fit_full_names
     assert target_fingerprint["experiments"] == target_fingerprint_names
+    assert target_correctness["experiments"] == target_fingerprint_names
     assert mtp_repeatability["experiments"] == mtp_repeatability_names
     assert int(placement_screen["ctx_size"]) == 65536
     assert int(tail_screen["ctx_size"]) == 65536
@@ -3328,7 +3343,17 @@ def self_test() -> None:
     assert max(int(value) for value in fit_full["depths"]) == 253952
     assert target_fingerprint["depths"] == [32768]
     assert int(target_fingerprint["rounds"]) == 2
+    assert int(target_fingerprint["n_predict"]) == 4
     assert int(target_fingerprint["request"]["n_probs"]) == 20
+    assert target_fingerprint.get("require_probability_metrics") is True
+    assert "text_quality_anchors" not in target_fingerprint
+    assert target_correctness["depths"] == [32768]
+    assert int(target_correctness["rounds"]) == 2
+    assert int(target_correctness["n_predict"]) == 512
+    assert "n_probs" not in target_correctness.get("request", {})
+    assert target_correctness["text_quality_anchors"]["code"] == [
+        "def merge_intervals(", "return",
+    ]
     assert mtp_repeatability["depths"] == [32768]
     assert int(mtp_repeatability["rounds"]) == 2
     placement_experiments = select_experiments(
@@ -3419,6 +3444,14 @@ def self_test() -> None:
         override = option_value(args, "--override-tensor") or ""
         assert "ffn_(down|gate|up)_exps" in override and "=ROCm1" in override
         assert "per_layer_token_embd" in override and "=CPU" in override
+    correctness_experiments = select_experiments(
+        expanded_shipped_config, target_correctness, None,
+    )
+    correctness_args = [
+        server_command(expanded_shipped_config, target_correctness, item)[1:]
+        for item in correctness_experiments
+    ]
+    assert correctness_args == target_args
     mtp_experiments = select_experiments(
         expanded_shipped_config, mtp_repeatability, None,
     )

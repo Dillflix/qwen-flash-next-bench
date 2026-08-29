@@ -1025,11 +1025,25 @@ python3 qwen_bench.py preflight --tier rocm-ubatch-target-fingerprint
 ```
 
 This runs two fresh-server rounds at 32K for ubatch 2048, 1792, 1536, and 1024.
-It requests the top 20 probabilities, stores a compact first-token view plus a
-distribution hash in `results.jsonl`, retains the complete response, and marks
-loss of the `merge_intervals` task as invalid. If these no-MTP fingerprints or
-task anchors diverge, the target's chunked Gated DeltaNet prefill/state path is
-the root problem; MTP acceptance is only reporting the changed target stream.
+It generates only four tokens, requests the top 20 probabilities, stores a
+compact first-token view plus a distribution hash in `results.jsonl`, and retains
+the complete response. Decode speed and answer quality are intentionally not
+measured here: `n_probs` adds overhead, and four tokens cannot reach a function
+signature after a reasoning preamble. If the no-MTP probability fingerprints
+diverge, the target's chunked Gated DeltaNet prefill/state path is implicated.
+
+Next run the full-output no-MTP control without `n_probs` instrumentation:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-ubatch-target-correctness
+./run-bench.sh --tier rocm-ubatch-target-correctness --fail-fast
+```
+
+This produces 512 tokens in two fresh-server rounds and applies the task anchors
+only after enough output exists to reach the requested function. If fingerprint
+differences correspond to task loss here, MTP acceptance was only reporting an
+already-changed target stream. If target correctness remains stable, proceed to
+the MTP-specific repetition.
 
 Then repeat the full n=3 MTP path under the identical placement and F16 target
 and draft KV conditions:

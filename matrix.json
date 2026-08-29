@@ -1061,7 +1061,37 @@
       "request_timeout_s": 1800
     },
     "rocm-ubatch-target-fingerprint": {
-      "description": "No-MTP isolation of ubatch-dependent long-prompt target state. Two fresh-server rounds capture top-20 next-token probabilities and task anchors at identical 88/12 placement.",
+      "description": "No-MTP isolation of ubatch-dependent long-prompt target state. Two fresh-server rounds capture four steps of top-20 token probabilities at identical 88/12 placement; decode throughput and answer quality are deliberately out of scope.",
+      "require_rocm_audit": true,
+      "require_probability_metrics": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_tail_88_12_no_mtp_ub2048",
+        "prod_hip_256k_tail_88_12_no_mtp_ub1792",
+        "prod_hip_256k_tail_88_12_no_mtp_ub1536",
+        "prod_hip_256k_tail_88_12_no_mtp_ub1024"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 4,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 2,
+      "request": {
+        "n_probs": 20
+      },
+      "settle_seconds": 5,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
+    },
+    "rocm-ubatch-target-correctness": {
+      "description": "Full-output no-MTP correctness isolation across ubatch 2048/1792/1536/1024. No n_probs instrumentation is used, and task anchors gate every 512-token response.",
       "require_rocm_audit": true,
       "cache_state": "hot",
       "experiments": [
@@ -1077,17 +1107,14 @@
         32768
       ],
       "ctx_size": 65536,
-      "n_predict": 32,
+      "n_predict": 512,
       "warmups": 1,
       "warmup_depth": 32768,
       "rounds": 2,
-      "request": {
-        "n_probs": 20
-      },
       "text_quality_anchors": {
         "code": [
           "def merge_intervals(",
-          "intervals"
+          "return"
         ]
       },
       "text_quality_min_anchor_score": 1.0,
