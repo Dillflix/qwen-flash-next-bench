@@ -817,6 +817,24 @@ These are separate tiers because draft-window length changes decode work but not
 sidecar's prompt prefill. Combine the winning window, ubatch, and draft-KV settings
 only after both focused sweeps complete.
 
+Run `20260829-114537-rocm-mtp-prefill` selected ubatch 2048 for end-to-end
+throughput. Relative to ubatch 512, it increased prefill by 25.7% at 4K and 24.7%
+at 32K. Its 256-token estimated prefill-plus-decode time improved from 15.55 to
+14.08 seconds at 4K and from 97.40 to 78.99 seconds at 32K. Q8 draft KV was
+orthogonally useful at ubatch 512: prefill was unchanged while decode improved by
+6.6% at 4K and 2.7% at 32K. The combination still needs to be measured; ubatch
+1024 is excluded because its 32K decode and acceptance collapsed.
+
+The finalist tier combines ubatch 2048 with Q8 draft KV, adds matched no-MTP
+controls, and probes batch/ubatch 4096 because prefill had not plateaued at 2048.
+It uses two rounds and 512 generated tokens. Do not use `--fail-fast`: a failed
+4096 probe must not discard the validated 2048 results.
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-mtp-finalists
+./run-bench.sh --tier rocm-mtp-finalists
+```
+
 Benchmark the fork-specific Vulkan kernel and prefill knobs on the representative 88/12 placement:
 
 ```bash

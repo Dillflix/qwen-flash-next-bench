@@ -839,6 +839,34 @@
       "startup_timeout_s": 1200,
       "request_timeout_s": 1800
     },
+    "rocm-mtp-finalists": {
+      "description": "Matched final ROCm controls for n=3 MTP: no-MTP versus F16/Q8 draft KV at ubatch 2048, plus a bounded batch/ubatch 4096 probe.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "expert_hip_f16kv_no_mtp_ub2048",
+        "expert_hip_f16kv_mtp_n3_dgpu_ub2048",
+        "expert_hip_f16kv_mtp_n3_dgpu_ub2048_q8draftkv",
+        "expert_hip_f16kv_no_mtp_ub4096",
+        "expert_hip_f16kv_mtp_n3_dgpu_ub4096_q8draftkv"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        4096,
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 512,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 2,
+      "settle_seconds": 2,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
+    },
     "backend": {
       "description": "Matched Vulkan and ROCm controls and heterogeneous placements.",
       "require_rocm_audit": true,
@@ -2020,6 +2048,46 @@
         "q8_0",
         "--spec-draft-type-v",
         "q8_0"
+      ]
+    },
+    {
+      "name": "expert_hip_f16kv_no_mtp_ub2048",
+      "description": "Matched no-MTP ROCm control with batch and ubatch 2048.",
+      "extends": "expert_hip_f16kv_no_mtp",
+      "args_append": [
+        "--ubatch-size",
+        "2048"
+      ]
+    },
+    {
+      "name": "expert_hip_f16kv_mtp_n3_dgpu_ub2048_q8draftkv",
+      "description": "Winning n=3 7900 XT MTP placement combining ubatch 2048 with Q8_0 draft K/V cache.",
+      "extends": "expert_hip_f16kv_mtp_n3_dgpu_q8draftkv",
+      "args_append": [
+        "--ubatch-size",
+        "2048"
+      ]
+    },
+    {
+      "name": "expert_hip_f16kv_no_mtp_ub4096",
+      "description": "Matched no-MTP ROCm control probing batch and ubatch 4096.",
+      "extends": "expert_hip_f16kv_no_mtp",
+      "args_append": [
+        "--batch-size",
+        "4096",
+        "--ubatch-size",
+        "4096"
+      ]
+    },
+    {
+      "name": "expert_hip_f16kv_mtp_n3_dgpu_ub4096_q8draftkv",
+      "description": "Bounded n=3 7900 XT MTP probe combining batch/ubatch 4096 with Q8_0 draft K/V cache.",
+      "extends": "expert_hip_f16kv_mtp_n3_dgpu_q8draftkv",
+      "args_append": [
+        "--batch-size",
+        "4096",
+        "--ubatch-size",
+        "4096"
       ]
     },
     {

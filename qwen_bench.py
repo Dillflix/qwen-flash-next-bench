@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.26.1"
+VERSION = "1.27.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -3065,6 +3065,31 @@ def self_test() -> None:
     assert option_value(q8_draft_args, "--cache-type-v") == "f16"
     assert option_value(q8_draft_args, "--spec-draft-type-k") == "q8_0"
     assert option_value(q8_draft_args, "--spec-draft-type-v") == "q8_0"
+    mtp_finalists_tier = expanded_shipped_config["tiers"]["rocm-mtp-finalists"]
+    mtp_finalists = select_experiments(expanded_shipped_config, mtp_finalists_tier, None)
+    assert [item["name"] for item in mtp_finalists] == [
+        "expert_hip_f16kv_no_mtp_ub2048",
+        "expert_hip_f16kv_mtp_n3_dgpu_ub2048",
+        "expert_hip_f16kv_mtp_n3_dgpu_ub2048_q8draftkv",
+        "expert_hip_f16kv_no_mtp_ub4096",
+        "expert_hip_f16kv_mtp_n3_dgpu_ub4096_q8draftkv",
+    ]
+    finalist_args = [
+        server_command(expanded_shipped_config, mtp_finalists_tier, item)[1:]
+        for item in mtp_finalists
+    ]
+    assert [option_value(args, "--ubatch-size") for args in finalist_args] == [
+        "2048", "2048", "2048", "4096", "4096",
+    ]
+    assert [option_value(args, "--batch-size") for args in finalist_args] == [
+        "2048", "2048", "2048", "4096", "4096",
+    ]
+    for args in (finalist_args[1], finalist_args[2], finalist_args[4]):
+        assert option_value(args, "--spec-draft-n-max") == "3"
+        assert option_value(args, "--spec-draft-device") == "ROCm0"
+    for args in (finalist_args[2], finalist_args[4]):
+        assert option_value(args, "--spec-draft-type-k") == "q8_0"
+        assert option_value(args, "--spec-draft-type-v") == "q8_0"
     mtp_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-qwen4exp-mtp.patch"
     assert mtp_patch.is_file()
     mtp_patch_text = mtp_patch.read_text(encoding="utf-8")
