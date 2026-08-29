@@ -682,9 +682,11 @@ python3 qwen_bench.py preflight --tier rocm-smoke
 
 This path hides the 7900 XT with `ROCR_VISIBLE_DEVICES=1` (therefore the physical
 8060S becomes logical `ROCm0`), disables managed-memory fallback, keeps the split
-PLE table CPU-mapped, and uses neither MTP nor heterogeneous placement. It tests
-only shallow 0/512-token depths so kernel correctness and basic throughput are
-isolated first.
+PLE table CPU-mapped, and uses neither MTP nor heterogeneous placement. It first
+runs with flash attention disabled, then repeats with it enabled. Both experiments
+test only shallow 0/512-token depths. If only the enabled experiment collapses,
+the remaining defect is isolated to the attention path rather than the ROCmFP4
+matrix kernels.
 
 If shallow performance is sane, localize the previously reported context cliff:
 
