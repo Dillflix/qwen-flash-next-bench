@@ -8,6 +8,8 @@ BUILD_DIR="${QWEN_HIP_BUILD:-$SOURCE_DIR/build-hip10-dual}"
 ROCM_ROOT="${ROCM_PATH:-/opt/rocm-10.0.0}"
 JOBS="${JOBS:-16}"
 EXPECTED_REV="${ROCMFPX_REV:-36e9acd40e10a87cd3c3ef8ec734668757dc8520}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+QWEN4EXP_MTP_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp.patch"
 
 fail() {
     echo "ERROR: $*" >&2
@@ -18,6 +20,20 @@ fail() {
 actual_rev="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
 [[ "$actual_rev" == "$EXPECTED_REV" ]] \
     || fail "ROCmFPX is at $actual_rev, expected pinned revision $EXPECTED_REV"
+[[ -f "$QWEN4EXP_MTP_PATCH" ]] || fail "missing qwen4exp MTP patch: $QWEN4EXP_MTP_PATCH"
+
+# The pinned ROCmFPX commit has the generic MTP engine, but not the qwen4exp
+# sidecar loader/graph. Apply our reviewed integration exactly once and reject
+# source drift instead of silently building a partially compatible runtime.
+if git -C "$SOURCE_DIR" apply --check "$QWEN4EXP_MTP_PATCH"; then
+    git -C "$SOURCE_DIR" apply "$QWEN4EXP_MTP_PATCH"
+    echo "Applied qwen4exp MTP integration patch."
+elif git -C "$SOURCE_DIR" apply --reverse --check "$QWEN4EXP_MTP_PATCH"; then
+    echo "qwen4exp MTP integration patch is already applied."
+else
+    fail "qwen4exp MTP patch does not apply cleanly; restore the pinned source or inspect local changes"
+fi
+
 [[ -x "$ROCM_ROOT/bin/hipcc" ]] || fail "ROCm compiler is missing at $ROCM_ROOT/bin/hipcc"
 [[ -f "$SOURCE_DIR/src/models/qwen4exp.cpp" ]] || fail "source tree does not contain src/models/qwen4exp.cpp"
 grep -Rq 'Q4_0_ROCMFP4_FAST' "$SOURCE_DIR/ggml/src/ggml-cuda" \
@@ -102,6 +118,12 @@ HIP_LIBRARY="$BUILD_DIR/bin/libggml-hip.so"
 [[ -f "$HIP_LIBRARY" ]] || HIP_LIBRARY="$BUILD_DIR/lib/libggml-hip.so"
 [[ -f "$HIP_LIBRARY" ]] || fail "build completed without libggml-hip.so"
 
+LLAMA_LIBRARY="$BUILD_DIR/bin/libllama.so"
+[[ -f "$LLAMA_LIBRARY" ]] || LLAMA_LIBRARY="$BUILD_DIR/lib/libllama.so"
+[[ -f "$LLAMA_LIBRARY" ]] || fail "build completed without libllama.so"
+grep -aFq 'qwen4exp MTP requires exactly one appended prediction layer' "$LLAMA_LIBRARY" \
+    || fail "libllama.so lacks the compiled qwen4exp MTP integration marker"
+
 targets="$(strings "$HIP_LIBRARY" | grep -oE 'gfx[0-9a-f]{3,5}[a-z]*' | sort -u | tr '\n' ' ')"
 [[ " $targets " == *' gfx1100 '* ]] || fail "libggml-hip.so lacks a gfx1100 code object"
 [[ " $targets " == *' gfx1151 '* ]] || fail "libggml-hip.so lacks a gfx1151 code object"
@@ -112,5 +134,6 @@ echo "  commit: $actual_rev"
 echo "  build:  $BUILD_DIR"
 echo "  ROCm:   $ROCM_ROOT"
 echo "  code objects: $targets"
+echo "  qwen4exp MTP: compiled"
 echo
 echo "Next: python3 qwen_rocm.py collect --llama-dir '$SOURCE_DIR' --build-dir '$BUILD_DIR' --rocm '$ROCM_ROOT'"

@@ -764,6 +764,7 @@
     "rocm-mtp": {
       "description": "Focused hot-cache ROCm MTP placement test on the winning routed-expert target topology: no MTP, Q8 MTP n=4 on iGPU, and Q8 MTP n=4 on 7900 XT.",
       "require_rocm_audit": true,
+      "require_rocm_mtp": true,
       "cache_state": "hot",
       "experiments": [
         "expert_hip_f16kv_no_mtp",

@@ -32,3 +32,25 @@ jobs:
           python -m json.tool prompts.json >/dev/null
           python -m json.tool vision_cases.json >/dev/null
           python -c 'import pathlib, qwen_bench; qwen_bench.load_config(pathlib.Path("matrix.json"))'
+
+  qwen4exp-mtp-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned ROCmFPX source
+        run: |
+          git clone https://github.com/kingjones30/ROCmFPX.git rocmfpx
+          git -C rocmfpx checkout 36e9acd40e10a87cd3c3ef8ec734668757dc8520
+      - name: Apply and compile Qwen4Exp MTP integration
+        run: |
+          git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp.patch"
+          git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp.patch"
+          cmake -S rocmfpx -B rocmfpx/build-ci -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DGGML_HIP=OFF \
+            -DGGML_VULKAN=OFF \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_TESTS=OFF
+          cmake --build rocmfpx/build-ci --parallel 2 --target llama

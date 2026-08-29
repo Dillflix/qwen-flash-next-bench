@@ -640,13 +640,18 @@ cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
 Revision `36e9acd40e10a87cd3c3ef8ec734668757dc8520` is pinned so a moving fork cannot
 silently change the experiment. The build script refuses another revision, the
 wrong source family, an incompatible existing CMake cache, or a library that does
-not contain both required code objects. It configures an isolated HIP-only build
+not contain both required code objects. It also applies
+`patches/rocmfpx-qwen4exp-mtp.patch` idempotently. That patch adds only the missing
+Qwen4Exp MTP sidecar loader/graph integration; it does not replace the ROCmFP4
+kernels or change Vulkan. The script rejects source drift if the exact patch can
+neither be applied nor recognized as already applied. It configures an isolated HIP-only build
 against `/opt/rocm-10.0.0` with:
 
 - Qwen4Exp plus ROCmFP4/ROCmFP4_FAST runtime dispatch;
 - forced MMQ and no experimental rocWMMA flash-attention path;
 - `gfx1100;gfx1151` in both `CMAKE_HIP_ARCHITECTURES` and `GPU_TARGETS`;
-- `test-backend-ops` and compile-command metadata enabled.
+- `test-backend-ops` and compile-command metadata enabled;
+- a compiled Qwen4Exp MTP marker in `libllama.so`.
 
 Collect the new build evidence, then run the numerical gate:
 
@@ -661,7 +666,7 @@ python3 qwen_bench.py rocm-audit --run-ops
 
 Both commands create one `.tar.gz` plus a SHA-256 file automatically. The audit
 archive is written even when a gate fails, so failed numerical output is preserved.
-Any rebuild changes the server/HIP-library fingerprints, so the audit must be rerun
+Any rebuild changes the server/HIP/libllama fingerprints, so the audit must be rerun
 before model benchmarks.
 
 The audit has two independent functional gates on both GPUs:
@@ -672,8 +677,10 @@ The audit has two independent functional gates on both GPUs:
    formats used by the model.
 
 It rejects a zero-test match, any numerical failure, missing `gfx1100`/`gfx1151`
-coverage, or a stale server/HIP-library fingerprint. Every ROCm model tier is gated
-on the saved proof, so a full-model run cannot begin after an unverified rebuild.
+coverage, or a stale server/HIP/libllama fingerprint. The MTP tier has one additional
+gate: both the Qwen4Exp MTP source markers and the compiled `libllama.so` marker must
+be present. Every ROCm model tier is gated on the saved proof, so a full-model run
+cannot begin after an unverified rebuild.
 
 Once the audit passes, use the clean APU-only diagnostic:
 
@@ -738,13 +745,27 @@ device list, `ROCm0` is the RX 7900 XT and `ROCm1` is the Radeon 8060S. The join
 PLE tensor remains on its native file-backed mmap path in every cell.
 
 The additional layer and row definitions remain available for deliberate follow-up,
-but are excluded from the recommended campaign. Once this focused tier identifies
-the target-model placement winner, run:
+but are excluded from the recommended campaign. The first ROCm MTP attempt failed
+before serving because the pinned runtime treated the 4.1 GB sidecar as a complete
+49-layer target and demanded `blk.0.hc_attn_norm.weight`. Identical failure on both
+draft devices rules out capacity and placement. Rebuild the same pinned ROCmFPX tree
+with the harness patch, refresh the numerical audit, and only then rerun the tier:
 
 ```bash
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+git pull --ff-only
+python3 qwen_bench.py self-test
+./build-rocm10-dual.sh
+python3 qwen_bench.py rocm-audit --run-ops
 python3 qwen_bench.py preflight --tier rocm-mtp
 ./run-bench.sh --tier rocm-mtp
 ```
+
+The patch keeps the 48-layer trunk optional when loading an MTP-only GGUF, loads the
+single appended draft block, passes the target's four-stream hidden state to it,
+uses an attention-only KV cache for that block, and enables recurrent-state rollback
+during speculative verification. Preflight now refuses an older unpatched binary,
+so the previous two-minute startup failures cannot recur unnoticed.
 
 The ROCm MTP tier fixes the target at the routed-expert placement: the joined PLE
 stays file-backed, routed experts stay on the iGPU, and shared experts plus remaining

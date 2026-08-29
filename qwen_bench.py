@@ -41,8 +41,9 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.24.0"
+VERSION = "1.25.0"
 SUCCESS_STATES = {"ok"}
+QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
     "-md",
@@ -1293,9 +1294,16 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
     build_root = server.parent.parent if server.name else pathlib.Path()
     candidates = [build_root / "bin" / "libggml-hip.so", build_root / "lib" / "libggml-hip.so"]
     library = next((path for path in candidates if path.is_file()), candidates[0])
+    llama_candidates = [build_root / "bin" / "libllama.so", build_root / "lib" / "libllama.so"]
+    llama_library = next((path for path in llama_candidates if path.is_file()), llama_candidates[0])
     test_binary = build_root / "bin" / "test-backend-ops"
     result: dict[str, Any] = {}
-    for name, path in (("server", server), ("hip_library", library), ("test_backend_ops", test_binary)):
+    for name, path in (
+        ("server", server),
+        ("hip_library", library),
+        ("llama_library", llama_library),
+        ("test_backend_ops", test_binary),
+    ):
         result[name] = {
             "path": str(path),
             "exists": path.is_file(),
@@ -1312,6 +1320,15 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["hip_library"]["gfx_targets"] = []
     else:
         result["hip_library"]["gfx_targets"] = []
+    if llama_library.is_file():
+        try:
+            result["llama_library"]["qwen4exp_mtp_marker"] = (
+                QWEN4EXP_MTP_MARKER.encode("ascii") in llama_library.read_bytes()
+            )
+        except OSError:
+            result["llama_library"]["qwen4exp_mtp_marker"] = False
+    else:
+        result["llama_library"]["qwen4exp_mtp_marker"] = False
     return result
 
 
@@ -1343,6 +1360,35 @@ def inspect_rocmfp4_sources(repo: pathlib.Path) -> dict[str, Any]:
     }
 
 
+def inspect_qwen4exp_mtp_sources(repo: pathlib.Path) -> dict[str, Any]:
+    required = {
+        "src/models/qwen4exp.cpp": (
+            "LLM_GRAPH_TYPE_DECODER_MTP",
+            "llm_graph_input_embd_h",
+            QWEN4EXP_MTP_MARKER,
+            "nextn.eh_proj",
+            "t_h_pre_norm",
+        ),
+        "src/llama-model.cpp": (
+            "LLM_ARCH_QWEN4EXP",
+            "n_embd_pre_norm",
+        ),
+        "src/llama-arch.cpp": (
+            "llm_arch_supports_rs_rollback",
+            "LLM_ARCH_QWEN4EXP",
+        ),
+    }
+    files: dict[str, Any] = {}
+    ready = True
+    for relative, markers in required.items():
+        path = repo / relative
+        text = path.read_text(encoding="utf-8", errors="ignore") if path.is_file() else ""
+        found = {marker: marker in text for marker in markers}
+        files[relative] = {"exists": path.is_file(), "markers": found}
+        ready = ready and path.is_file() and all(found.values())
+    return {"ready": ready, "files": files}
+
+
 def backend_ops_passed(capture: dict[str, Any]) -> tuple[bool, int, int]:
     if capture.get("returncode") != 0:
         return False, 0, 0
@@ -1368,6 +1414,7 @@ def run_rocm_audit(
     repo = pathlib.Path(str(variables.get("hip_repo") or variables.get("repo", "")))
     fingerprint = rocm_build_fingerprint(config)
     source = inspect_rocmfp4_sources(repo)
+    qwen4exp_mtp_source = inspect_qwen4exp_mtp_sources(repo)
     server = pathlib.Path(fingerprint["server"]["path"])
     test_binary = pathlib.Path(fingerprint["test_backend_ops"]["path"])
     gfx_targets = set(fingerprint["hip_library"].get("gfx_targets", []))
@@ -1423,7 +1470,17 @@ def run_rocm_audit(
         and expected_custom > 0 and all(item["passed"] for item in custom_tests)
     )
     functional_pass = standard_control_pass and custom_functional_pass
+    compiled_qwen4exp_mtp = bool(
+        fingerprint.get("llama_library", {}).get("qwen4exp_mtp_marker")
+    )
+    ready_for_model_benchmarks = bool(
+        source["static_dispatch_ready"] and dual_arch_ready and functional_pass
+    )
+    ready_for_mtp_benchmarks = bool(
+        ready_for_model_benchmarks and qwen4exp_mtp_source["ready"] and compiled_qwen4exp_mtp
+    )
     reasons: list[str] = []
+    mtp_reasons: list[str] = []
     if not source["static_dispatch_ready"]:
         reasons.append("ROCmFP4 and ROCmFP4_FAST are not both wired into the compiled HIP runtime source tree")
     if not test_binary.is_file():
@@ -1436,12 +1493,18 @@ def run_rocm_audit(
         reasons.append("ordinary Q8_0 MUL_MAT/MUL_MAT_ID did not pass on both GPUs; fix the ROCm runtime/build first")
     if run_ops and source["static_dispatch_ready"] and not custom_functional_pass:
         reasons.append("custom ROCmFP4 MUL_MAT/MUL_MAT_ID failed or matched zero cases on one or both GPUs")
+    if not qwen4exp_mtp_source["ready"]:
+        mtp_reasons.append("the pinned source tree lacks the complete qwen4exp MTP sidecar integration")
+    if not compiled_qwen4exp_mtp:
+        mtp_reasons.append("libllama.so lacks the compiled qwen4exp MTP integration marker; rebuild with build-rocm10-dual.sh")
     report = {
-        "schema": 2,
+        "schema": 3,
         "ts": utc_now(),
         "harness_version": VERSION,
-        "ready_for_model_benchmarks": bool(source["static_dispatch_ready"] and dual_arch_ready and functional_pass),
+        "ready_for_model_benchmarks": ready_for_model_benchmarks,
+        "ready_for_mtp_benchmarks": ready_for_mtp_benchmarks,
         "source": source,
+        "qwen4exp_mtp_source": qwen4exp_mtp_source,
         "build_fingerprint": fingerprint,
         "devices_requested": devices,
         "device_list_log": str(pathlib.Path("rocm-audit-logs") / "devices.txt"),
@@ -1452,12 +1515,15 @@ def run_rocm_audit(
         "functional_pass": functional_pass,
         "tests": tests,
         "reasons": reasons,
+        "mtp_reasons": mtp_reasons,
     }
     atomic_json(output, report)
     return report
 
 
-def validate_rocm_audit(config: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+def validate_rocm_audit(
+    config: dict[str, Any], *, require_mtp: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
     configured = config.get("variables", {}).get("rocm_audit")
     path = pathlib.Path(str(configured)) if configured else pathlib.Path(__file__).with_name("preflight") / "rocm-audit.json"
     if not path.is_file():
@@ -1471,11 +1537,14 @@ def validate_rocm_audit(config: dict[str, Any]) -> tuple[dict[str, Any] | None, 
         return report, f"ROCm audit has not proven custom kernel coverage: {reasons}"
     current = rocm_build_fingerprint(config)
     audited = report.get("build_fingerprint", {})
-    for key in ("server", "hip_library"):
+    for key in ("server", "hip_library", "llama_library"):
         expected = audited.get(key, {}).get("sha256")
         actual = current.get(key, {}).get("sha256")
         if not expected or expected != actual:
             return report, f"ROCm audit is stale because {key} changed; rerun `python3 qwen_bench.py rocm-audit --run-ops`"
+    if require_mtp and not report.get("ready_for_mtp_benchmarks"):
+        reasons = "; ".join(str(item) for item in report.get("mtp_reasons", []))
+        return report, f"ROCm audit has not proven qwen4exp MTP support: {reasons}"
     return report, None
 
 
@@ -1641,7 +1710,9 @@ def preflight(
     if tier.get("startup_only") and (int(tier.get("warmups", 0)) != 0 or concurrency != 1):
         errors.append("startup-only tiers require warmups 0 and concurrency 1")
     if tier.get("require_rocm_audit"):
-        rocm_audit, audit_error = validate_rocm_audit(config)
+        rocm_audit, audit_error = validate_rocm_audit(
+            config, require_mtp=bool(tier.get("require_rocm_mtp")),
+        )
         if audit_error:
             errors.append(audit_error)
     if bool(tier.get("erase_slot_between_requests", defaults.get("erase_slot_between_requests", False))):
@@ -2935,6 +3006,7 @@ def self_test() -> None:
     ) or ""
     assert "(exps|shexp)" in shared_override and "ffn_gate_inp_shexp" in shared_override
     mtp_tier = expanded_shipped_config["tiers"]["rocm-mtp"]
+    assert mtp_tier.get("require_rocm_mtp") is True
     mtp_experiments = select_experiments(expanded_shipped_config, mtp_tier, None)
     assert [item["name"] for item in mtp_experiments] == [
         "expert_hip_f16kv_no_mtp",
@@ -2949,6 +3021,15 @@ def self_test() -> None:
         assert option_value(mtp_args, "--spec-draft-p-min") == "0.75"
         assert option_value(mtp_args, "--cache-type-k") == "f16"
         assert option_value(mtp_args, "--cache-type-v") == "f16"
+    mtp_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-qwen4exp-mtp.patch"
+    assert mtp_patch.is_file()
+    mtp_patch_text = mtp_patch.read_text(encoding="utf-8")
+    assert QWEN4EXP_MTP_MARKER in mtp_patch_text
+    assert "src/models/qwen4exp.cpp" in mtp_patch_text
+    assert "src/llama-model.cpp" in mtp_patch_text
+    build_script = pathlib.Path(__file__).with_name("build-rocm10-dual.sh").read_text(encoding="utf-8")
+    assert "git -C \"$SOURCE_DIR\" apply" in build_script
+    assert QWEN4EXP_MTP_MARKER in build_script
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 
