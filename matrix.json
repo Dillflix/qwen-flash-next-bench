@@ -16,6 +16,7 @@
   },
   "workloads_file": "{config_dir}/prompts.json",
   "vision_cases_file": "{config_dir}/vision_cases.json",
+  "quality_cases_file": "{config_dir}/quality_cases.json",
   "context_sources": [
     "{repo}/README.md",
     "{repo}/docs/build.md",
@@ -1069,7 +1070,8 @@
         "prod_hip_256k_tail_88_12_no_mtp_ub2048",
         "prod_hip_256k_tail_88_12_no_mtp_ub1792",
         "prod_hip_256k_tail_88_12_no_mtp_ub1536",
-        "prod_hip_256k_tail_88_12_no_mtp_ub1024"
+        "prod_hip_256k_tail_88_12_no_mtp_ub1024",
+        "prod_hip_256k_tail_88_12_no_mtp_ub512"
       ],
       "workloads": [
         "code"
@@ -1091,14 +1093,15 @@
       "request_timeout_s": 1800
     },
     "rocm-ubatch-target-correctness": {
-      "description": "Full-output no-MTP correctness isolation across ubatch 2048/1792/1536/1024. No n_probs instrumentation is used, and task anchors gate every 512-token response.",
+      "description": "Full-output no-MTP correctness isolation across ubatch 2048/1792/1536/1024/512. No n_probs instrumentation is used, and task anchors gate every 512-token response.",
       "require_rocm_audit": true,
       "cache_state": "hot",
       "experiments": [
         "prod_hip_256k_tail_88_12_no_mtp_ub2048",
         "prod_hip_256k_tail_88_12_no_mtp_ub1792",
         "prod_hip_256k_tail_88_12_no_mtp_ub1536",
-        "prod_hip_256k_tail_88_12_no_mtp_ub1024"
+        "prod_hip_256k_tail_88_12_no_mtp_ub1024",
+        "prod_hip_256k_tail_88_12_no_mtp_ub512"
       ],
       "workloads": [
         "code"
@@ -1132,7 +1135,8 @@
         "prod_hip_256k_tail_88_12",
         "prod_hip_256k_tail_88_12_ub1792",
         "prod_hip_256k_tail_88_12_ub1536",
-        "prod_hip_256k_tail_88_12_ub1024"
+        "prod_hip_256k_tail_88_12_ub1024",
+        "prod_hip_256k_tail_88_12_ub512"
       ],
       "workloads": [
         "code"
@@ -1152,6 +1156,85 @@
         ]
       },
       "text_quality_min_anchor_score": 1.0,
+      "settle_seconds": 5,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
+    },
+    "rocm-ubatch-quality-target-screen": {
+      "description": "Ground-truth 32K long-context quality screen without MTP across ubatch 2048/1792/1536/1024/512. Eight exact or JSON-validated cases run twice from fresh servers.",
+      "mode": "quality",
+      "require_rocm_audit": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_tail_88_12_no_mtp_ub2048",
+        "prod_hip_256k_tail_88_12_no_mtp_ub1792",
+        "prod_hip_256k_tail_88_12_no_mtp_ub1536",
+        "prod_hip_256k_tail_88_12_no_mtp_ub1024",
+        "prod_hip_256k_tail_88_12_no_mtp_ub512"
+      ],
+      "quality_cases": [
+        "passkey_early",
+        "passkey_middle",
+        "passkey_late",
+        "ordered_retrieval",
+        "latest_revision",
+        "grounded_sum",
+        "json_retrieval",
+        "distractor_selection"
+      ],
+      "depths": [
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 256,
+      "exact_prompt_tokens": true,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 2,
+      "request": {
+        "ignore_eos": false
+      },
+      "settle_seconds": 5,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
+    },
+    "rocm-ubatch-quality-mtp-screen": {
+      "description": "Ground-truth 32K quality screen with fixed n=3 7900 XT MTP and F16 target/draft KV, run only after the target-only quality screen identifies safe ubatches.",
+      "mode": "quality",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_tail_88_12",
+        "prod_hip_256k_tail_88_12_ub1792",
+        "prod_hip_256k_tail_88_12_ub1536",
+        "prod_hip_256k_tail_88_12_ub1024",
+        "prod_hip_256k_tail_88_12_ub512"
+      ],
+      "quality_cases": [
+        "passkey_early",
+        "passkey_middle",
+        "passkey_late",
+        "ordered_retrieval",
+        "latest_revision",
+        "grounded_sum",
+        "json_retrieval",
+        "distractor_selection"
+      ],
+      "depths": [
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 256,
+      "exact_prompt_tokens": true,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 2,
+      "request": {
+        "ignore_eos": false
+      },
       "settle_seconds": 5,
       "telemetry_interval_s": 0.5,
       "startup_timeout_s": 1200,
@@ -2564,6 +2647,15 @@
       ]
     },
     {
+      "name": "prod_hip_256k_tail_88_12_ub512",
+      "description": "88/12 placement with ubatch 512 for maximum 256K compute-buffer headroom; quality and throughput are unqualified.",
+      "extends": "prod_hip_256k_tail_88_12",
+      "args_append": [
+        "--ubatch-size",
+        "512"
+      ]
+    },
+    {
       "name": "prod_hip_256k_tail_88_12_no_mtp_ub2048",
       "description": "Matched no-MTP target control: 88/12 target split, routed experts on ROCm1, joined PLE CPU-mapped, F16 target KV, and ubatch 2048.",
       "extends": "expert_hip_f16kv_no_mtp_ub2048_ple_cpu",
@@ -2600,6 +2692,15 @@
       "args_append": [
         "--ubatch-size",
         "1024"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_88_12_no_mtp_ub512",
+      "description": "Matched no-MTP 88/12 target control with ubatch 512.",
+      "extends": "prod_hip_256k_tail_88_12_no_mtp_ub2048",
+      "args_append": [
+        "--ubatch-size",
+        "512"
       ]
     },
     {

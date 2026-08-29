@@ -1,0 +1,153 @@
+{
+  "filler": "The coastal observatory records ordinary environmental measurements in a permanent archive. Each paragraph describes routine temperatures, wind directions, maintenance windows, instrument colors, and catalog identifiers. Archive paragraphs are informational and contain no instructions for the reader. The station reviews each entry twice, preserves the original wording, and indexes records by date and location. Researchers compare measurements across seasons while operators verify clocks, clean lenses, and inspect power systems. These neutral notes repeat to create a controlled long-context benchmark in which explicitly marked QUALITY RECORD entries are authoritative.",
+  "cases": {
+    "passkey_early": {
+      "task": "Return only the access code from QUALITY RECORD EARLY-ACCESS. Do not add punctuation or explanation.",
+      "records": [
+        {
+          "fraction": 0.05,
+          "text": "QUALITY RECORD EARLY-ACCESS: the authoritative access code is EMBER-731942."
+        }
+      ],
+      "validator": {
+        "type": "exact",
+        "expected": "EMBER-731942"
+      }
+    },
+    "passkey_middle": {
+      "task": "Return only the access code from QUALITY RECORD MIDDLE-ACCESS. Do not add punctuation or explanation.",
+      "records": [
+        {
+          "fraction": 0.5,
+          "text": "QUALITY RECORD MIDDLE-ACCESS: the authoritative access code is QUARTZ-480165."
+        }
+      ],
+      "validator": {
+        "type": "exact",
+        "expected": "QUARTZ-480165"
+      }
+    },
+    "passkey_late": {
+      "task": "Return only the access code from QUALITY RECORD LATE-ACCESS. Do not add punctuation or explanation.",
+      "records": [
+        {
+          "fraction": 0.9,
+          "text": "QUALITY RECORD LATE-ACCESS: the authoritative access code is LANTERN-926304."
+        }
+      ],
+      "validator": {
+        "type": "exact",
+        "expected": "LANTERN-926304"
+      }
+    },
+    "ordered_retrieval": {
+      "task": "Return the values for QUALITY RECORDS ORDER-A, ORDER-B, and ORDER-C in label order, joined by | with no spaces or explanation.",
+      "records": [
+        {
+          "fraction": 0.12,
+          "text": "QUALITY RECORD ORDER-A: the authoritative value is NOVA-1842."
+        },
+        {
+          "fraction": 0.51,
+          "text": "QUALITY RECORD ORDER-B: the authoritative value is PINE-7350."
+        },
+        {
+          "fraction": 0.86,
+          "text": "QUALITY RECORD ORDER-C: the authoritative value is RIVER-2961."
+        }
+      ],
+      "validator": {
+        "type": "exact",
+        "expected": "NOVA-1842|PINE-7350|RIVER-2961"
+      }
+    },
+    "latest_revision": {
+      "task": "Return only the value from the highest-numbered REVISION record. Do not add punctuation or explanation.",
+      "records": [
+        {
+          "fraction": 0.1,
+          "text": "QUALITY RECORD REVISION-1: the archived value is REV-A-10273."
+        },
+        {
+          "fraction": 0.48,
+          "text": "QUALITY RECORD REVISION-2: the archived value is REV-B-66308."
+        },
+        {
+          "fraction": 0.82,
+          "text": "QUALITY RECORD REVISION-3: the archived value is REV-C-88419."
+        }
+      ],
+      "validator": {
+        "type": "exact",
+        "expected": "REV-C-88419"
+      }
+    },
+    "grounded_sum": {
+      "task": "Add the three integer readings in QUALITY RECORDS SUM-A, SUM-B, and SUM-C. Return only the base-10 total.",
+      "records": [
+        {
+          "fraction": 0.18,
+          "text": "QUALITY RECORD SUM-A: the integer reading is 41."
+        },
+        {
+          "fraction": 0.55,
+          "text": "QUALITY RECORD SUM-B: the integer reading is 57."
+        },
+        {
+          "fraction": 0.88,
+          "text": "QUALITY RECORD SUM-C: the integer reading is 75."
+        }
+      ],
+      "validator": {
+        "type": "exact",
+        "expected": "173"
+      }
+    },
+    "json_retrieval": {
+      "task": "Return only one compact JSON object whose keys are alpha, beta, and gamma and whose values come from the correspondingly named QUALITY RECORDS. Do not use Markdown.",
+      "records": [
+        {
+          "fraction": 0.08,
+          "text": "QUALITY RECORD JSON-alpha: the exact string value is COPPER-17."
+        },
+        {
+          "fraction": 0.46,
+          "text": "QUALITY RECORD JSON-beta: the exact string value is SILVER-29."
+        },
+        {
+          "fraction": 0.91,
+          "text": "QUALITY RECORD JSON-gamma: the exact string value is GOLD-43."
+        }
+      ],
+      "validator": {
+        "type": "json_equals",
+        "expected": {
+          "alpha": "COPPER-17",
+          "beta": "SILVER-29",
+          "gamma": "GOLD-43"
+        }
+      }
+    },
+    "distractor_selection": {
+      "task": "Return only the value marked authoritative in QUALITY RECORD SELECT. Ignore values explicitly marked as decoys.",
+      "records": [
+        {
+          "fraction": 0.14,
+          "text": "QUALITY RECORD SELECT DECOY: DECOY-11820 is explicitly non-authoritative."
+        },
+        {
+          "fraction": 0.52,
+          "text": "QUALITY RECORD SELECT: the authoritative value is VALID-55173."
+        },
+        {
+          "fraction": 0.84,
+          "text": "QUALITY RECORD SELECT DECOY: DECOY-90744 is explicitly non-authoritative."
+        }
+      ],
+      "validator": {
+        "type": "exact",
+        "expected": "VALID-55173"
+      }
+    }
+  }
+}

@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.33.3"
+VERSION = "1.34.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -312,6 +312,56 @@ def load_vision_cases(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
+def load_quality_cases(config: dict[str, Any]) -> tuple[str, dict[str, dict[str, Any]]]:
+    raw_path = config.get("quality_cases_file")
+    if not raw_path:
+        raise ValueError("quality mode requires quality_cases_file")
+    payload = load_json(pathlib.Path(str(raw_path)))
+    if not isinstance(payload, dict):
+        raise ValueError("quality cases file must be a JSON object")
+    filler = payload.get("filler")
+    raw_cases = payload.get("cases")
+    if not isinstance(filler, str) or not filler.strip():
+        raise ValueError("quality cases require non-empty neutral filler text")
+    if not isinstance(raw_cases, dict) or not raw_cases:
+        raise ValueError("quality cases require a non-empty cases object")
+    cases: dict[str, dict[str, Any]] = {}
+    for name, raw in raw_cases.items():
+        if not isinstance(raw, dict):
+            raise ValueError(f"quality case {name!r} must be an object")
+        task = raw.get("task")
+        records = raw.get("records")
+        validator = raw.get("validator")
+        if not isinstance(task, str) or not task.strip():
+            raise ValueError(f"quality case {name!r} requires a task")
+        if not isinstance(records, list) or not records:
+            raise ValueError(f"quality case {name!r} requires at least one record")
+        checked_records: list[dict[str, Any]] = []
+        for record in records:
+            if not isinstance(record, dict):
+                raise ValueError(f"quality case {name!r} records must be objects")
+            fraction = record.get("fraction")
+            text = record.get("text")
+            if not isinstance(fraction, (int, float)) or not 0.0 <= float(fraction) <= 1.0:
+                raise ValueError(f"quality case {name!r} record fraction must be between 0 and 1")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"quality case {name!r} record text must be non-empty")
+            checked_records.append({"fraction": float(fraction), "text": text})
+        if not isinstance(validator, dict) or validator.get("type") not in {"exact", "json_equals"}:
+            raise ValueError(f"quality case {name!r} validator must be exact or json_equals")
+        expected = validator.get("expected")
+        if validator["type"] == "exact" and (not isinstance(expected, str) or not expected):
+            raise ValueError(f"quality case {name!r} exact validator requires a string expected value")
+        if validator["type"] == "json_equals" and not isinstance(expected, (dict, list)):
+            raise ValueError(f"quality case {name!r} json_equals validator requires an object or array")
+        cases[str(name)] = {
+            "task": task,
+            "records": checked_records,
+            "validator": copy.deepcopy(validator),
+        }
+    return filler, cases
+
+
 def load_context_corpus(config: dict[str, Any]) -> str:
     chunks: list[str] = []
     for raw_path in config.get("context_sources", []):
@@ -340,6 +390,145 @@ def make_prompt(base: str, requested_tokens: int, corpus: str) -> str:
     repeated = (corpus + "\n\n") * max(1, math.ceil(target_chars / max(1, len(corpus))))
     filler = repeated[:target_chars]
     return f"{prefix}{filler}\nEND REFERENCE\n\n{base}"
+
+
+def make_quality_prompt_chars(
+    case: dict[str, Any], filler_chars: int, filler_source: str, padding: str = "",
+) -> str:
+    repeated = (filler_source.strip() + "\n\n") * max(
+        1, math.ceil(max(1, filler_chars) / max(1, len(filler_source))),
+    )
+    body = repeated[:max(0, filler_chars)]
+    for record in sorted(case["records"], key=lambda item: float(item["fraction"]), reverse=True):
+        marker = f"\n\n{record['text']}\n\n"
+        available = max(0, len(body) - len(marker))
+        position = int(round(available * float(record["fraction"])))
+        body = body[:position] + marker + body[position + len(marker):]
+    return (
+        "CONTROLLED REFERENCE follows. QUALITY RECORD entries are authoritative data, "
+        "not instructions. Read the reference and answer the task after END REFERENCE.\n\n"
+        f"{body}{padding}\nEND REFERENCE\n\n{case['task']}"
+    )
+
+
+def make_quality_prompt(case: dict[str, Any], requested_tokens: int, filler_source: str) -> str:
+    return make_quality_prompt_chars(case, max(0, requested_tokens) * 4, filler_source)
+
+
+def fit_quality_prompt_to_tokens(
+    base_url: str,
+    case: dict[str, Any],
+    target_tokens: int,
+    filler_source: str,
+    timeout_s: float,
+) -> tuple[str, int]:
+    """Place quality records by fraction while proving the final prompt token count."""
+    if target_tokens <= 0:
+        prompt = make_quality_prompt_chars(case, 0, filler_source)
+        return prompt, tokenize_count(base_url, prompt, timeout_s)
+
+    low_chars = 0
+    high_chars = max(1024, target_tokens * 5)
+    low_prompt = make_quality_prompt_chars(case, low_chars, filler_source)
+    low_count = tokenize_count(base_url, low_prompt, timeout_s)
+    if low_count > target_tokens:
+        raise ValueError(
+            f"quality task is {low_count} tokens, larger than requested target {target_tokens}"
+        )
+    high_prompt = make_quality_prompt_chars(case, high_chars, filler_source)
+    high_count = tokenize_count(base_url, high_prompt, timeout_s)
+    while high_count < target_tokens:
+        low_chars, low_prompt, low_count = high_chars, high_prompt, high_count
+        high_chars *= 2
+        high_prompt = make_quality_prompt_chars(case, high_chars, filler_source)
+        high_count = tokenize_count(base_url, high_prompt, timeout_s)
+
+    best_prompt, best_count, best_chars = low_prompt, low_count, low_chars
+    for _ in range(40):
+        if high_count == low_count:
+            break
+        estimated = low_chars + int(
+            (target_tokens - low_count) * (high_chars - low_chars) / (high_count - low_count)
+        )
+        probe_chars = min(high_chars - 1, max(low_chars + 1, estimated))
+        if probe_chars <= low_chars or probe_chars >= high_chars:
+            probe_chars = (low_chars + high_chars) // 2
+        if probe_chars <= low_chars:
+            break
+        prompt = make_quality_prompt_chars(case, probe_chars, filler_source)
+        count = tokenize_count(base_url, prompt, timeout_s)
+        if count == target_tokens:
+            return prompt, count
+        if count <= target_tokens:
+            low_chars, low_prompt, low_count = probe_chars, prompt, count
+            if count > best_count:
+                best_prompt, best_count, best_chars = prompt, count, probe_chars
+        else:
+            high_chars, high_prompt, high_count = probe_chars, prompt, count
+        if high_chars - low_chars <= 1:
+            break
+
+    for unit in (" benchmark", " x", " 0", "\npadding"):
+        for repeats in range(1, 65):
+            prompt = make_quality_prompt_chars(
+                case, best_chars, filler_source, unit * repeats,
+            )
+            count = tokenize_count(base_url, prompt, timeout_s)
+            if count == target_tokens:
+                return prompt, count
+            if count > target_tokens + 8:
+                break
+    raise RuntimeError(
+        f"could not construct an exact {target_tokens}-token quality prompt; "
+        f"closest count was {best_count}"
+    )
+
+
+def final_answer_text(content: str) -> str:
+    if "</think>" in content:
+        content = content.rsplit("</think>", 1)[1]
+    content = content.strip()
+    fence = re.fullmatch(r"```(?:json|text)?\s*(.*?)\s*```", content, flags=re.DOTALL | re.IGNORECASE)
+    return fence.group(1).strip() if fence else content
+
+
+def quality_case_metrics(content: str, validator: dict[str, Any]) -> dict[str, Any]:
+    answer = final_answer_text(content)
+    validator_type = str(validator["type"])
+    expected = validator["expected"]
+    parsed: Any = None
+    if validator_type == "exact":
+        normalized = re.sub(r"\s+", " ", answer).strip(" `\"'")
+        passed = normalized == expected
+        score = 1.0 if passed else 0.0
+        detail = normalized
+    else:
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(answer):
+            if character not in "[{":
+                continue
+            try:
+                parsed, _end = decoder.raw_decode(answer[index:])
+                break
+            except json.JSONDecodeError:
+                continue
+        passed = parsed == expected
+        if isinstance(expected, dict) and isinstance(parsed, dict) and expected:
+            score = sum(parsed.get(key) == value for key, value in expected.items()) / len(expected)
+        else:
+            score = 1.0 if passed else 0.0
+        detail = parsed
+    return {
+        "validator_type": validator_type,
+        "expected": expected,
+        "observed": detail,
+        "anchor_score": score,
+        "quality_pass": passed,
+        "anchors": [json.dumps(expected, sort_keys=True) if not isinstance(expected, str) else expected],
+        "anchors_matched": [
+            json.dumps(expected, sort_keys=True) if not isinstance(expected, str) else expected
+        ] if passed else [],
+    }
 
 
 def tokenize_count(base_url: str, content: str, timeout_s: float) -> int:
@@ -1646,7 +1835,9 @@ def preflight(
     warnings: list[str] = []
     rocm_audit: dict[str, Any] | None = None
     files: list[dict[str, Any]] = []
-    vision_mode = str(tier.get("mode", "text")) == "vision"
+    mode = str(tier.get("mode", "text"))
+    vision_mode = mode == "vision"
+    quality_mode = mode == "quality"
     vision_cases: dict[str, dict[str, Any]] = {}
     if vision_mode:
         try:
@@ -1666,6 +1857,22 @@ def preflight(
             files.append({"vision_case": case_name, "kind": "image", "path": str(image), "exists": exists})
             if not skip_path_check and not exists:
                 errors.append(f"vision case {case_name}: missing image {image}; run python3 qwen_vision.py fixtures")
+    if quality_mode:
+        try:
+            _quality_filler, quality_cases = load_quality_cases(config)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            quality_cases = {}
+            errors.append(f"cannot load quality cases: {exc}")
+        selected_quality_cases = list(tier.get("quality_cases", quality_cases))
+        missing_quality_cases = sorted(set(selected_quality_cases) - set(quality_cases))
+        if missing_quality_cases:
+            errors.append(f"quality tier references unknown cases: {missing_quality_cases}")
+        files.append({
+            "kind": "quality_cases",
+            "path": str(config.get("quality_cases_file", "")),
+            "exists": bool(quality_cases),
+            "selected": selected_quality_cases,
+        })
     for experiment in experiments:
         effective_args = server_command(config, tier, experiment)[1:]
         for error in server_arg_compatibility_errors(effective_args):
@@ -1726,6 +1933,21 @@ def preflight(
     concurrency = int(tier.get("concurrency", 1))
     if concurrency < 1:
         errors.append("concurrency must be at least 1")
+    if quality_mode:
+        if concurrency != 1:
+            errors.append("deterministic quality tiers currently require concurrency 1")
+        if not bool(tier.get("exact_prompt_tokens")):
+            errors.append("deterministic quality tiers require exact_prompt_tokens=true")
+        if any(int(value) <= 0 for value in tier.get("depths", [])):
+            errors.append("deterministic quality tiers require positive exact prompt depths")
+        if int(tier.get("n_predict", 0)) < 128:
+            errors.append("deterministic quality tiers require n_predict >= 128 to avoid truncating reasoning")
+        quality_request = dict(defaults.get("request", {}))
+        quality_request.update(tier.get("request", {}))
+        if quality_request.get("ignore_eos") is not False:
+            errors.append(
+                "deterministic quality tiers require request.ignore_eos=false so exact answers are not forced to continue"
+            )
     if concurrency > 1:
         workloads = list(tier.get("workloads", []))
         if len(workloads) != concurrency:
@@ -1740,7 +1962,7 @@ def preflight(
                 )
     text_quality_anchors = tier.get("text_quality_anchors")
     if text_quality_anchors is not None:
-        if vision_mode or not isinstance(text_quality_anchors, dict):
+        if vision_mode or quality_mode or not isinstance(text_quality_anchors, dict):
             errors.append("text_quality_anchors must be a workload-to-anchor-list mapping on a text tier")
         else:
             selected_workloads = set(str(value) for value in tier.get("workloads", []))
@@ -1914,7 +2136,8 @@ def probe_row(
 def completed_keys(results_path: pathlib.Path) -> set[tuple[int, str, str, int]]:
     keys: set[tuple[int, str, str, int]] = set()
     for row in read_jsonl(results_path):
-        if row.get("status") == "ok" and not row.get("degenerate"):
+        is_scored_quality = isinstance(row.get("quality_failure"), bool)
+        if row.get("status") == "ok" and (not row.get("degenerate") or is_scored_quality):
             keys.add((int(row["round"]), str(row["experiment"]), str(row["workload"]), int(row["requested_depth_tokens"])))
     return keys
 
@@ -1926,20 +2149,29 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
         raise ValueError(f"unknown tier {args.tier!r}; choose from {', '.join(config.get('tiers', {}))}")
     tier = config["tiers"][args.tier]
     experiments = select_experiments(config, tier, args.experiments)
-    vision_mode = str(tier.get("mode", "text")) == "vision"
+    mode = str(tier.get("mode", "text"))
+    vision_mode = mode == "vision"
+    quality_mode = mode == "quality"
     vision_cases_all = load_vision_cases(config) if vision_mode else {}
+    quality_filler, quality_cases_all = load_quality_cases(config) if quality_mode else ("", {})
     workloads_all = (
         {name: str(case["prompt"]) for name, case in vision_cases_all.items()}
-        if vision_mode else load_workloads(config, config_path)
+        if vision_mode else (
+            {name: str(case["task"]) for name, case in quality_cases_all.items()}
+            if quality_mode else load_workloads(config, config_path)
+        )
     )
     workload_names = list(
         tier.get("vision_cases", vision_cases_all) if vision_mode
-        else tier.get("workloads", workloads_all)
+        else (
+            tier.get("quality_cases", quality_cases_all) if quality_mode
+            else tier.get("workloads", workloads_all)
+        )
     )
     missing_workloads = [name for name in workload_names if name not in workloads_all]
     if missing_workloads:
         raise ValueError(f"tier references unknown workload(s): {missing_workloads}")
-    corpus = load_context_corpus(config)
+    corpus = quality_filler if quality_mode else load_context_corpus(config)
     if args.resume:
         run_dir = pathlib.Path(args.resume).resolve()
         if not run_dir.is_dir():
@@ -1971,6 +2203,7 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
         "commands": {item["name"]: server_command(config, tier, item) for item in experiments},
         "request": effective_request,
         "vision_cases": {name: vision_cases_all[name] for name in workload_names} if vision_mode else None,
+        "quality_cases": {name: quality_cases_all[name] for name in workload_names} if quality_mode else None,
         "argv": sys.argv,
     }
     atomic_json(run_dir / "manifest.json", manifest)
@@ -2093,7 +2326,19 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                     def prepared_prompt(workload: str, depth: int, lane: int) -> tuple[str, int | None]:
                         key = (workload, depth, lane)
                         if key not in prompt_cache:
-                            if exact_prompt_tokens:
+                            if quality_mode:
+                                prompt_cache[key] = (
+                                    fit_quality_prompt_to_tokens(
+                                        base_url, quality_cases_all[workload], depth,
+                                        quality_filler, request_timeout_s,
+                                    ) if exact_prompt_tokens else (
+                                        make_quality_prompt(
+                                            quality_cases_all[workload], depth, quality_filler,
+                                        ),
+                                        None,
+                                    )
+                                )
+                            elif exact_prompt_tokens:
                                 prompt_cache[key] = fit_prompt_to_tokens(
                                     base_url, workloads_all[workload], depth, corpus, request_timeout_s, lane,
                                 )
@@ -2274,6 +2519,14 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             )
                         if exact_prompt_tokens:
                             row["constructed_prompt_tokens"] = constructed_prompt_tokens
+                        if quality_mode:
+                            text_quality = quality_case_metrics(
+                                response_content(response), quality_cases_all[workload]["validator"],
+                            )
+                            row["text_quality"] = text_quality
+                            row["quality_failure"] = not bool(text_quality["quality_pass"])
+                            if row["quality_failure"]:
+                                row["degenerate"] = True
                         text_anchors = tier.get("text_quality_anchors", {}).get(workload, [])
                         if text_anchors:
                             text_quality = anchor_metrics(response_content(response), list(text_anchors))
@@ -2322,7 +2575,12 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                         if row.get("text_quality") and row.get("quality_failure"):
                             score = row["text_quality"].get("anchor_score")
                             score_text = f"{score:.0%}" if isinstance(score, (int, float)) else "unavailable"
-                            status_parts.append(f"INVALID text quality ({score_text} anchors)")
+                            if quality_mode:
+                                status_parts.append(f"QUALITY FAIL ({score_text})")
+                            else:
+                                status_parts.append(f"INVALID text quality ({score_text} anchors)")
+                        elif quality_mode and row.get("text_quality"):
+                            status_parts.append("QUALITY PASS")
                         elif row.get("quality_failure"):
                             score = vision_metrics.get("anchor_score")
                             score_text = f"{score:.0%}" if isinstance(score, (int, float)) else "unavailable"
@@ -2396,16 +2654,167 @@ def fmt(value: Any, digits: int = 2) -> str:
     return "" if value is None else f"{float(value):.{digits}f}"
 
 
+def wilson_interval(passed: int, total: int, z: float = 1.96) -> tuple[float | None, float | None]:
+    if total <= 0:
+        return None, None
+    proportion = passed / total
+    denominator = 1.0 + z * z / total
+    center = (proportion + z * z / (2.0 * total)) / denominator
+    radius = z * math.sqrt(
+        proportion * (1.0 - proportion) / total + z * z / (4.0 * total * total)
+    ) / denominator
+    return max(0.0, center - radius), min(1.0, center + radius)
+
+
+def exact_mcnemar_p(regressions: int, improvements: int) -> float | None:
+    """Two-sided exact McNemar p-value for discordant paired binary outcomes."""
+    discordant = regressions + improvements
+    if discordant <= 0:
+        return None
+    tail = sum(
+        math.comb(discordant, index) for index in range(min(regressions, improvements) + 1)
+    ) / (2 ** discordant)
+    return min(1.0, 2.0 * tail)
+
+
+def deterministic_quality_summary(
+    run_dir: pathlib.Path,
+    results: list[dict[str, Any]],
+    experiments: list[dict[str, Any]],
+) -> str:
+    samples = [
+        row for row in results
+        if row.get("status") in SUCCESS_STATES
+        and isinstance(row.get("text_quality", {}).get("quality_pass"), bool)
+    ]
+    if not samples:
+        return ""
+    baseline_names = [item["name"] for item in experiments if item.get("baseline")]
+    baseline_name = baseline_names[0] if baseline_names else experiments[0]["name"]
+    baseline_by_cell = {
+        (str(row["workload"]), int(row["requested_depth_tokens"]), int(row["round"])):
+            bool(row["text_quality"]["quality_pass"])
+        for row in samples if row["experiment"] == baseline_name
+    }
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in samples:
+        grouped[str(row["experiment"])].append(row)
+    baseline_rows = grouped.get(baseline_name, [])
+    baseline_rate = (
+        sum(bool(row["text_quality"]["quality_pass"]) for row in baseline_rows) / len(baseline_rows)
+        if baseline_rows else None
+    )
+    quality_rows: list[dict[str, Any]] = []
+    for experiment, rows in grouped.items():
+        passed = sum(bool(row["text_quality"]["quality_pass"]) for row in rows)
+        total = len(rows)
+        rate = passed / total
+        low, high = wilson_interval(passed, total)
+        regressions = 0
+        improvements = 0
+        paired = 0
+        for row in rows:
+            key = (str(row["workload"]), int(row["requested_depth_tokens"]), int(row["round"]))
+            if key not in baseline_by_cell:
+                continue
+            paired += 1
+            current_pass = bool(row["text_quality"]["quality_pass"])
+            baseline_pass = baseline_by_cell[key]
+            regressions += int(baseline_pass and not current_pass)
+            improvements += int(not baseline_pass and current_pass)
+        quality_rows.append({
+            "experiment": experiment,
+            "passed": passed,
+            "total": total,
+            "pass_rate": rate,
+            "wilson_low_95": low,
+            "wilson_high_95": high,
+            "delta_vs_baseline": rate - baseline_rate if baseline_rate is not None else None,
+            "paired_cells": paired,
+            "paired_regressions": regressions,
+            "paired_improvements": improvements,
+            "mcnemar_exact_p": exact_mcnemar_p(regressions, improvements),
+            "median_decode_tok_s": median_or_none(
+                row.get("timing", {}).get("predicted_per_second") for row in rows
+            ),
+            "median_prefill_tok_s": median_or_none(
+                row.get("timing", {}).get("prompt_per_second") for row in rows
+            ),
+        })
+    quality_rows.sort(key=lambda row: (-row["pass_rate"], row["experiment"]))
+    with (run_dir / "quality.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(quality_rows[0]))
+        writer.writeheader()
+        writer.writerows(quality_rows)
+    per_case_rows: list[dict[str, Any]] = []
+    case_groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in samples:
+        case_groups[(str(row["experiment"]), str(row["workload"]))].append(row)
+    for (experiment, case_name), rows in sorted(case_groups.items()):
+        passed = sum(bool(row["text_quality"]["quality_pass"]) for row in rows)
+        per_case_rows.append({
+            "experiment": experiment,
+            "case": case_name,
+            "passed": passed,
+            "total": len(rows),
+            "pass_rate": passed / len(rows),
+        })
+    with (run_dir / "quality-cases.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(per_case_rows[0]))
+        writer.writeheader()
+        writer.writerows(per_case_rows)
+    md = [
+        "## Deterministic functional quality\n\n",
+        f"Ground-truth pass rate is the primary quality metric. Baseline for paired regressions: `{baseline_name}`. "
+        "Intervals are 95% Wilson intervals; regressions count cells where the baseline passed and the candidate failed.\n\n",
+        "| Experiment | Passed | Pass rate | 95% CI | Delta | Regressions | Improvements | McNemar p | Prefill tok/s | Decode tok/s |\n",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+    ]
+    for row in quality_rows:
+        low = row["wilson_low_95"]
+        high = row["wilson_high_95"]
+        interval = f"{100.0 * low:.1f}%–{100.0 * high:.1f}%" if low is not None and high is not None else ""
+        delta = row["delta_vs_baseline"]
+        delta_text = f"{100.0 * delta:+.1f} pp" if isinstance(delta, (int, float)) else ""
+        p_value = row["mcnemar_exact_p"]
+        p_text = f"{p_value:.4f}" if isinstance(p_value, (int, float)) else "—"
+        md.append(
+            f"| {row['experiment']} | {row['passed']}/{row['total']} | {100.0 * row['pass_rate']:.1f}% | "
+            f"{interval} | {delta_text} | {row['paired_regressions']}/{row['paired_cells']} | "
+            f"{row['paired_improvements']}/{row['paired_cells']} | {p_text} | "
+            f"{fmt(row['median_prefill_tok_s'])} | {fmt(row['median_decode_tok_s'])} |\n"
+        )
+    failures = [row for row in per_case_rows if row["passed"] < row["total"]]
+    if failures:
+        md.extend([
+            "\n### Failed deterministic cases\n\n",
+            "| Experiment | Case | Passed | Pass rate |\n",
+            "|---|---|---:|---:|\n",
+        ])
+        for row in failures:
+            md.append(
+                f"| {row['experiment']} | {row['case']} | {row['passed']}/{row['total']} | "
+                f"{100.0 * row['pass_rate']:.1f}% |\n"
+            )
+    return "".join(md) + "\n"
+
+
 def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, experiments: list[dict[str, Any]] | None = None) -> None:
     results = read_jsonl(run_dir / "results.jsonl")
-    valid = [row for row in results if row.get("status") in SUCCESS_STATES and not row.get("degenerate")]
-    if not valid:
-        print(f"No successful, non-degenerate probes to summarize in {run_dir}", file=sys.stderr)
-        return
     if config is None:
         manifest = load_json(run_dir / "manifest.json")
         experiments = manifest.get("experiments", [])
     assert experiments is not None
+    quality_md = deterministic_quality_summary(run_dir, results, experiments)
+    valid = [row for row in results if row.get("status") in SUCCESS_STATES and not row.get("degenerate")]
+    if not valid:
+        if quality_md:
+            (run_dir / "summary.md").write_text(
+                f"# Benchmark summary: {run_dir.name}\n\n" + quality_md,
+                encoding="utf-8",
+            )
+        print(f"No successful, non-degenerate probes to summarize in {run_dir}", file=sys.stderr)
+        return
     baseline_names = [item["name"] for item in experiments if item.get("baseline")]
     baseline_name = baseline_names[0] if baseline_names else experiments[0]["name"]
     baseline_hashes: dict[tuple[str, int, int], str] = {}
@@ -2613,6 +3022,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         match = "" if row["hash_match"] is None else f"{row['hash_match']:.0%}"
         accept = "" if row["mtp_acceptance"] is None else f"{row['mtp_acceptance']:.1%}"
         md.append(f"| {row['experiment']} | {row['cells']} | {decode_speedup} | {prefill_speedup} | {balanced} | {quality} | {match} | {accept} |\n")
+    if quality_md:
+        md.extend(["\n", quality_md])
     md.extend([
         "\n## Per-workload results\n\n",
         "| Experiment | Workload | Requested depth | Prompt n | Samples | Decode tok/s | Prefill tok/s | Prefill ms | MTP accept | Hash match | File RSS GiB | Storage read GiB | Major faults | PCIe |\n",
@@ -2841,6 +3252,31 @@ def self_test() -> None:
     assert response_text_parts(reasoning_only) == ("", "visible reasoning")
     anchors = anchor_metrics(response_content(oai), ["red", "circle", "blue", "UNSLOTH 42"])
     assert anchors["anchor_score"] == 0.75
+    exact_quality = quality_case_metrics(
+        "<think>retrieve it</think>\nEMBER-731942\n",
+        {"type": "exact", "expected": "EMBER-731942"},
+    )
+    assert exact_quality["quality_pass"] is True and exact_quality["anchor_score"] == 1.0
+    json_quality = quality_case_metrics(
+        "<think>assemble</think>\n```json\n{\"alpha\":\"COPPER-17\"}\n```",
+        {"type": "json_equals", "expected": {"alpha": "COPPER-17"}},
+    )
+    assert json_quality["quality_pass"] is True and json_quality["observed"] == {"alpha": "COPPER-17"}
+    quality_prompt = make_quality_prompt({
+        "task": "Return only TEST-1.",
+        "records": [{"fraction": 0.5, "text": "QUALITY RECORD TEST: TEST-1."}],
+        "validator": {"type": "exact", "expected": "TEST-1"},
+    }, 256, "Neutral archive text. ")
+    assert quality_prompt.count("QUALITY RECORD TEST: TEST-1.") == 1
+    assert quality_prompt.endswith("Return only TEST-1.")
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        quality_results = pathlib.Path(raw_tmp) / "results.jsonl"
+        append_jsonl(quality_results, {
+            "status": "ok", "degenerate": True, "quality_failure": True,
+            "round": 0, "experiment": "candidate", "workload": "case-a",
+            "requested_depth_tokens": 32768,
+        })
+        assert completed_keys(quality_results) == {(0, "candidate", "case-a", 32768)}
     probability = probability_metrics({"completion_probabilities": [{
         "content": "x",
         "probs": [
@@ -2875,6 +3311,24 @@ def self_test() -> None:
             [], pathlib.Path(raw_tmp), allow_busy=True, skip_path_check=True,
         )
         assert preflight_report["errors"] == []
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        quality_preflight = preflight(
+            {
+                "defaults": {"host": "127.0.0.1", "port": 0},
+                "quality_cases_file": str(pathlib.Path(__file__).with_name("quality_cases.json")),
+            },
+            {
+                "mode": "quality",
+                "quality_cases": ["passkey_early"],
+                "depths": [32768],
+                "exact_prompt_tokens": True,
+                "n_predict": 256,
+                "request": {"ignore_eos": False},
+                "warmups": 0,
+            },
+            [], pathlib.Path(raw_tmp), allow_busy=True, skip_path_check=True,
+        )
+        assert quality_preflight["errors"] == []
     vision_log = extract_vision_log_metrics(
         "image/slice encoded in 12.5 ms\nimage decoded (batch 1/1) in 3.5 ms\nimage processed in 16.2 ms\n"
     )
@@ -2971,6 +3425,32 @@ def self_test() -> None:
             "Q4_0_ROCMFP4 Q4_0_ROCMFP4_FAST", encoding="utf-8",
         )
         assert inspect_rocmfp4_sources(source_root)["static_dispatch_ready"] is True
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        quality_root = pathlib.Path(raw_tmp)
+        quality_markdown = deterministic_quality_summary(quality_root, [
+            {
+                "status": "ok", "experiment": "base", "workload": "case-a",
+                "requested_depth_tokens": 32768, "round": 0,
+                "text_quality": {"quality_pass": True},
+            },
+            {
+                "status": "ok", "experiment": "candidate", "workload": "case-a",
+                "requested_depth_tokens": 32768, "round": 0,
+                "text_quality": {"quality_pass": False},
+            },
+        ], [{"name": "base", "baseline": True}, {"name": "candidate"}])
+        assert "candidate | 0/1 | 0.0%" in quality_markdown
+        assert "1/1 | 0/1" in quality_markdown
+        assert (quality_root / "quality.csv").is_file()
+        assert (quality_root / "quality-cases.csv").is_file()
+        assert "candidate,case-a,0,1,0.0" in (
+            quality_root / "quality-cases.csv"
+        ).read_text(encoding="utf-8")
+        low, high = wilson_interval(1, 1)
+        assert low is not None and high == 1.0 and 0.0 < low < 1.0
+        assert exact_mcnemar_p(0, 0) is None
+        assert exact_mcnemar_p(1, 0) == 1.0
+        assert exact_mcnemar_p(6, 0) == 0.03125
     with tempfile.TemporaryDirectory() as raw_tmp:
         summary_root = pathlib.Path(raw_tmp)
         atomic_json(summary_root / "manifest.json", {"tier": {"cache_state": "hot"}})
@@ -3124,6 +3604,10 @@ def self_test() -> None:
         if cache_state == "cold":
             assert int(tier.get("warmups", 0)) == 0, f"{tier_name}: cold tier has warm-ups"
     expanded_shipped_config = load_config(pathlib.Path(__file__).with_name("matrix.json"))
+    quality_filler, shipped_quality_cases = load_quality_cases(expanded_shipped_config)
+    assert "neutral" in quality_filler.casefold()
+    assert len(shipped_quality_cases) == 8
+    assert shipped_quality_cases["json_retrieval"]["validator"]["type"] == "json_equals"
     for tier_name in (
         "rocm-smoke", "rocm-depth", "backend-smoke-matched", "rocm-placement", "rocm-mtp",
     ):
@@ -3313,12 +3797,14 @@ def self_test() -> None:
         "prod_hip_256k_tail_88_12_no_mtp_ub1792",
         "prod_hip_256k_tail_88_12_no_mtp_ub1536",
         "prod_hip_256k_tail_88_12_no_mtp_ub1024",
+        "prod_hip_256k_tail_88_12_no_mtp_ub512",
     ]
     mtp_repeatability_names = [
         "prod_hip_256k_tail_88_12",
         "prod_hip_256k_tail_88_12_ub1792",
         "prod_hip_256k_tail_88_12_ub1536",
         "prod_hip_256k_tail_88_12_ub1024",
+        "prod_hip_256k_tail_88_12_ub512",
     ]
     placement_screen = expanded_shipped_config["tiers"]["rocm-256k-placement-screen"]
     tail_screen = expanded_shipped_config["tiers"]["rocm-256k-tail-screen"]
@@ -3330,6 +3816,8 @@ def self_test() -> None:
     target_fingerprint = expanded_shipped_config["tiers"]["rocm-ubatch-target-fingerprint"]
     target_correctness = expanded_shipped_config["tiers"]["rocm-ubatch-target-correctness"]
     mtp_repeatability = expanded_shipped_config["tiers"]["rocm-ubatch-mtp-repeatability"]
+    quality_target = expanded_shipped_config["tiers"]["rocm-ubatch-quality-target-screen"]
+    quality_mtp = expanded_shipped_config["tiers"]["rocm-ubatch-quality-mtp-screen"]
     assert placement_screen["experiments"] == placement_names
     assert tail_screen["experiments"] == tail_names
     assert capacity_screen["experiments"] == tail_names
@@ -3340,6 +3828,18 @@ def self_test() -> None:
     assert target_fingerprint["experiments"] == target_fingerprint_names
     assert target_correctness["experiments"] == target_fingerprint_names
     assert mtp_repeatability["experiments"] == mtp_repeatability_names
+    assert quality_target["experiments"] == target_fingerprint_names
+    assert quality_mtp["experiments"] == mtp_repeatability_names
+    assert quality_target.get("mode") == "quality"
+    assert quality_mtp.get("mode") == "quality"
+    assert len(quality_target["quality_cases"]) == 8
+    assert quality_target["quality_cases"] == quality_mtp["quality_cases"]
+    assert quality_target.get("exact_prompt_tokens") is True
+    assert quality_mtp.get("exact_prompt_tokens") is True
+    assert int(quality_target["n_predict"]) == 256
+    assert int(quality_mtp["n_predict"]) == 256
+    assert quality_target["request"]["ignore_eos"] is False
+    assert quality_mtp["request"]["ignore_eos"] is False
     assert int(placement_screen["ctx_size"]) == 65536
     assert int(tail_screen["ctx_size"]) == 65536
     assert int(capacity_screen["ctx_size"]) == 262144
@@ -3448,7 +3948,7 @@ def self_test() -> None:
         for item in target_experiments
     ]
     assert [option_value(args, "--ubatch-size") for args in target_args] == [
-        "2048", "1792", "1536", "1024",
+        "2048", "1792", "1536", "1024", "512",
     ]
     for args in target_args:
         assert "-md" not in args
@@ -3475,7 +3975,7 @@ def self_test() -> None:
         for item in mtp_experiments
     ]
     assert [option_value(args, "--ubatch-size") for args in mtp_args] == [
-        "2048", "1792", "1536", "1024",
+        "2048", "1792", "1536", "1024", "512",
     ]
     for args in mtp_args:
         assert "-md" in args

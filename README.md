@@ -1024,7 +1024,7 @@ python3 qwen_bench.py preflight --tier rocm-ubatch-target-fingerprint
 ./run-bench.sh --tier rocm-ubatch-target-fingerprint --fail-fast
 ```
 
-This runs two fresh-server rounds at 32K for ubatch 2048, 1792, 1536, and 1024.
+This runs two fresh-server rounds at 32K for ubatch 2048, 1792, 1536, 1024, and 512.
 It generates only four tokens, requests the top 20 probabilities, stores a
 compact first-token view plus a distribution hash in `results.jsonl`, and retains
 the complete response. Decode speed and answer quality are intentionally not
@@ -1043,33 +1043,57 @@ newline. This proves ubatch-dependent target-logit drift without yet proving
 semantic corruption. Exact probability hashes are deliberately strict and must
 be interpreted together with token rank, margin, and the full-output control.
 
-Next run the full-output no-MTP control without `n_probs` instrumentation:
+Quantify functional quality with the deterministic target-only screen, not an
+output hash and not MTP acceptance:
 
 ```bash
-python3 qwen_bench.py preflight --tier rocm-ubatch-target-correctness
-./run-bench.sh --tier rocm-ubatch-target-correctness --fail-fast
+python3 qwen_bench.py preflight --tier rocm-ubatch-quality-target-screen
+./run-bench.sh --tier rocm-ubatch-quality-target-screen --fail-fast
 ```
 
-This produces 512 tokens in two fresh-server rounds and applies the task anchors
-only after enough output exists to reach the requested function. If fingerprint
-differences correspond to task loss here, MTP acceptance was only reporting an
-already-changed target stream. If target correctness remains stable, proceed to
-the MTP-specific repetition.
+This uses exact 32768-token prompts and eight machine-verifiable tasks: passkeys
+at early/middle/late positions, ordered retrieval, latest-revision selection,
+grounded arithmetic, exact JSON retrieval, and distractor rejection. Each runs
+twice from fresh servers at ubatch 2048, 1792, 1536, 1024, and 512. Requests are
+greedy but respect EOS; forcing `ignore_eos=true` would turn a correct short
+answer into an artificial exact-match failure. The 256-token ceiling prevents a
+truncated reasoning preamble from being confused with task corruption.
 
-Then repeat the full n=3 MTP path under the identical placement and F16 target
-and draft KV conditions:
+`summary.md` and `quality.csv` report exact pass count, pass-rate delta from the
+ubatch-2048 reference, 95% Wilson interval, paired regressions/improvements,
+two-sided exact McNemar p-value, and median prefill/decode throughput over every
+scored response. `quality-cases.csv` identifies which retrieval position or task
+failed. With 16 trials per experiment, 16/16 has a Wilson interval of roughly
+80.6%–100%; this is a deterministic correctness screen, not a claim about broad
+language-model benchmark quality. An eligible target ubatch needs 16/16 and zero
+paired regressions. A repeat of the finalist is appropriate before production if
+all candidates pass.
+
+The ubatch-2048 arm is the numerical/performance reference at 64K, not an implied
+256K deployment candidate. Capacity headroom is evaluated separately.
+
+Only after the target-only screen identifies safe target ubatches, run MTP on
+that subset. Keep n=3 on the 7900 XT and F16 target/draft KV fixed:
+
 
 ```bash
-python3 qwen_bench.py preflight --tier rocm-ubatch-mtp-repeatability
-./run-bench.sh --tier rocm-ubatch-mtp-repeatability --fail-fast
+python3 qwen_bench.py preflight --tier rocm-ubatch-quality-mtp-screen
+./run-bench.sh --tier rocm-ubatch-quality-mtp-screen \
+  --experiments 'COMMA_SEPARATED_TARGET_QUALIFIED_MTP_EXPERIMENTS' \
+  --fail-fast
 ```
 
-This uses two fresh-server rounds and 512-token decodes. Compare task-anchor
-pass/fail, output hashes, draft counts, and acceptance within each ubatch—not
-acceptance alone across different outputs. Historical run
+Apply the same 16/16 and zero-regression gate, then use decode throughput and MTP
+acceptance only to rank candidates that passed. Acceptance is conditional on the
+target stream and cannot itself measure quality. Historical run
 `20260829-131616-rocm-mtp-finalists` produced identical hashes and acceptance in
 both ubatch-2048 rounds, which argues for deterministic configuration-dependent
 state divergence rather than random ROCm instability.
+
+The older `rocm-ubatch-target-correctness` and
+`rocm-ubatch-mtp-repeatability` tiers remain available for reproducing the single
+`merge_intervals` symptom, but their anchor score is too narrow to quantify
+quality and they are no longer the production qualification path.
 
 The symptom closely parallels open llama.cpp correctness reports for hybrid
 Gated DeltaNet models: [issue #27237](https://github.com/ggml-org/llama.cpp/issues/27237)
