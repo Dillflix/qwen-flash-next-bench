@@ -721,9 +721,26 @@ If shallow performance is sane, localize the previously reported context cliff:
 
 That single-variable tier stays APU-only, pre-warms the full 32768-token prompt,
 erases its KV slot, then sweeps 0, 512, 1024, 1536, 2048, 4096, 8192, and 32768
-requested tokens. Do not proceed to `rocm-placement` or
-`rocm-mtp` until this curve remains sane. Only then should multi-GPU placement be
-reintroduced, followed last by the Q8 MTP sidecar on the 7900 XT.
+requested tokens. Once this curve remains sane, run the focused multi-GPU placement
+test:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-placement
+./run-bench.sh --tier rocm-placement --fail-fast
+```
+
+This is not the old ratio sweep. It tests only four F16-KV, batch-2048 deployments
+on the code workload at approximately 4K and 32K depth after an excluded 32K
+warm-up: APU-only; the established 82/18 contiguous layer split; routed experts on
+the iGPU with remaining eligible tensors on the 7900 XT; and routed plus shared
+experts on the iGPU with the remainder on the 7900 XT. In the unrestricted ROCm
+device list, `ROCm0` is the RX 7900 XT and `ROCm1` is the Radeon 8060S. The joined
+PLE tensor remains on its native file-backed mmap path in every cell.
+
+The additional layer and row definitions remain available for deliberate follow-up,
+but are excluded from the recommended campaign. Do not run `rocm-mtp` until this
+focused tier identifies the target-model placement winner; then compare the Q8 MTP
+sidecar on the 7900 XT versus the iGPU using that one target layout.
 
 Benchmark the fork-specific Vulkan kernel and prefill knobs on the representative 88/12 placement:
 

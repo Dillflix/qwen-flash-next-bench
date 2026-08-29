@@ -736,32 +736,30 @@
       "settle_seconds": 2
     },
     "rocm-placement": {
-      "description": "Three-round ROCm 10 APU, expert, layer-order, ratio, and row sweep.",
+      "description": "Focused hot-cache ROCm 10 placement test at 4K and 32K: APU-only, 82/18 layers, routed experts on iGPU, and routed plus shared experts on iGPU.",
       "require_rocm_audit": true,
+      "cache_state": "hot",
       "experiments": [
-        "apu_hip_joined_no_mtp",
-        "expert_hip_no_mtp",
-        "layer_90_10_hip_no_mtp",
-        "layer_88_12_hip_no_mtp",
-        "layer_85_15_hip_no_mtp",
-        "layer_82_18_hip_no_mtp",
-        "layer_80_20_hip_no_mtp",
-        "layer_reverse_18_82_hip_no_mtp",
-        "row_86_14_main_apu_hip_no_mtp",
-        "row_86_14_main_dgpu_hip_no_mtp"
+        "apu_hip_joined_f16kv_no_mtp",
+        "layer_82_18_hip_f16kv_no_mtp",
+        "expert_hip_f16kv_no_mtp",
+        "expert_shared_hip_f16kv_no_mtp"
       ],
       "workloads": [
-        "code",
-        "json",
-        "prose"
+        "code"
       ],
       "depths": [
-        0
+        4096,
+        32768
       ],
-      "ctx_size": 8192,
-      "n_predict": 256,
+      "ctx_size": 65536,
+      "n_predict": 128,
       "warmups": 1,
-      "rounds": 3
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "settle_seconds": 2,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
     },
     "rocm-mtp": {
       "description": "ROCm layer split with extra dGPU headroom for MTP n=2/3/4.",
@@ -1869,6 +1867,51 @@
       ]
     },
     {
+      "name": "expert_hip_f16kv_no_mtp",
+      "description": "ROCm routed-expert placement with F16 K/V cache and batch 2048: joined PLE stays file-backed, routed experts use the iGPU, and remaining eligible tensors use the 7900 XT.",
+      "extends": "expert_hip_no_mtp",
+      "args_append": [
+        "--main-gpu",
+        "0",
+        "--batch-size",
+        "2048",
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
+      ]
+    },
+    {
+      "name": "expert_shared_hip_no_mtp",
+      "description": "ROCm placement with routed experts, shared-expert matrices, and the shared-expert gate on the iGPU; remaining eligible tensors use the 7900 XT.",
+      "extends": "expert_hip_no_mtp",
+      "args": [
+        "--device",
+        "ROCm0,ROCm1",
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "layer",
+        "--tensor-split",
+        "1,0",
+        "--override-tensor",
+        "^blk\\.[0-9]+\\.ffn_(down|gate|up)_(exps|shexp)\\.weight$=ROCm1,^blk\\.[0-9]+\\.ffn_gate_inp_shexp\\.weight$=ROCm1"
+      ]
+    },
+    {
+      "name": "expert_shared_hip_f16kv_no_mtp",
+      "description": "ROCm routed-plus-shared-expert placement with F16 K/V cache and batch 2048.",
+      "extends": "expert_shared_hip_no_mtp",
+      "args_append": [
+        "--batch-size",
+        "2048",
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
+      ]
+    },
+    {
       "name": "apu_hip_joined_f16kv_no_mtp",
       "description": "Clean ROCm diagnostic: APU only, native joined PLE under mmap, F16 KV, batch 2048, no dGPU, and no MTP.",
       "extends": "apu_hip_joined_no_mtp",
@@ -1942,6 +1985,21 @@
         "layer",
         "--tensor-split",
         "82,18"
+      ]
+    },
+    {
+      "name": "layer_82_18_hip_f16kv_no_mtp",
+      "description": "ROCm 82/18 contiguous layer placement with F16 K/V cache and batch 2048.",
+      "extends": "layer_82_18_hip_no_mtp",
+      "args_append": [
+        "--main-gpu",
+        "0",
+        "--batch-size",
+        "2048",
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
       ]
     },
     {

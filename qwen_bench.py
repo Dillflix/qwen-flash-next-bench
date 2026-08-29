@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.22.4"
+VERSION = "1.23.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -2874,7 +2874,7 @@ def self_test() -> None:
         if cache_state == "cold":
             assert int(tier.get("warmups", 0)) == 0, f"{tier_name}: cold tier has warm-ups"
     expanded_shipped_config = load_config(pathlib.Path(__file__).with_name("matrix.json"))
-    for tier_name in ("rocm-smoke", "rocm-depth", "backend-smoke-matched"):
+    for tier_name in ("rocm-smoke", "rocm-depth", "backend-smoke-matched", "rocm-placement"):
         rocm_tier = expanded_shipped_config["tiers"][tier_name]
         assert rocm_tier.get("cache_state") == "hot"
         assert int(rocm_tier.get("warmup_depth", 0)) >= max(
@@ -2915,6 +2915,23 @@ def self_test() -> None:
         else:
             raise AssertionError(f"unexpected matched-tier backend: {backend}")
     assert dict(matched_backends) == {"vulkan": 2, "rocm": 2}
+    placement_tier = expanded_shipped_config["tiers"]["rocm-placement"]
+    placement_experiments = select_experiments(expanded_shipped_config, placement_tier, None)
+    assert [item["name"] for item in placement_experiments] == [
+        "apu_hip_joined_f16kv_no_mtp",
+        "layer_82_18_hip_f16kv_no_mtp",
+        "expert_hip_f16kv_no_mtp",
+        "expert_shared_hip_f16kv_no_mtp",
+    ]
+    for experiment in placement_experiments:
+        placement_args = server_command(expanded_shipped_config, placement_tier, experiment)[1:]
+        assert option_value(placement_args, "--batch-size") == "2048"
+        assert option_value(placement_args, "--cache-type-k") == "f16"
+        assert option_value(placement_args, "--cache-type-v") == "f16"
+    shared_override = option_value(
+        list(placement_experiments[-1].get("args", [])), "--override-tensor",
+    ) or ""
+    assert "(exps|shexp)" in shared_override and "ffn_gate_inp_shexp" in shared_override
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 
