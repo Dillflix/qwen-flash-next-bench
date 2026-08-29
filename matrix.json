@@ -894,6 +894,80 @@
       "startup_timeout_s": 1200,
       "request_timeout_s": 1800
     },
+    "rocm-ple-storage-screen": {
+      "description": "Storage-only 64K production A/B: identical CPU PLE placement with mmap/SSD page-cache backing versus no-mmap anonymous unified-RAM residency.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_tail_88_12_ub1536",
+        "prod_hip_256k_tail_88_12_ub1536_ple_ram"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 256,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "settle_seconds": 5,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1800,
+      "request_timeout_s": 1800
+    },
+    "rocm-ple-ram-capacity": {
+      "description": "Allocation-only 256K gate for the no-mmap, CPU-resident PLE production arm; run before attempting its near-full prompt.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "experiments": [
+        "prod_hip_256k_tail_88_12_ub1536_ple_ram"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 262144,
+      "n_predict": 0,
+      "warmups": 0,
+      "rounds": 1,
+      "startup_only": true,
+      "erase_slot_between_requests": false,
+      "settle_seconds": 10,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1800
+    },
+    "rocm-ple-storage-full": {
+      "description": "Near-full 256K storage-only A/B between CPU-mmap PLE and the otherwise identical no-mmap unified-RAM arm; run only after the screen and RAM capacity gate pass.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_tail_88_12_ub1536",
+        "prod_hip_256k_tail_88_12_ub1536_ple_ram"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        253952
+      ],
+      "ctx_size": 262144,
+      "n_predict": 256,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "exact_prompt_tokens": true,
+      "settle_seconds": 5,
+      "telemetry_interval_s": 1.0,
+      "startup_timeout_s": 1800,
+      "request_timeout_s": 7200
+    },
     "rocm-256k-placement-screen": {
       "description": "64K performance and residency screen of incremental iGPU target placements with n=3 Q8_0 MTP on the 7900 XT, F16 target/draft KV, CPU-mmap PLE, and prompt cache disabled.",
       "require_rocm_audit": true,
@@ -2365,6 +2439,9 @@
         "--load-mode": {
           "mmap": [
             "--mmap"
+          ],
+          "none": [
+            "--no-mmap"
           ]
         }
       },
@@ -2393,6 +2470,9 @@
         "--load-mode": {
           "mmap": [
             "--mmap"
+          ],
+          "none": [
+            "--no-mmap"
           ]
         }
       },
@@ -2641,6 +2721,15 @@
       "args_append": [
         "--ubatch-size",
         "1536"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_88_12_ub1536_ple_ram",
+      "description": "Storage-only control for the preferred 256K topology: PLE remains explicitly on CPU, but no-mmap loads it into anonymous unified RAM instead of leaving it SSD/page-cache backed.",
+      "extends": "prod_hip_256k_tail_88_12_ub1536",
+      "args_append": [
+        "--load-mode",
+        "none"
       ]
     },
     {

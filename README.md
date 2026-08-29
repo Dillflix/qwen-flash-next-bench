@@ -902,6 +902,42 @@ RSS, GTT/VRAM, `MemAvailable`, physical read bytes, and major faults. The explic
 CPU candidate is successful only if it materially reduces device/GTT residency
 without an unacceptable hot-throughput regression.
 
+That older tier is a placement test, not a strict SSD-versus-RAM test. The precise
+production storage A/B keeps the joined PLE explicitly on CPU in both arms and
+changes only the loader mode. The SSD arm uses `--mmap`, so PLE pages occupy the
+reclaimable Linux page cache and may be faulted from the model file. The RAM arm
+uses `--no-mmap`, so the same CPU tensor is read into anonymous unified RAM. MTP,
+F16 target/draft KV, 88/12 target split, ubatch 1536, host checkpoints, and every
+tensor override remain identical.
+
+Start with the 64K screen; do not begin with two near-full 256K prompts:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-ple-storage-screen
+./run-bench.sh --tier rocm-ple-storage-screen
+```
+
+If the RAM arm loads and serves coherently, prove its native-256K startup allocation:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-ple-ram-capacity
+./run-bench.sh --tier rocm-ple-ram-capacity --fail-fast
+```
+
+Only if both gates pass, run the near-full A/B:
+
+```bash
+./run-bench.sh --tier rocm-ple-storage-full
+```
+
+To avoid repeating the approximately 20-minute mmap baseline after a matching
+host-checkpoint `rocm-256k-fit-full` result already exists, select only
+`prod_hip_256k_tail_88_12_ub1536_ple_ram` in the last command and compare its
+archive with that baseline. This capacity is deliberately not assumed: the first
+successful no-checkpoint 253952-token mmap run retained 52.46 GiB minimum host
+availability, only modestly more than the 50.66 GiB PLE, before accounting for
+host-resident checkpoints and non-PLE anonymous memory.
+
 ### Native 256K one-slot placement campaign
 
 First inventory the exact storage span of every GGUF tensor and aggregate those

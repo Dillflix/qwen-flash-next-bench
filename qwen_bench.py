@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.35.0"
+VERSION = "1.36.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -3334,8 +3334,12 @@ def self_test() -> None:
     ]
     assert translate_server_options(
         ["--load-mode", "mmap", "--jinja", "--flash-attn", "on"],
-        {"--load-mode": {"mmap": ["--mmap"]}},
+        {"--load-mode": {"mmap": ["--mmap"], "none": ["--no-mmap"]}},
     ) == ["--mmap", "--jinja", "--flash-attn", "on"]
+    assert translate_server_options(
+        ["--load-mode", "none", "--jinja"],
+        {"--load-mode": {"mmap": ["--mmap"], "none": ["--no-mmap"]}},
+    ) == ["--no-mmap", "--jinja"]
     assert server_arg_compatibility_errors([
         "--flash-attn", "off", "--cache-type-v", "q8_0",
     ])
@@ -3921,6 +3925,39 @@ def self_test() -> None:
     assert option_value(production_base_args, "--ctx-checkpoints") == "8"
     assert option_value(production_base_args, "--checkpoint-min-step") == "32768"
     assert production_base.get("env", {}).get(HOST_CHECKPOINT_MARKER) == "1"
+    ple_storage_screen = expanded_shipped_config["tiers"]["rocm-ple-storage-screen"]
+    ple_ram_capacity = expanded_shipped_config["tiers"]["rocm-ple-ram-capacity"]
+    ple_storage_full = expanded_shipped_config["tiers"]["rocm-ple-storage-full"]
+    ple_storage_names = [
+        "prod_hip_256k_tail_88_12_ub1536",
+        "prod_hip_256k_tail_88_12_ub1536_ple_ram",
+    ]
+    assert ple_storage_screen["experiments"] == ple_storage_names
+    assert ple_storage_full["experiments"] == ple_storage_names
+    assert ple_ram_capacity["experiments"] == [ple_storage_names[1]]
+    assert int(ple_storage_screen["ctx_size"]) == 65536
+    assert ple_ram_capacity.get("startup_only") is True
+    assert int(ple_ram_capacity["ctx_size"]) == 262144
+    assert ple_storage_full.get("exact_prompt_tokens") is True
+    assert ple_storage_full["depths"] == [253952]
+    ple_storage_experiments = select_experiments(
+        expanded_shipped_config, ple_storage_screen, None,
+    )
+    ple_storage_commands = [
+        server_command(expanded_shipped_config, ple_storage_screen, item)
+        for item in ple_storage_experiments
+    ]
+    assert "--mmap" in ple_storage_commands[0] and "--no-mmap" not in ple_storage_commands[0]
+    assert "--no-mmap" in ple_storage_commands[1] and "--mmap" not in ple_storage_commands[1]
+    assert [
+        token for token in ple_storage_commands[0] if token not in {"--mmap", "--no-mmap"}
+    ] == [
+        token for token in ple_storage_commands[1] if token not in {"--mmap", "--no-mmap"}
+    ]
+    for experiment, command in zip(ple_storage_experiments, ple_storage_commands):
+        override = option_value(command[1:], "--override-tensor") or ""
+        assert "per_layer_token_embd" in override and "=CPU" in override
+        assert experiment.get("env", {}).get(HOST_CHECKPOINT_MARKER) == "1"
     placement_screen = expanded_shipped_config["tiers"]["rocm-256k-placement-screen"]
     tail_screen = expanded_shipped_config["tiers"]["rocm-256k-tail-screen"]
     capacity_screen = expanded_shipped_config["tiers"]["rocm-256k-capacity"]
@@ -4130,6 +4167,9 @@ def self_test() -> None:
     assert option_value(rocm_vision_mtp_args, "--spec-draft-type-v") == "f16"
     for tier_name in (
         "rocm-ple-ssd",
+        "rocm-ple-storage-screen",
+        "rocm-ple-ram-capacity",
+        "rocm-ple-storage-full",
         "rocm-256k-placement-screen",
         "rocm-256k-tail-screen",
         "rocm-256k-capacity",
