@@ -664,10 +664,14 @@ Revision `36e9acd40e10a87cd3c3ef8ec734668757dc8520` is pinned so a moving fork c
 silently change the experiment. The build script refuses another revision, the
 wrong source family, an incompatible existing CMake cache, or a library that does
 not contain both required code objects. It also applies
-`patches/rocmfpx-qwen4exp-mtp.patch` and its hidden-state scheduling follow-up
-idempotently. This also upgrades a source tree that already has the initial patch.
-The patches add only the missing Qwen4Exp MTP sidecar loader/graph integration; they
-do not replace the ROCmFP4 kernels or change Vulkan. The script rejects source drift
+`patches/rocmfpx-qwen4exp-mtp.patch`, its hidden-state scheduling follow-up, and
+`patches/rocmfpx-host-checkpoints.patch` idempotently. This also upgrades a source
+tree that already has either earlier patch. The first two patches add the missing
+Qwen4Exp MTP sidecar loader/graph integration. The third adds an opt-in
+`LLAMA_CKPT_FORCE_HOST=1` path that clears the device-storage flag only for prompt
+checkpoint save/restore, retaining those checkpoints in host/unified RAM instead
+of discrete-GPU VRAM. None replaces the ROCmFP4 kernels or changes Vulkan. The
+script rejects source drift
 if an exact patch can neither be applied nor recognized as already applied. It configures an isolated HIP-only build
 against `/opt/rocm-10.0.0` with:
 
@@ -675,7 +679,8 @@ against `/opt/rocm-10.0.0` with:
 - forced MMQ and no experimental rocWMMA flash-attention path;
 - `gfx1100;gfx1151` in both `CMAKE_HIP_ARCHITECTURES` and `GPU_TARGETS`;
 - `test-backend-ops` and compile-command metadata enabled;
-- a compiled Qwen4Exp MTP marker in `libllama.so`.
+- a compiled Qwen4Exp MTP marker in `libllama.so`;
+- a compiled host-checkpoint marker in `libllama-common.so`.
 
 Collect the new build evidence, then run the numerical gate:
 
@@ -690,7 +695,7 @@ python3 qwen_bench.py rocm-audit --run-ops
 
 Both commands create one `.tar.gz` plus a SHA-256 file automatically. The audit
 archive is written even when a gate fails, so failed numerical output is preserved.
-Any rebuild changes the server/HIP/libllama fingerprints, so the audit must be rerun
+Any rebuild changes the server/HIP/libllama/libllama-common fingerprints, so the audit must be rerun
 before model benchmarks.
 
 The audit has two independent functional gates on both GPUs:
@@ -703,7 +708,10 @@ The audit has two independent functional gates on both GPUs:
 It rejects a zero-test match, any numerical failure, missing `gfx1100`/`gfx1151`
 coverage, or a stale server/HIP/libllama fingerprint. The MTP tier has one additional
 gate: both the Qwen4Exp MTP source markers and the compiled `libllama.so` marker must
-be present. Every ROCm model tier is gated on the saved proof, so a full-model run
+be present. A production experiment that sets `LLAMA_CKPT_FORCE_HOST` has another
+gate: the source must clear `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`, and the matching
+`libllama-common.so` must contain the compiled marker. Every ROCm model tier is
+gated on the saved proof, so a full-model run
 cannot begin after an unverified rebuild.
 
 Once the audit passes, use the clean APU-only diagnostic:
@@ -1127,11 +1135,24 @@ production pass.
 The first ubatch-1536 near-full attempt exposed a separate hidden VRAM consumer,
 not a microbatch failure. Although `--cache-ram 0` disabled the inter-request
 prompt cache, llama-server still created per-slot context checkpoints every 8192
-tokens using its independent default of 32. After checkpoints of 141.4, 157.6,
-and 173.7 MiB, the 32K warm-up aborted while requesting another 114.5 MiB ROCm0
-buffer. Every 256K production candidate therefore also sets
-`--ctx-checkpoints 0`. This is the supported master switch for the per-slot
-checkpoint subsystem and is independent of `--cache-ram`.
+tokens using its independent default of 32. After serialized checkpoints of
+141.4, 157.6, and 173.7 MiB, the 32K warm-up aborted when checkpoint handling
+requested another 114.5 MiB allocation on ROCm0.
+
+Those checkpoints are useful and are not disabled in the production experiments.
+The patched ROCmFPX build runs them with `LLAMA_CKPT_FORCE_HOST=1`, which preserves
+the checkpoint byte vectors in unified host RAM and prevents their auxiliary
+storage from consuming 7900 XT VRAM. This is the pinned-fork adaptation of the
+host-checkpoint workaround validated in
+[llama.cpp issue #23719](https://github.com/ggml-org/llama.cpp/issues/23719).
+Production bounds the subsystem to eight
+checkpoints with `--ctx-checkpoints 8 --checkpoint-min-step 32768`. A near-full
+253952-token prompt crosses seven such
+boundaries, so no useful checkpoint is evicted in the one-slot 256K proof. The
+server log records both the environment setting and, at the first checkpoint,
+`forcing checkpoint state to host memory`; absence of that line makes the run
+invalid. `--ctx-checkpoints 0` is now reserved for capacity diagnosis only, not
+the production topology. This subsystem remains independent of `--cache-ram`.
 
 The in-memory prompt-response cache is disabled in every candidate with
 `--cache-ram 0`. Disk-backed prompt caching remains valuable, but `--slot-save-path`

@@ -11,6 +11,7 @@ EXPECTED_REV="${ROCMFPX_REV:-36e9acd40e10a87cd3c3ef8ec734668757dc8520}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 QWEN4EXP_MTP_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp.patch"
 QWEN4EXP_MTP_SCHED_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
+HOST_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-host-checkpoints.patch"
 
 fail() {
     echo "ERROR: $*" >&2
@@ -23,15 +24,18 @@ actual_rev="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
     || fail "ROCmFPX is at $actual_rev, expected pinned revision $EXPECTED_REV"
 [[ -f "$QWEN4EXP_MTP_PATCH" ]] || fail "missing qwen4exp MTP patch: $QWEN4EXP_MTP_PATCH"
 [[ -f "$QWEN4EXP_MTP_SCHED_PATCH" ]] || fail "missing qwen4exp MTP scheduling patch: $QWEN4EXP_MTP_SCHED_PATCH"
+[[ -f "$HOST_CHECKPOINT_PATCH" ]] || fail "missing host-checkpoint patch: $HOST_CHECKPOINT_PATCH"
 
 # The pinned ROCmFPX commit has the generic MTP engine, but not the qwen4exp
-# sidecar loader/graph. Apply our reviewed integration exactly once and reject
-# source drift instead of silently building a partially compatible runtime.
+# sidecar loader/graph or the opt-in host-checkpoint policy. Apply the reviewed
+# integrations exactly once and reject source drift instead of silently building
+# a partially compatible runtime.
 apply_patch_once() {
     local patch_path="$1"
     local patch_label="$2"
-    local source_marker="$3"
-    if grep -Fq "$source_marker" "$SOURCE_DIR/src/models/qwen4exp.cpp"; then
+    local marker_path="$3"
+    local source_marker="$4"
+    if grep -Fq "$source_marker" "$SOURCE_DIR/$marker_path"; then
         echo "$patch_label is already applied."
     elif git -C "$SOURCE_DIR" apply --check "$patch_path"; then
         git -C "$SOURCE_DIR" apply "$patch_path"
@@ -46,14 +50,25 @@ apply_patch_once() {
 apply_patch_once \
     "$QWEN4EXP_MTP_PATCH" \
     "qwen4exp MTP integration patch" \
+    "src/models/qwen4exp.cpp" \
     "qwen4exp MTP requires exactly one appended prediction layer"
 apply_patch_once \
     "$QWEN4EXP_MTP_SCHED_PATCH" \
     "qwen4exp MTP hidden-state scheduling patch" \
+    "src/models/qwen4exp.cpp" \
     "qwen4exp_mtp_h_pre_norm_scheduled"
+apply_patch_once \
+    "$HOST_CHECKPOINT_PATCH" \
+    "host-memory prompt-checkpoint patch" \
+    "common/common.cpp" \
+    "LLAMA_CKPT_FORCE_HOST"
 
 [[ -x "$ROCM_ROOT/bin/hipcc" ]] || fail "ROCm compiler is missing at $ROCM_ROOT/bin/hipcc"
 [[ -f "$SOURCE_DIR/src/models/qwen4exp.cpp" ]] || fail "source tree does not contain src/models/qwen4exp.cpp"
+grep -Fq '~LLAMA_STATE_SEQ_FLAGS_ON_DEVICE' "$SOURCE_DIR/common/common.cpp" \
+    || fail "host-checkpoint source does not clear the device-storage flag"
+grep -Fq 'forcing checkpoint state to host memory' "$SOURCE_DIR/common/common.cpp" \
+    || fail "host-checkpoint source lacks the runtime confirmation marker"
 grep -Rq 'Q4_0_ROCMFP4_FAST' "$SOURCE_DIR/ggml/src/ggml-cuda" \
     || fail "source tree lacks ROCmFP4_FAST dispatch in ggml/src/ggml-cuda"
 grep -q 'rocmfp4_hip.cu' "$SOURCE_DIR/ggml/src/ggml-hip/CMakeLists.txt" \
@@ -139,10 +154,15 @@ HIP_LIBRARY="$BUILD_DIR/bin/libggml-hip.so"
 LLAMA_LIBRARY="$BUILD_DIR/bin/libllama.so"
 [[ -f "$LLAMA_LIBRARY" ]] || LLAMA_LIBRARY="$BUILD_DIR/lib/libllama.so"
 [[ -f "$LLAMA_LIBRARY" ]] || fail "build completed without libllama.so"
+COMMON_LIBRARY="$BUILD_DIR/bin/libllama-common.so"
+[[ -f "$COMMON_LIBRARY" ]] || COMMON_LIBRARY="$BUILD_DIR/lib/libllama-common.so"
+[[ -f "$COMMON_LIBRARY" ]] || fail "build completed without libllama-common.so"
 grep -aFq 'qwen4exp MTP requires exactly one appended prediction layer' "$LLAMA_LIBRARY" \
     || fail "libllama.so lacks the compiled qwen4exp MTP integration marker"
 grep -aFq 'qwen4exp_mtp_h_pre_norm_scheduled' "$LLAMA_LIBRARY" \
     || fail "libllama.so lacks the compiled qwen4exp MTP hidden-state scheduling marker"
+grep -aFq 'LLAMA_CKPT_FORCE_HOST' "$COMMON_LIBRARY" \
+    || fail "libllama-common.so lacks the compiled host-checkpoint marker"
 
 targets="$(strings "$HIP_LIBRARY" | grep -oE 'gfx[0-9a-f]{3,5}[a-z]*' | sort -u | tr '\n' ' ')"
 [[ " $targets " == *' gfx1100 '* ]] || fail "libggml-hip.so lacks a gfx1100 code object"
@@ -155,5 +175,6 @@ echo "  build:  $BUILD_DIR"
 echo "  ROCm:   $ROCM_ROOT"
 echo "  code objects: $targets"
 echo "  qwen4exp MTP: compiled"
+echo "  host checkpoints: LLAMA_CKPT_FORCE_HOST supported"
 echo
 echo "Next: python3 qwen_rocm.py collect --llama-dir '$SOURCE_DIR' --build-dir '$BUILD_DIR' --rocm '$ROCM_ROOT'"

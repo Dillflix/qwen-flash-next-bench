@@ -41,10 +41,11 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.34.2"
+VERSION = "1.35.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
+HOST_CHECKPOINT_MARKER = "LLAMA_CKPT_FORCE_HOST"
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
     "-md",
@@ -54,6 +55,7 @@ SINGLE_VALUE_SERVER_OPTIONS = {
     "--cache-type-k",
     "--cache-type-v",
     "--ctx-size",
+    "--ctx-checkpoints",
     "--device",
     "--fit",
     "--flash-attn",
@@ -66,6 +68,7 @@ SINGLE_VALUE_SERVER_OPTIONS = {
     "--n-gpu-layers",
     "--override-tensor",
     "--parallel",
+    "--checkpoint-min-step",
     "--port",
     "--spec-draft-device",
     "--spec-draft-ngl",
@@ -1102,6 +1105,10 @@ class ManagedServer:
     def start(self) -> None:
         self.log_handle = self.log_path.open("w", encoding="utf-8")
         self.log_handle.write(f"# started {utc_now()}\n# {command_text(self.command)}\n")
+        if HOST_CHECKPOINT_MARKER in self.env:
+            self.log_handle.write(
+                f"# {HOST_CHECKPOINT_MARKER}={self.env[HOST_CHECKPOINT_MARKER]}\n"
+            )
         self.log_handle.flush()
         started = time.monotonic()
         self.process = subprocess.Popen(
@@ -1534,12 +1541,18 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
     library = next((path for path in candidates if path.is_file()), candidates[0])
     llama_candidates = [build_root / "bin" / "libllama.so", build_root / "lib" / "libllama.so"]
     llama_library = next((path for path in llama_candidates if path.is_file()), llama_candidates[0])
+    common_candidates = [
+        build_root / "bin" / "libllama-common.so",
+        build_root / "lib" / "libllama-common.so",
+    ]
+    common_library = next((path for path in common_candidates if path.is_file()), common_candidates[0])
     test_binary = build_root / "bin" / "test-backend-ops"
     result: dict[str, Any] = {}
     for name, path in (
         ("server", server),
         ("hip_library", library),
         ("llama_library", llama_library),
+        ("common_library", common_library),
         ("test_backend_ops", test_binary),
     ):
         result[name] = {
@@ -1572,6 +1585,15 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
     else:
         result["llama_library"]["qwen4exp_mtp_marker"] = False
         result["llama_library"]["qwen4exp_mtp_scheduling_marker"] = False
+    if common_library.is_file():
+        try:
+            result["common_library"]["host_checkpoint_marker"] = (
+                HOST_CHECKPOINT_MARKER.encode("ascii") in common_library.read_bytes()
+            )
+        except OSError:
+            result["common_library"]["host_checkpoint_marker"] = False
+    else:
+        result["common_library"]["host_checkpoint_marker"] = False
     return result
 
 
@@ -1633,6 +1655,21 @@ def inspect_qwen4exp_mtp_sources(repo: pathlib.Path) -> dict[str, Any]:
     return {"ready": ready, "files": files}
 
 
+def inspect_host_checkpoint_source(repo: pathlib.Path) -> dict[str, Any]:
+    path = repo / "common" / "common.cpp"
+    text = path.read_text(encoding="utf-8", errors="ignore") if path.is_file() else ""
+    markers = {
+        HOST_CHECKPOINT_MARKER: HOST_CHECKPOINT_MARKER in text,
+        "clear_on_device_flag": "~LLAMA_STATE_SEQ_FLAGS_ON_DEVICE" in text,
+        "host_checkpoint_log": "forcing checkpoint state to host memory" in text,
+    }
+    return {
+        "ready": path.is_file() and all(markers.values()),
+        "file": str(path),
+        "markers": markers,
+    }
+
+
 def backend_ops_passed(capture: dict[str, Any]) -> tuple[bool, int, int]:
     if capture.get("returncode") != 0:
         return False, 0, 0
@@ -1659,6 +1696,7 @@ def run_rocm_audit(
     fingerprint = rocm_build_fingerprint(config)
     source = inspect_rocmfp4_sources(repo)
     qwen4exp_mtp_source = inspect_qwen4exp_mtp_sources(repo)
+    host_checkpoint_source = inspect_host_checkpoint_source(repo)
     server = pathlib.Path(fingerprint["server"]["path"])
     test_binary = pathlib.Path(fingerprint["test_backend_ops"]["path"])
     gfx_targets = set(fingerprint["hip_library"].get("gfx_targets", []))
@@ -1724,8 +1762,15 @@ def run_rocm_audit(
     ready_for_mtp_benchmarks = bool(
         ready_for_model_benchmarks and qwen4exp_mtp_source["ready"] and compiled_qwen4exp_mtp
     )
+    compiled_host_checkpoints = bool(
+        fingerprint.get("common_library", {}).get("host_checkpoint_marker")
+    )
+    ready_for_host_checkpoint_benchmarks = bool(
+        ready_for_model_benchmarks and host_checkpoint_source["ready"] and compiled_host_checkpoints
+    )
     reasons: list[str] = []
     mtp_reasons: list[str] = []
+    host_checkpoint_reasons: list[str] = []
     if not source["static_dispatch_ready"]:
         reasons.append("ROCmFP4 and ROCmFP4_FAST are not both wired into the compiled HIP runtime source tree")
     if not test_binary.is_file():
@@ -1742,14 +1787,24 @@ def run_rocm_audit(
         mtp_reasons.append("the pinned source tree lacks the complete qwen4exp MTP sidecar integration")
     if not compiled_qwen4exp_mtp:
         mtp_reasons.append("libllama.so lacks the compiled qwen4exp MTP integration or hidden-state scheduling marker; rebuild with build-rocm10-dual.sh")
+    if not host_checkpoint_source["ready"]:
+        host_checkpoint_reasons.append(
+            "the pinned source tree lacks the LLAMA_CKPT_FORCE_HOST checkpoint-to-host integration"
+        )
+    if not compiled_host_checkpoints:
+        host_checkpoint_reasons.append(
+            "libllama-common.so lacks the compiled LLAMA_CKPT_FORCE_HOST marker; rebuild with build-rocm10-dual.sh"
+        )
     report = {
-        "schema": 4,
+        "schema": 5,
         "ts": utc_now(),
         "harness_version": VERSION,
         "ready_for_model_benchmarks": ready_for_model_benchmarks,
         "ready_for_mtp_benchmarks": ready_for_mtp_benchmarks,
+        "ready_for_host_checkpoint_benchmarks": ready_for_host_checkpoint_benchmarks,
         "source": source,
         "qwen4exp_mtp_source": qwen4exp_mtp_source,
+        "host_checkpoint_source": host_checkpoint_source,
         "build_fingerprint": fingerprint,
         "devices_requested": devices,
         "device_list_log": str(pathlib.Path("rocm-audit-logs") / "devices.txt"),
@@ -1761,13 +1816,14 @@ def run_rocm_audit(
         "tests": tests,
         "reasons": reasons,
         "mtp_reasons": mtp_reasons,
+        "host_checkpoint_reasons": host_checkpoint_reasons,
     }
     atomic_json(output, report)
     return report
 
 
 def validate_rocm_audit(
-    config: dict[str, Any], *, require_mtp: bool = False,
+    config: dict[str, Any], *, require_mtp: bool = False, require_host_checkpoints: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     configured = config.get("variables", {}).get("rocm_audit")
     path = pathlib.Path(str(configured)) if configured else pathlib.Path(__file__).with_name("preflight") / "rocm-audit.json"
@@ -1782,7 +1838,10 @@ def validate_rocm_audit(
         return report, f"ROCm audit has not proven custom kernel coverage: {reasons}"
     current = rocm_build_fingerprint(config)
     audited = report.get("build_fingerprint", {})
-    for key in ("server", "hip_library", "llama_library"):
+    fingerprint_keys = ["server", "hip_library", "llama_library"]
+    if require_host_checkpoints:
+        fingerprint_keys.append("common_library")
+    for key in fingerprint_keys:
         expected = audited.get(key, {}).get("sha256")
         actual = current.get(key, {}).get("sha256")
         if not expected or expected != actual:
@@ -1794,6 +1853,13 @@ def validate_rocm_audit(
     if require_mtp and not report.get("ready_for_mtp_benchmarks"):
         reasons = "; ".join(str(item) for item in report.get("mtp_reasons", []))
         return report, f"ROCm audit has not proven qwen4exp MTP support: {reasons}"
+    if require_host_checkpoints and int(report.get("schema", 0)) < 5:
+        return report, "ROCm audit predates the host-checkpoint gate; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
+    if require_host_checkpoints and not current.get("common_library", {}).get("host_checkpoint_marker"):
+        return report, "current libllama-common.so lacks LLAMA_CKPT_FORCE_HOST; rerun `./build-rocm10-dual.sh` and the ROCm audit"
+    if require_host_checkpoints and not report.get("ready_for_host_checkpoint_benchmarks"):
+        reasons = "; ".join(str(item) for item in report.get("host_checkpoint_reasons", []))
+        return report, f"ROCm audit has not proven host-resident prompt checkpoints: {reasons}"
     return report, None
 
 
@@ -1836,6 +1902,9 @@ def preflight(
     rocm_audit: dict[str, Any] | None = None
     files: list[dict[str, Any]] = []
     mode = str(tier.get("mode", "text"))
+    require_host_checkpoints = any(
+        HOST_CHECKPOINT_MARKER in experiment.get("env", {}) for experiment in experiments
+    )
     vision_mode = mode == "vision"
     quality_mode = mode == "quality"
     vision_cases: dict[str, dict[str, Any]] = {}
@@ -2013,9 +2082,11 @@ def preflight(
                     errors.append(f"{server_path}: build does not advertise --mmproj support")
     if tier.get("startup_only") and (int(tier.get("warmups", 0)) != 0 or concurrency != 1):
         errors.append("startup-only tiers require warmups 0 and concurrency 1")
-    if tier.get("require_rocm_audit"):
+    if tier.get("require_rocm_audit") or require_host_checkpoints:
         rocm_audit, audit_error = validate_rocm_audit(
-            config, require_mtp=bool(tier.get("require_rocm_mtp")),
+            config,
+            require_mtp=bool(tier.get("require_rocm_mtp")),
+            require_host_checkpoints=require_host_checkpoints,
         )
         if audit_error:
             errors.append(audit_error)
@@ -2038,6 +2109,7 @@ def preflight(
         "drm_cards": discover_drm_cards(),
         "active_llama_processes": active,
         "rocm_audit": rocm_audit,
+        "require_host_checkpoints": require_host_checkpoints,
         "warnings": warnings,
         "errors": errors,
     }
@@ -2268,6 +2340,15 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                     raise RuntimeError(f"{host}:{port} became busy before starting {experiment['name']}")
                 suffix = f"r{round_index + 1:02d}-{safe_name(experiment['name'])}"
                 command = server_command(config, tier, experiment)
+                effective_args = command[1:]
+                host_checkpoint_runtime_verified = False
+                host_checkpoint_required = (
+                    HOST_CHECKPOINT_MARKER in experiment.get("env", {})
+                    and int(option_value(effective_args, "--ctx-checkpoints") or "32") > 0
+                )
+                checkpoint_min_step = int(
+                    option_value(effective_args, "--checkpoint-min-step") or "8192"
+                )
                 print(f"\n=== {experiment['name']} round {round_index + 1}/{rounds} ===", flush=True)
                 print(command_text(command), flush=True)
                 server = ManagedServer(
@@ -2374,6 +2455,24 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             **log_metrics,
                         }
 
+                    def verify_host_checkpoint_runtime(responses: list[dict[str, Any]]) -> None:
+                        nonlocal host_checkpoint_runtime_verified
+                        if not host_checkpoint_required or host_checkpoint_runtime_verified:
+                            return
+                        prompt_counts = [extract_timing(response).get("prompt_n") for response in responses]
+                        if not any(
+                            isinstance(value, (int, float)) and int(value) >= checkpoint_min_step
+                            for value in prompt_counts
+                        ):
+                            return
+                        log_text = server.log_path.read_text(encoding="utf-8", errors="ignore")
+                        if "forcing checkpoint state to host memory" not in log_text:
+                            raise RuntimeError(
+                                "a prompt crossed --checkpoint-min-step, but the runtime did not confirm "
+                                "host-resident checkpoints; this production run is invalid"
+                            )
+                        host_checkpoint_runtime_verified = True
+
                     warmup_depth = int(tier.get("warmup_depth", 0))
                     for warmup_index in range(warmups):
                         mark = server.telemetry.mark() if server.telemetry else 0
@@ -2394,6 +2493,7 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             )
                             warm_responses, warm_walls, warm_group_wall = [warm_response], [warm_wall_ms], warm_wall_ms
                             warm_vision = [warm_vision_metrics]
+                        verify_host_checkpoint_runtime(warm_responses)
                         samples = server.telemetry.slice(mark) if server.telemetry else []
                         warm_group = concurrent_metrics(warm_responses, warm_group_wall)
                         erased: dict[int, Any] = {}
@@ -2448,6 +2548,7 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                                 base_url + "/completion", prompts, n_predict,
                                 request_timeout_s, extra_request,
                             )
+                            verify_host_checkpoint_runtime(responses)
                             samples = server.telemetry.slice(mark) if server.telemetry else []
                             telemetry = aggregate_telemetry(samples)
                             group = concurrent_metrics(responses, group_wall)
@@ -2507,6 +2608,7 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                         prompt, constructed_prompt_tokens = prepared_prompt(workload, depth, 0)
                         mark = server.telemetry.mark() if server.telemetry else 0
                         response, wall_ms, vision_metrics = request_one(workload, prompt, n_predict)
+                        verify_host_checkpoint_runtime([response])
                         samples = server.telemetry.slice(mark) if server.telemetry else []
                         row = probe_row(
                             run_id, experiment, round_index, workload, depth, n_predict,
@@ -3816,7 +3918,9 @@ def self_test() -> None:
         production_base,
     )[1:]
     assert option_value(production_base_args, "--cache-ram") == "0"
-    assert option_value(production_base_args, "--ctx-checkpoints") == "0"
+    assert option_value(production_base_args, "--ctx-checkpoints") == "8"
+    assert option_value(production_base_args, "--checkpoint-min-step") == "32768"
+    assert production_base.get("env", {}).get(HOST_CHECKPOINT_MARKER) == "1"
     placement_screen = expanded_shipped_config["tiers"]["rocm-256k-placement-screen"]
     tail_screen = expanded_shipped_config["tiers"]["rocm-256k-tail-screen"]
     capacity_screen = expanded_shipped_config["tiers"]["rocm-256k-capacity"]
@@ -4049,10 +4153,17 @@ def self_test() -> None:
     mtp_sched_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-qwen4exp-mtp-schedule-output.patch"
     assert mtp_sched_patch.is_file()
     assert QWEN4EXP_MTP_SCHED_MARKER in mtp_sched_patch.read_text(encoding="utf-8")
+    host_checkpoint_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-host-checkpoints.patch"
+    assert host_checkpoint_patch.is_file()
+    host_checkpoint_patch_text = host_checkpoint_patch.read_text(encoding="utf-8")
+    assert HOST_CHECKPOINT_MARKER in host_checkpoint_patch_text
+    assert "~LLAMA_STATE_SEQ_FLAGS_ON_DEVICE" in host_checkpoint_patch_text
+    assert "forcing checkpoint state to host memory" in host_checkpoint_patch_text
     build_script = pathlib.Path(__file__).with_name("build-rocm10-dual.sh").read_text(encoding="utf-8")
     assert "git -C \"$SOURCE_DIR\" apply" in build_script
     assert QWEN4EXP_MTP_MARKER in build_script
     assert QWEN4EXP_MTP_SCHED_MARKER in build_script
+    assert HOST_CHECKPOINT_MARKER in build_script
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 

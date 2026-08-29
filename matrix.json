@@ -2520,13 +2520,18 @@
     },
     {
       "name": "prod_hip_256k_base",
-      "description": "One-slot ROCm production baseline: routed experts on the iGPU, PLE CPU-mapped, all remaining target tensors and F16 target KV on the 7900 XT, plus n=3 Q8_0 MTP with F16 draft KV.",
+      "description": "One-slot ROCm production baseline: routed experts on the iGPU, PLE CPU-mapped, all remaining target tensors and F16 target KV on the 7900 XT, n=3 Q8_0 MTP with F16 draft KV, and bounded prompt checkpoints retained in unified host RAM.",
       "extends": "expert_hip_f16kv_mtp_n3_dgpu_ub2048_ple_cpu",
+      "env": {
+        "LLAMA_CKPT_FORCE_HOST": "1"
+      },
       "args_append": [
         "--no-kv-unified",
         "--cont-batching",
         "--ctx-checkpoints",
-        "0",
+        "8",
+        "--checkpoint-min-step",
+        "32768",
         "--no-context-shift"
       ]
     },

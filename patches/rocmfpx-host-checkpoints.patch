@@ -1,0 +1,33 @@
+diff --git a/common/common.cpp b/common/common.cpp
+index 1421040..3728b63 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -2171,0 +2172,16 @@ void common_prompt_checkpoint::update_pos(
++static llama_state_seq_flags common_prompt_checkpoint_maybe_host_flags(llama_state_seq_flags flags) {
++    // Keep reusable prompt checkpoints out of scarce discrete-GPU VRAM while
++    // retaining them in ordinary host/unified memory.
++    static const bool force_host = []() {
++        const bool enabled = std::getenv("LLAMA_CKPT_FORCE_HOST") != nullptr;
++        if (enabled) {
++            LOG_INF("prompt checkpoints: forcing checkpoint state to host memory (LLAMA_CKPT_FORCE_HOST)\n");
++        }
++        return enabled;
++    }();
++    if (force_host) {
++        flags &= ~LLAMA_STATE_SEQ_FLAGS_ON_DEVICE;
++    }
++    return flags;
++}
++
+@@ -2179,0 +2196,2 @@ void common_prompt_checkpoint::update_tgt(
++    flags = common_prompt_checkpoint_maybe_host_flags(flags);
++
+@@ -2206,0 +2225,2 @@ void common_prompt_checkpoint::update_dft(
++    flags = common_prompt_checkpoint_maybe_host_flags(flags);
++
+@@ -2233,0 +2254,2 @@ bool common_prompt_checkpoint::load_tgt(
++    flags = common_prompt_checkpoint_maybe_host_flags(flags);
++
+@@ -2255,0 +2278,2 @@ bool common_prompt_checkpoint::load_dft(
++    flags = common_prompt_checkpoint_maybe_host_flags(flags);
++
