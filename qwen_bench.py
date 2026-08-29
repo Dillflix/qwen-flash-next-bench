@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.31.0"
+VERSION = "1.32.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -3153,11 +3153,20 @@ def self_test() -> None:
         "prod_hip_256k_tail_84_16",
         "prod_hip_256k_tail_76_24",
     ]
-    fit_names = [
+    fit_capacity_names = [
         "prod_hip_256k_tail_87_13",
         "prod_hip_256k_tail_86_14",
         "prod_hip_256k_tail_85_15",
         "prod_hip_256k_tail_88_12_ub1792",
+        "prod_hip_256k_tail_88_12_ub1536",
+        "prod_hip_256k_tail_88_12_ub1024",
+    ]
+    fit_quality_names = [
+        "prod_hip_256k_tail_88_12_ub1792",
+        "prod_hip_256k_tail_88_12_ub1536",
+        "prod_hip_256k_tail_88_12_ub1024",
+    ]
+    fit_full_names = [
         "prod_hip_256k_tail_88_12_ub1536",
         "prod_hip_256k_tail_88_12_ub1024",
     ]
@@ -3172,9 +3181,9 @@ def self_test() -> None:
     assert tail_screen["experiments"] == tail_names
     assert capacity_screen["experiments"] == tail_names
     assert full_context["experiments"] == tail_names
-    assert fit_capacity["experiments"] == fit_names
-    assert fit_quality["experiments"] == fit_names
-    assert fit_full["experiments"] == fit_names
+    assert fit_capacity["experiments"] == fit_capacity_names
+    assert fit_quality["experiments"] == fit_quality_names
+    assert fit_full["experiments"] == fit_full_names
     assert int(placement_screen["ctx_size"]) == 65536
     assert int(tail_screen["ctx_size"]) == 65536
     assert int(capacity_screen["ctx_size"]) == 262144

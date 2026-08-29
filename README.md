@@ -992,23 +992,33 @@ python3 qwen_bench.py preflight --tier rocm-256k-fit-capacity
 ./run-bench.sh --tier rocm-256k-fit-capacity
 ```
 
-Do not use `--fail-fast`: expected OOMs must not suppress later candidates. After
-that archive identifies which candidates allocate and how much dGPU headroom they
-retain, pass only those names to `rocm-256k-fit-quality`. It repeats the 4K/32K
-quality and throughput screen before any near-full request:
+Do not use `--fail-fast`: expected OOMs must not suppress later candidates.
+Run `20260829-160347-rocm-256k-fit-capacity` found that all six candidates
+initialized, but allocation alone is not the acceptance criterion. Exact peak
+7900 XT headroom was only 144 MiB for 87/13, 146 MiB for 86/14, 202 MiB for
+85/15, and 262 MiB for 88/12 at ubatch 1792. Those are boundary diagnostics, not
+production margins. The same 88/12 placement retained 1118 MiB at ubatch 1536
+and 2837 MiB at ubatch 1024.
+
+The quality tier therefore keeps all three 88/12 ubatch variants so 1792 records
+the speed ceiling, but excludes the three low-headroom layer splits. It repeats
+the 4K/32K deterministic quality and throughput screen before any near-full
+request:
 
 ```bash
-./run-bench.sh --tier rocm-256k-fit-quality \
-  --experiments 'CAPACITY_QUALIFIED_NAMES'
+python3 qwen_bench.py preflight --tier rocm-256k-fit-quality
+./run-bench.sh --tier rocm-256k-fit-quality
 ```
 
-Finally pass only candidates that qualified in both stages to
-`rocm-256k-fit-full`. This performs exact-token 128K and 253952-token prompts,
-leaving 8192 tokens of the native 262144 window for generation and server overhead:
+The 1792 arm is not eligible for the final production proof because its 262 MiB
+startup margin is too small, irrespective of its 64K speed. After the quality
+archive selects between ubatch 1536 and 1024, `rocm-256k-fit-full` performs
+exact-token 128K and 253952-token prompts, leaving 8192 tokens of the native
+262144 window for generation and server overhead:
 
 ```bash
 ./run-bench.sh --tier rocm-256k-fit-full \
-  --experiments 'CAPACITY_AND_QUALITY_QUALIFIED_NAMES'
+  --experiments 'QUALITY_QUALIFIED_NAME_OR_NAMES'
 ```
 
 The startup-only tier proves allocation, not operational stability. Only the

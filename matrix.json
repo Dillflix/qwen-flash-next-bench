@@ -1039,9 +1039,6 @@
       "require_rocm_mtp": true,
       "cache_state": "hot",
       "experiments": [
-        "prod_hip_256k_tail_87_13",
-        "prod_hip_256k_tail_86_14",
-        "prod_hip_256k_tail_85_15",
         "prod_hip_256k_tail_88_12_ub1792",
         "prod_hip_256k_tail_88_12_ub1536",
         "prod_hip_256k_tail_88_12_ub1024"
@@ -1069,10 +1066,6 @@
       "require_rocm_mtp": true,
       "cache_state": "hot",
       "experiments": [
-        "prod_hip_256k_tail_87_13",
-        "prod_hip_256k_tail_86_14",
-        "prod_hip_256k_tail_85_15",
-        "prod_hip_256k_tail_88_12_ub1792",
         "prod_hip_256k_tail_88_12_ub1536",
         "prod_hip_256k_tail_88_12_ub1024"
       ],
