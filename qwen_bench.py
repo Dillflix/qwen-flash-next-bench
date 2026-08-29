@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.18.0"
+VERSION = "1.19.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -1264,6 +1264,16 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             "size_bytes": path.stat().st_size if path.is_file() else None,
             "sha256": sha256_file(path),
         }
+    if library.is_file():
+        try:
+            binary = library.read_bytes()
+            result["hip_library"]["gfx_targets"] = sorted({
+                item.decode("ascii") for item in re.findall(rb"gfx[0-9a-f]{3,5}[a-z]*", binary)
+            })
+        except OSError:
+            result["hip_library"]["gfx_targets"] = []
+    else:
+        result["hip_library"]["gfx_targets"] = []
     return result
 
 
@@ -1316,11 +1326,14 @@ def run_rocm_audit(
     output.parent.mkdir(parents=True, exist_ok=True)
     logs = output.parent / "rocm-audit-logs"
     logs.mkdir(exist_ok=True)
-    repo = pathlib.Path(str(config.get("variables", {}).get("repo", "")))
+    variables = config.get("variables", {})
+    repo = pathlib.Path(str(variables.get("hip_repo") or variables.get("repo", "")))
     fingerprint = rocm_build_fingerprint(config)
     source = inspect_rocmfp4_sources(repo)
     server = pathlib.Path(fingerprint["server"]["path"])
     test_binary = pathlib.Path(fingerprint["test_backend_ops"]["path"])
+    gfx_targets = set(fingerprint["hip_library"].get("gfx_targets", []))
+    dual_arch_ready = {"gfx1100", "gfx1151"}.issubset(gfx_targets)
     env = os.environ.copy()
     env.update({
         "ROCM_PATH": "/opt/rocm-10.0.0",
@@ -1332,10 +1345,13 @@ def run_rocm_audit(
     }
     write_capture(logs / "devices.txt", device_capture)
     tests: list[dict[str, Any]] = []
-    if run_ops and source["static_dispatch_ready"] and test_binary.is_file():
+    if run_ops and test_binary.is_file():
         for device in devices:
             for operation in ("MUL_MAT", "MUL_MAT_ID"):
-                for quant_type in ("q8_0", "q4_0_rocmfp4", "q4_0_rocmfp4_fast"):
+                quant_types = ["q8_0"]
+                if source["static_dispatch_ready"]:
+                    quant_types.extend(("q4_0_rocmfp4", "q4_0_rocmfp4_fast"))
+                for quant_type in quant_types:
                     command = [
                         str(test_binary), "test", "-b", device, "-o", operation,
                         "-p", f"type_a={quant_type}",
@@ -1345,6 +1361,7 @@ def run_rocm_audit(
                     log_name = safe_name(f"{device}-{operation}-{quant_type}") + ".txt"
                     write_capture(logs / log_name, capture)
                     tests.append({
+                        "gate": "standard_control" if quant_type == "q8_0" else "custom_rocmfp4",
                         "device": device,
                         "operation": operation,
                         "type_a": quant_type,
@@ -1355,29 +1372,45 @@ def run_rocm_audit(
                         "error": capture.get("error"),
                         "log": str(pathlib.Path("rocm-audit-logs") / log_name),
                     })
-    expected_tests = len(devices) * 2 * 3
-    functional_pass = (
-        run_ops and len(tests) == expected_tests and expected_tests > 0 and all(item["passed"] for item in tests)
+    standard_tests = [item for item in tests if item["gate"] == "standard_control"]
+    custom_tests = [item for item in tests if item["gate"] == "custom_rocmfp4"]
+    expected_standard = len(devices) * 2
+    expected_custom = len(devices) * 2 * 2
+    standard_control_pass = (
+        run_ops and len(standard_tests) == expected_standard and expected_standard > 0
+        and all(item["passed"] for item in standard_tests)
     )
+    custom_functional_pass = (
+        run_ops and source["static_dispatch_ready"] and len(custom_tests) == expected_custom
+        and expected_custom > 0 and all(item["passed"] for item in custom_tests)
+    )
+    functional_pass = standard_control_pass and custom_functional_pass
     reasons: list[str] = []
     if not source["static_dispatch_ready"]:
         reasons.append("ROCmFP4 and ROCmFP4_FAST are not both wired into the compiled HIP runtime source tree")
     if not test_binary.is_file():
-        reasons.append("build-hip10/bin/test-backend-ops is missing; rebuild with tests enabled")
+        reasons.append(f"{test_binary} is missing; rebuild with tests enabled")
+    if not dual_arch_ready:
+        reasons.append("libggml-hip.so does not contain both gfx1100 and gfx1151 code objects")
     if not run_ops:
         reasons.append("functional backend-op tests were not requested; rerun with --run-ops after source integration")
-    elif tests and not functional_pass:
-        reasons.append("one or more filtered MUL_MAT/MUL_MAT_ID tests failed or matched zero cases")
+    elif not standard_control_pass:
+        reasons.append("ordinary Q8_0 MUL_MAT/MUL_MAT_ID did not pass on both GPUs; fix the ROCm runtime/build first")
+    if run_ops and source["static_dispatch_ready"] and not custom_functional_pass:
+        reasons.append("custom ROCmFP4 MUL_MAT/MUL_MAT_ID failed or matched zero cases on one or both GPUs")
     report = {
-        "schema": 1,
+        "schema": 2,
         "ts": utc_now(),
         "harness_version": VERSION,
-        "ready_for_model_benchmarks": bool(source["static_dispatch_ready"] and functional_pass),
+        "ready_for_model_benchmarks": bool(source["static_dispatch_ready"] and dual_arch_ready and functional_pass),
         "source": source,
         "build_fingerprint": fingerprint,
         "devices_requested": devices,
         "device_list_log": str(pathlib.Path("rocm-audit-logs") / "devices.txt"),
         "functional_tests_requested": run_ops,
+        "dual_arch_ready": dual_arch_ready,
+        "standard_control_pass": standard_control_pass,
+        "custom_functional_pass": custom_functional_pass,
         "functional_pass": functional_pass,
         "tests": tests,
         "reasons": reasons,

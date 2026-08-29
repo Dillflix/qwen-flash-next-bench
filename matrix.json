@@ -2,6 +2,7 @@
   "version": 1,
   "variables": {
     "repo": "/srv/llm/src/llama-qwen4exp",
+    "hip_repo": "/srv/llm/src/ROCmFPX-qwen4exp",
     "model_dir": "/srv/llm/models/qwen-flash-next",
     "model_ple16": "{model_dir}/Qwen3.8-Flash-Next-Q4_0-ROCmFP4-STRIX-PLE16.gguf",
     "model_h1": "{model_dir}/Qwen3.8-Flash-Next-H1-ROCmFP4-STRIX-PLE16.gguf",
@@ -10,7 +11,7 @@
     "mmproj_bf16": "{model_dir}/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
     "mmproj_q8": "{model_dir}/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf",
     "vulkan_server": "{repo}/build-vulkan/bin/llama-server",
-    "hip_server": "{repo}/build-hip10/bin/llama-server",
+    "hip_server": "/srv/llm/src/ROCmFPX-qwen4exp/build-hip10-dual/bin/llama-server",
     "rocm_audit": "{config_dir}/preflight/rocm-audit.json"
   },
   "workloads_file": "{config_dir}/prompts.json",

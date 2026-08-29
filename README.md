@@ -596,37 +596,74 @@ cold page-cache/shader effects from masquerading as a placement result. Generati
 is limited to eight forced tokens and is diagnostic only; rank this tier by prefill
 tok/s and prefill milliseconds.
 
-### ROCm 10 recovery: prove kernels before loading the model
+### ROCm 10 recovery: prove the runtime before loading the model
 
-The old HIP result is not a meaningful backend comparison. The current branch
-contains standalone ROCmFP4 source, but the observed build did not establish that
-types 100/101 dispatch into compiled HIP matrix kernels. Running the same 121 GB
-model again would only repeat the catastrophic scalar/fallback path.
+The old sub-1 tok/s HIP result is not a backend comparison. That build could parse
+the ROCmFP4 GGUF types, but its compiled HIP runtime did not contain the custom
+ROCmFP4 dispatch. The likely result was unsupported work falling back out of the
+accelerated matrix path. Do not launch the 121 GB model with that binary again.
 
-Start with the static audit. It deliberately exits nonzero on the currently known
-bad build and writes a detailed report instead of loading a model:
+First package the old source and build evidence. This reads source, CMake metadata,
+binary code-object markers, linked libraries, and device information; it does not
+load a model:
 
 ```bash
-python3 qwen_bench.py rocm-audit
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+git pull --ff-only
+python3 qwen_rocm.py self-test
+python3 qwen_rocm.py collect \
+  --llama-dir /srv/llm/src/llama-qwen4exp \
+  --build-dir /srv/llm/src/llama-qwen4exp/build-hip10 \
+  --rocm /opt/rocm-10.0.0
 ```
 
-The audit counts ROCmFP4 and ROCmFP4_FAST integration only under the compiled
-`ggml/src/ggml-cuda` or `ggml/src/ggml-hip` runtime trees. A standalone
-`ggml/rocmfp4` file is explicitly insufficient. After porting the accelerated HIP
-kernels into this Qwen/PLE16 branch, build the operation test binary and run the
-functional gate:
+The collector creates one `preflight/rocm-forensics-*.tar.gz` plus a SHA-256 file.
+Its Git-remote output is credential-redacted, and it does not include model files.
+
+The GGUF publisher identifies `kingjones30/ROCmFPX` as the required runtime. Use a
+separate checkout so the working Vulkan/Qwen tree and its build remain unchanged:
 
 ```bash
-cmake --build /srv/llm/src/llama-qwen4exp/build-hip10 \
-  --target llama-server test-backend-ops -j16
+git clone https://github.com/kingjones30/ROCmFPX.git \
+  /srv/llm/src/ROCmFPX-qwen4exp
+git -C /srv/llm/src/ROCmFPX-qwen4exp checkout \
+  36e9acd40e10a87cd3c3ef8ec734668757dc8520
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+./build-rocm10-dual.sh
+```
+
+Revision `36e9acd40e10a87cd3c3ef8ec734668757dc8520` is pinned so a moving fork cannot
+silently change the experiment. The build script refuses another revision, the
+wrong source family, an incompatible existing CMake cache, or a library that does
+not contain both required code objects. It configures an isolated HIP-only build
+against `/opt/rocm-10.0.0` with:
+
+- Qwen4Exp plus ROCmFP4/ROCmFP4_FAST runtime dispatch;
+- forced MMQ and no experimental rocWMMA flash-attention path;
+- `gfx1100;gfx1151` in both `CMAKE_HIP_ARCHITECTURES` and `GPU_TARGETS`;
+- `test-backend-ops` and compile-command metadata enabled.
+
+Collect the new build evidence, then run the numerical gate:
+
+```bash
+python3 qwen_rocm.py collect \
+  --llama-dir /srv/llm/src/ROCmFPX-qwen4exp \
+  --build-dir /srv/llm/src/ROCmFPX-qwen4exp/build-hip10-dual \
+  --rocm /opt/rocm-10.0.0
+
 python3 qwen_bench.py rocm-audit --run-ops
 ```
 
-The functional audit filters `MUL_MAT` and `MUL_MAT_ID` for Q8_0,
-Q4_0_ROCMFP4, and Q4_0_ROCMFP4_FAST on both `ROCm0` and `ROCm1`. It rejects a
-zero-test match, any numerical failure, or a stale server/HIP-library fingerprint.
-Every ROCm model tier is gated on that saved proof, so an expensive full-model run
-cannot begin accidentally after an unverified rebuild.
+The audit has two independent functional gates on both GPUs:
+
+1. ordinary Q8_0 `MUL_MAT` and `MUL_MAT_ID`, proving ROCm 10 and the generic HIP
+   backend before any custom quant is involved;
+2. ROCmFP4 and ROCmFP4_FAST `MUL_MAT`/`MUL_MAT_ID`, proving the actual tensor
+   formats used by the model.
+
+It rejects a zero-test match, any numerical failure, missing `gfx1100`/`gfx1151`
+coverage, or a stale server/HIP-library fingerprint. Every ROCm model tier is gated
+on the saved proof, so a full-model run cannot begin after an unverified rebuild.
 
 Once the audit passes, use the clean APU-only diagnostic:
 
