@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.22.3"
+VERSION = "1.22.4"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -2874,6 +2874,12 @@ def self_test() -> None:
         if cache_state == "cold":
             assert int(tier.get("warmups", 0)) == 0, f"{tier_name}: cold tier has warm-ups"
     expanded_shipped_config = load_config(pathlib.Path(__file__).with_name("matrix.json"))
+    for tier_name in ("rocm-smoke", "rocm-depth", "backend-smoke-matched"):
+        rocm_tier = expanded_shipped_config["tiers"][tier_name]
+        assert rocm_tier.get("cache_state") == "hot"
+        assert int(rocm_tier.get("warmup_depth", 0)) >= max(
+            int(depth) for depth in rocm_tier["depths"]
+        ), f"{tier_name}: deepest prompt is not pre-warmed"
     for experiment in expanded_shipped_config["experiments"]:
         if experiment.get("backend") != "rocm":
             continue

@@ -686,8 +686,13 @@ This path hides the 7900 XT with `ROCR_VISIBLE_DEVICES=1` (therefore the physica
 8060S becomes logical `ROCm0`), uses the original joined GGUF with its native mmap
 placement, and uses neither MTP nor heterogeneous placement. It first runs with
 flash attention disabled, then repeats with it enabled. Both experiments test only
-shallow 0/512-token depths. If only the enabled experiment collapses, the remaining
-defect is isolated to the attention path rather than the ROCmFP4 matrix kernels.
+shallow 0/512-token depths. Before recording either depth, the harness processes the
+same 512-token prompt once and erases its KV slot. This warms the relevant joined-PLE
+file pages and kernels without reusing prompt KV. A depth-0-only warm-up is invalid
+here: the first larger prompt would otherwise include cold random reads from the
+50.66 GiB mmap table. If only the enabled experiment collapses after this warm-up,
+the remaining defect is isolated to the attention path rather than storage or the
+ROCmFP4 matrix kernels.
 
 The pinned ROCmFPX revision uses the older `--mmap`/`--no-mmap` interface. The
 harness explicitly translates the Vulkan fork's `--load-mode mmap` into ROCmFPX's
@@ -714,8 +719,9 @@ If shallow performance is sane, localize the previously reported context cliff:
 ./run-bench.sh --tier rocm-depth --fail-fast
 ```
 
-That single-variable tier stays APU-only and sweeps 0, 512, 1024, 1536, 2048,
-4096, 8192, and 32768 requested tokens. Do not proceed to `rocm-placement` or
+That single-variable tier stays APU-only, pre-warms the full 32768-token prompt,
+erases its KV slot, then sweeps 0, 512, 1024, 1536, 2048, 4096, 8192, and 32768
+requested tokens. Do not proceed to `rocm-placement` or
 `rocm-mtp` until this curve remains sane. Only then should multi-GPU placement be
 reintroduced, followed last by the Q8 MTP sidecar on the 7900 XT.
 

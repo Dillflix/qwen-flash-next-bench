@@ -661,8 +661,9 @@
       "request_timeout_s": 3600
     },
     "rocm-smoke": {
-      "description": "Gated ROCm 10 APU-only bring-up using the native joined PLE under mmap and comparing flash attention off/on.",
+      "description": "Hot-cache gated ROCm 10 APU-only bring-up using the native joined PLE under mmap and comparing flash attention off/on after a 512-token PLE warm-up.",
       "require_rocm_audit": true,
+      "cache_state": "hot",
       "experiments": [
         "apu_hip_joined_f16kv_no_mtp_no_fa",
         "apu_hip_joined_f16kv_no_mtp"
@@ -677,6 +678,7 @@
       "ctx_size": 4096,
       "n_predict": 64,
       "warmups": 1,
+      "warmup_depth": 512,
       "rounds": 1,
       "settle_seconds": 2
     },
@@ -703,7 +705,7 @@
       "ctx_size": 65536,
       "n_predict": 64,
       "warmups": 1,
-      "warmup_depth": 8192,
+      "warmup_depth": 32768,
       "rounds": 1,
       "settle_seconds": 2,
       "startup_timeout_s": 1200,
