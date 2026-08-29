@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.34.0"
+VERSION = "1.34.1"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -3855,7 +3855,7 @@ def self_test() -> None:
     assert int(fit_quality["warmup_depth"]) == 32768
     assert int(fit_full["ctx_size"]) == 262144
     assert fit_full.get("exact_prompt_tokens") is True
-    assert max(int(value) for value in fit_full["depths"]) == 253952
+    assert [int(value) for value in fit_full["depths"]] == [253952]
     assert target_fingerprint["depths"] == [32768]
     assert int(target_fingerprint["rounds"]) == 2
     assert int(target_fingerprint["n_predict"]) == 4

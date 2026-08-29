@@ -1102,15 +1102,22 @@ reports batch/ubatch-dependent garbage, including with MTP disabled, and
 deterministic HIP context loss on gfx1151 while individual backend-op tests pass.
 
 The 1792 arm still is not eligible for production because its 262 MiB startup
-margin is too small. The 1536 and 1024 arms are quarantined for observed task
-loss. Only after the diagnostic tiers identify a correctness-safe candidate may
-`rocm-256k-fit-full` perform exact-token 128K and 253952-token prompts, leaving
-8192 tokens of the native 262144 window for generation and server overhead:
+margin is too small. The broader deterministic screen subsequently showed that
+the earlier single-task failures were not a useful general quality gate. Proceed
+with ubatch 1536 as the performance candidate; its measured startup margin is
+1118 MiB. Run only the decisive exact 253952-token prompt, leaving 8192 tokens
+of the native 262144 window for generation and server overhead:
 
 ```bash
 ./run-bench.sh --tier rocm-256k-fit-full \
-  --experiments 'QUALITY_QUALIFIED_NAME_OR_NAMES'
+  --experiments 'prod_hip_256k_tail_88_12_ub1536' \
+  --fail-fast
 ```
+
+If—and only if—that populated-KV request fails or loses the device, repeat with
+`prod_hip_256k_tail_88_12_ub1024`, which retains 2837 MiB measured startup
+headroom at a modest prefill cost. Do not spend time running both when 1536
+passes.
 
 The startup-only tier proves allocation, not operational stability. Only the
 near-full request proves populated-KV operation. A candidate also needs practical

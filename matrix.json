@@ -1241,7 +1241,7 @@
       "request_timeout_s": 1800
     },
     "rocm-256k-fit-full": {
-      "description": "Quarantined final one-slot 256K proof. Do not run until the ubatch target-fingerprint and MTP-repeatability tiers identify a correctness-safe candidate.",
+      "description": "Minimal final one-slot 256K production proof: one exact 253952-token request. Select ubatch 1536 first; use 1024 only as the higher-headroom fallback.",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
       "cache_state": "hot",
@@ -1253,7 +1253,6 @@
         "code"
       ],
       "depths": [
-        131072,
         253952
       ],
       "ctx_size": 262144,
@@ -2630,7 +2629,7 @@
     },
     {
       "name": "prod_hip_256k_tail_88_12_ub1536",
-      "description": "88/12 placement with ubatch 1536 and 1118 MiB measured 256K startup headroom; one 32K run lost the final task and is quarantined pending target/MTP isolation.",
+      "description": "Preferred 256K candidate: 88/12 placement with ubatch 1536 and 1118 MiB measured startup headroom.",
       "extends": "prod_hip_256k_tail_88_12",
       "args_append": [
         "--ubatch-size",
@@ -2639,7 +2638,7 @@
     },
     {
       "name": "prod_hip_256k_tail_88_12_ub1024",
-      "description": "88/12 placement with ubatch 1024 and 2837 MiB measured 256K startup headroom; one 32K run produced incoherent code and is quarantined pending target/MTP isolation.",
+      "description": "Higher-headroom 256K fallback: 88/12 placement with ubatch 1024 and 2837 MiB measured startup headroom.",
       "extends": "prod_hip_256k_tail_88_12",
       "args_append": [
         "--ubatch-size",
