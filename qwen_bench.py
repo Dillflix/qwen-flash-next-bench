@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.17.1"
+VERSION = "1.18.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -1550,6 +1550,9 @@ def preflight(
                 "vision tiers require request.chat_template_kwargs.enable_thinking=false "
                 "so the measured decode budget reaches a final answer"
             )
+        min_anchor_score = tier.get("vision_min_anchor_score")
+        if not isinstance(min_anchor_score, (int, float)) or not 0.0 <= float(min_anchor_score) <= 1.0:
+            errors.append("vision tiers require vision_min_anchor_score between 0 and 1")
         if not skip_path_check:
             checked_servers: set[str] = set()
             for experiment in experiments:
@@ -2038,6 +2041,17 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                         )
                         if vision_mode:
                             row["vision"] = vision_metrics
+                            min_anchor_score = float(tier.get("vision_min_anchor_score", 0.0))
+                            anchor_score = vision_metrics.get("anchor_score")
+                            quality_failure = (
+                                not isinstance(anchor_score, (int, float))
+                                or float(anchor_score) < min_anchor_score
+                            )
+                            row["quality_failure"] = quality_failure
+                            row["vision"]["minimum_anchor_score"] = min_anchor_score
+                            row["vision"]["quality_pass"] = not quality_failure
+                            if quality_failure:
+                                row["degenerate"] = True
                         response_name = f"{suffix}-{safe_name(workload)}-d{depth}.json"
                         atomic_json(run_dir / "responses" / response_name, response)
                         row["response_file"] = str(pathlib.Path("responses") / response_name)
@@ -2054,7 +2068,11 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                         draft = row["timing"].get("draft_acceptance")
                         predicted_n = row["timing"].get("predicted_n")
                         status_parts: list[str] = []
-                        if row.get("answer_missing"):
+                        if row.get("quality_failure"):
+                            score = vision_metrics.get("anchor_score")
+                            score_text = f"{score:.0%}" if isinstance(score, (int, float)) else "unavailable"
+                            status_parts.append(f"INVALID vision quality ({score_text} anchors)")
+                        elif row.get("answer_missing"):
                             status_parts.append("INVALID empty final answer")
                         elif row["degenerate"]:
                             actual = int(predicted_n) if isinstance(predicted_n, (int, float)) else "unknown"

@@ -1,7 +1,7 @@
 {
   "shapes": {
     "image": "/srv/llm/models/qwen-flash-next/vision-assets/shapes.png",
-    "prompt": "Describe every colored shape, its approximate position, and transcribe the large text exactly.",
+    "prompt": "Answer in one compact line using exactly this structure: left=<color> <shape>; center=<color> <shape>; right=<color> <shape>; bottom text=<exact transcription>. Do not explain.",
     "anchors": [
       "red",
       "circle",

@@ -807,6 +807,7 @@
           "enable_thinking": false
         }
       },
+      "vision_min_anchor_score": 1.0,
       "warmups": 1,
       "rounds": 1,
       "settle_seconds": 2,
@@ -838,6 +839,7 @@
           "enable_thinking": false
         }
       },
+      "vision_min_anchor_score": 1.0,
       "warmups": 1,
       "rounds": 2,
       "settle_seconds": 2,
@@ -868,6 +870,7 @@
           "enable_thinking": false
         }
       },
+      "vision_min_anchor_score": 1.0,
       "warmups": 1,
       "rounds": 3,
       "settle_seconds": 2,

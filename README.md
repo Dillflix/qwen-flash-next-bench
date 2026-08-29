@@ -156,6 +156,11 @@ budget measures the answer rather than being consumed by Qwen's default internal
 reasoning. A response with reasoning tokens but an empty final answer is marked
 degenerate and excluded from rankings.
 
+Every vision tier also declares a minimum anchor score. Responses below that gate
+are visibly marked as quality failures and excluded from performance rankings, so
+a fast but incomplete description cannot win. The shapes fixture requests a compact
+one-line answer to ensure all known facts fit inside the fixed decode budget.
+
 The MTP tier is deliberately separate. Multimodal plus MTP has had model- and
 backend-specific failures in llama.cpp, so a successful projector-only run is a
 hard prerequisite; `vision-mtp` is a compatibility gate, not an assumption that
