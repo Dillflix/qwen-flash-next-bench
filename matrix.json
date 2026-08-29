@@ -893,6 +893,92 @@
       "startup_timeout_s": 1200,
       "request_timeout_s": 1800
     },
+    "rocm-256k-placement-screen": {
+      "description": "64K performance and residency screen of incremental iGPU target placements with n=3 Q8_0 MTP on the 7900 XT, F16 target/draft KV, CPU-mmap PLE, and prompt cache disabled.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_base",
+        "prod_hip_256k_token_igpu",
+        "prod_hip_256k_token_shared_igpu",
+        "prod_hip_256k_token_shared_output_igpu",
+        "prod_hip_256k_token_shared_output_fullattn_igpu"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        4096,
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 512,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "settle_seconds": 5,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
+    },
+    "rocm-256k-capacity": {
+      "description": "Allocation-only one-slot native-256K screen; use its experiment selector after the 64K placement results identify candidates.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "experiments": [
+        "prod_hip_256k_base",
+        "prod_hip_256k_token_igpu",
+        "prod_hip_256k_token_shared_igpu",
+        "prod_hip_256k_token_shared_output_igpu",
+        "prod_hip_256k_token_shared_output_fullattn_igpu"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 262144,
+      "n_predict": 0,
+      "warmups": 0,
+      "rounds": 1,
+      "startup_only": true,
+      "erase_slot_between_requests": false,
+      "settle_seconds": 10,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1800
+    },
+    "rocm-256k-full": {
+      "description": "One-slot native-256K proof with exact 128K and near-full 248K prompts; select only capacity-qualified placement finalists.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_base",
+        "prod_hip_256k_token_igpu",
+        "prod_hip_256k_token_shared_igpu",
+        "prod_hip_256k_token_shared_output_igpu",
+        "prod_hip_256k_token_shared_output_fullattn_igpu"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        131072,
+        253952
+      ],
+      "ctx_size": 262144,
+      "n_predict": 256,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "exact_prompt_tokens": true,
+      "settle_seconds": 5,
+      "telemetry_interval_s": 1.0,
+      "startup_timeout_s": 1800,
+      "request_timeout_s": 7200
+    },
     "backend": {
       "description": "Matched Vulkan and ROCm controls and heterogeneous placements.",
       "require_rocm_audit": true,
@@ -1013,15 +1099,15 @@
       "request_timeout_s": 1800
     },
     "rocm-vision-smoke": {
-      "description": "BF16 ROCm vision bring-up: CPU projector reference, 7900 XT projector, then 7900 XT projector plus production n=3 MTP with F16 target and draft KV.",
+      "description": "BF16 ROCm vision bring-up: CPU projector reference, iGPU projector, then iGPU projector plus production n=3 MTP on the 7900 XT with F16 target and draft KV.",
       "mode": "vision",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
       "cache_state": "hot",
       "experiments": [
         "vision_bf16_cpu_hip_no_mtp",
-        "vision_bf16_dgpu_hip_no_mtp",
-        "vision_bf16_dgpu_hip_mtp_n3"
+        "vision_bf16_igpu_hip_no_mtp",
+        "vision_bf16_igpu_hip_mtp_n3"
       ],
       "vision_cases": [
         "shapes"
@@ -1045,14 +1131,14 @@
       "request_timeout_s": 1200
     },
     "rocm-vision": {
-      "description": "Two-round BF16 ROCm vision validation on the 7900 XT projector with and without production n=3 MTP.",
+      "description": "Two-round BF16 ROCm vision validation on the iGPU projector with and without production n=3 MTP on the 7900 XT.",
       "mode": "vision",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
       "cache_state": "hot",
       "experiments": [
-        "vision_bf16_dgpu_hip_no_mtp",
-        "vision_bf16_dgpu_hip_mtp_n3"
+        "vision_bf16_igpu_hip_no_mtp",
+        "vision_bf16_igpu_hip_mtp_n3"
       ],
       "vision_cases": [
         "shapes",
@@ -2131,7 +2217,9 @@
         "--spec-draft-type-k",
         "f16",
         "--spec-draft-type-v",
-        "f16"
+        "f16",
+        "--cache-ram",
+        "0"
       ]
     },
     {
@@ -2141,6 +2229,52 @@
       "args_append": [
         "--override-tensor",
         "^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=ROCm1,^per_layer_token_embd\\.weight$=CPU"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_base",
+      "description": "One-slot ROCm production baseline: routed experts on the iGPU, PLE CPU-mapped, all remaining target tensors and F16 target KV on the 7900 XT, plus n=3 Q8_0 MTP with F16 draft KV.",
+      "extends": "expert_hip_f16kv_mtp_n3_dgpu_ub2048_ple_cpu",
+      "args_append": [
+        "--no-kv-unified",
+        "--cont-batching",
+        "--no-context-shift"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_token_igpu",
+      "description": "Production baseline plus token embedding on the iGPU, the lowest-compute static migration candidate.",
+      "extends": "prod_hip_256k_base",
+      "args_append": [
+        "--override-tensor",
+        "^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=ROCm1,^token_embd\\.weight$=ROCm1,^per_layer_token_embd\\.weight$=CPU"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_token_shared_igpu",
+      "description": "Token embedding plus routed and shared experts on the iGPU; remaining target tensors stay on the 7900 XT.",
+      "extends": "prod_hip_256k_base",
+      "args_append": [
+        "--override-tensor",
+        "^blk\\.[0-9]+\\.ffn_(down|gate|up)_(exps|shexp)\\.weight$=ROCm1,^blk\\.[0-9]+\\.ffn_gate_inp_shexp\\.weight$=ROCm1,^token_embd\\.weight$=ROCm1,^per_layer_token_embd\\.weight$=CPU"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_token_shared_output_igpu",
+      "description": "Token embedding, routed/shared experts, and LM head on the iGPU; this measures the decode cost of freeing the output matrix from 7900 XT VRAM.",
+      "extends": "prod_hip_256k_base",
+      "args_append": [
+        "--override-tensor",
+        "^blk\\.[0-9]+\\.ffn_(down|gate|up)_(exps|shexp)\\.weight$=ROCm1,^blk\\.[0-9]+\\.ffn_gate_inp_shexp\\.weight$=ROCm1,^token_embd\\.weight$=ROCm1,^output\\.weight$=ROCm1,^per_layer_token_embd\\.weight$=CPU"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_token_shared_output_fullattn_igpu",
+      "description": "Capacity fallback: token embedding, routed/shared experts, LM head, and all remaining static tensors in the twelve full-attention blocks on the iGPU. KV placement is not inferred from weight overrides and must be read from measured residency.",
+      "extends": "prod_hip_256k_base",
+      "args_append": [
+        "--override-tensor",
+        "^blk\\.[0-9]+\\.ffn_(down|gate|up)_(exps|shexp)\\.weight$=ROCm1,^blk\\.[0-9]+\\.ffn_gate_inp_shexp\\.weight$=ROCm1,^blk\\.(3|7|11|15|19|23|27|31|35|39|43|47)\\..*=ROCm1,^token_embd\\.weight$=ROCm1,^output\\.weight$=ROCm1,^per_layer_token_embd\\.weight$=CPU"
       ]
     },
     {
@@ -2161,6 +2295,17 @@
       "args_append": [
         "--ubatch-size",
         "2048"
+      ]
+    },
+    {
+      "name": "expert_hip_f16kv_no_mtp_ub2048_ple_cpu",
+      "description": "No-MTP ROCm control with F16 target KV, ubatch 2048, prompt cache disabled, routed experts on the iGPU, and joined PLE explicitly CPU-mapped.",
+      "extends": "expert_hip_f16kv_no_mtp_ub2048",
+      "args_append": [
+        "--cache-ram",
+        "0",
+        "--override-tensor",
+        "^blk\\.[0-9]+\\.ffn_(down|gate|up)_exps\\.weight$=ROCm1,^per_layer_token_embd\\.weight$=CPU"
       ]
     },
     {
@@ -2523,8 +2668,8 @@
     },
     {
       "name": "vision_bf16_cpu_hip_no_mtp",
-      "description": "BF16 vision projector on CPU as the ROCm numerical reference; the joined target uses routed experts on the iGPU and all remaining eligible tensors on the 7900 XT.",
-      "extends": "expert_hip_f16kv_no_mtp_ub2048",
+      "description": "BF16 vision projector on CPU as the ROCm numerical reference; routed experts stay on the iGPU, PLE stays CPU-mapped, and the prompt cache is disabled.",
+      "extends": "expert_hip_f16kv_no_mtp_ub2048_ple_cpu",
       "baseline": true,
       "args_append": [
         "--mmproj",
@@ -2552,6 +2697,42 @@
       "name": "vision_bf16_dgpu_hip_mtp_n3",
       "description": "BF16 projector and Q8 MTP weights on the RX 7900 XT using n=3 and F16 target/draft KV; Q8 draft KV is deliberately excluded.",
       "extends": "vision_bf16_dgpu_hip_no_mtp",
+      "baseline": false,
+      "args_append": [
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "ROCm0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "3",
+        "--spec-draft-p-min",
+        "0.75",
+        "--spec-draft-type-k",
+        "f16",
+        "--spec-draft-type-v",
+        "f16"
+      ]
+    },
+    {
+      "name": "vision_bf16_igpu_hip_no_mtp",
+      "description": "BF16 vision projector explicitly pinned to the iGPU; PLE remains CPU-mapped and the 7900 XT remains available for the fixed MTP sidecar.",
+      "extends": "vision_bf16_cpu_hip_no_mtp",
+      "baseline": false,
+      "env": {
+        "MTMD_BACKEND_DEVICE": "ROCm1"
+      },
+      "args_append": [
+        "--mmproj-offload"
+      ]
+    },
+    {
+      "name": "vision_bf16_igpu_hip_mtp_n3",
+      "description": "BF16 projector on the iGPU plus Q8_0 MTP weights on the 7900 XT using n=3 and F16 target/draft KV.",
+      "extends": "vision_bf16_igpu_hip_no_mtp",
       "baseline": false,
       "args_append": [
         "-md",

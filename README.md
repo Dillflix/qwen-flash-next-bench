@@ -173,9 +173,9 @@ the combination is safe.
 
 The Vulkan tiers above remain useful historical controls. Production ROCm vision
 has its own bring-up path using the native joined model, BF16 projector, routed
-experts on the iGPU, and the rest of the target on the 7900 XT. It tests the CPU
-projector first, then `MTMD_BACKEND_DEVICE=ROCm0`, and finally combines that
-projector placement with the winning n=3 MTP topology:
+experts on the iGPU, CPU-mapped PLE, and prompt cache disabled. It tests the CPU
+projector first, then `MTMD_BACKEND_DEVICE=ROCm1` for the iGPU, and finally adds
+the n=3 Q8_0 MTP sidecar on `ROCm0` (the RX 7900 XT):
 
 ```bash
 python3 qwen_bench.py preflight --tier rocm-vision-smoke
@@ -183,7 +183,7 @@ python3 qwen_bench.py preflight --tier rocm-vision-smoke
 ```
 
 Do not use `--fail-fast` for initial bring-up: the three isolated starts identify
-whether a failure belongs to ROCm vision support, projector GPU offload, or the
+whether a failure belongs to ROCm vision support, iGPU projector offload, or the
 vision-plus-MTP combination. Once all three pass, run the complete fixture set:
 
 ```bash
@@ -195,10 +195,9 @@ Both ROCm tiers explicitly use F16 target KV and F16 draft KV. Q8 draft KV is no
 present. The Q8 projector is also excluded because the earlier Vulkan run failed
 the OCR quality gate; that is independent of the draft-KV decision.
 
-If the projector plus target allocation exceeds 20 GB on the 7900 XT, first change
-the vision experiments from `--tensor-split 88,12` to `90,10`. If that is still
-insufficient, reduce batch and ubatch together to 1024. Do not move the projector to
-the iGPU until the dGPU placement has been tested at those two lower-memory settings.
+The projector is deliberately not placed on the 7900 XT: its scarce VRAM is reserved
+for MTP and the selected target tensors. CPU versus iGPU projector placement remains
+an explicit correctness/performance comparison.
 
 ## Build the H1 low-risk quant
 
@@ -894,6 +893,70 @@ before measured 4K and 32K requests. Compare prefill/decode, file versus anonymo
 RSS, GTT/VRAM, `MemAvailable`, physical read bytes, and major faults. The explicit
 CPU candidate is successful only if it materially reduces device/GTT residency
 without an unacceptable hot-throughput regression.
+
+### Native 256K one-slot placement campaign
+
+First inventory the exact storage span of every GGUF tensor and aggregate those
+bytes into placement-relevant families. The parser is dependency-free and includes
+alignment padding, so all family spans add exactly to each GGUF data section:
+
+```bash
+python3 qwen_inventory.py self-test
+python3 qwen_inventory.py scan \
+  /srv/llm/models/qwen-flash-next/Qwen3.8-Flash-Next-Q4_0-ROCmFP4-STRIX.gguf \
+  /srv/llm/models/qwen-flash-next/mtp-Qwen3.8-Flash-Next-Q8_0.gguf \
+  --include-tensors \
+  --output preflight/qwen-gguf-inventory.json \
+  --archive
+```
+
+Upload `preflight/qwen-gguf-inventory.tar.gz` for placement analysis; the matching
+`.sha256` sidecar is optional.
+
+Then run the 64K screen. Every candidate holds these production invariants fixed:
+Q8_0 MTP weights on `ROCm0`, draft depth 3, F16 target and draft KV, batch/ubatch
+2048, routed experts on `ROCm1`, joined PLE explicitly CPU-mapped, and
+`--cache-ram 0`. Candidates incrementally move the token embedding, shared experts,
+LM head, and finally the twelve full-attention blocks to the iGPU. The screen exists
+to measure both the freed 7900 XT residency and its prefill/decode cost:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-256k-placement-screen
+./run-bench.sh --tier rocm-256k-placement-screen
+```
+
+Do not jump directly from a successful 64K run to the near-full prompt. Select the
+least expensive candidates that leave credible 7900 XT headroom, and prove that a
+single 262144-token slot starts first:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-256k-capacity \
+  --experiments 'prod_hip_256k_token_igpu,prod_hip_256k_token_shared_igpu'
+./run-bench.sh --tier rocm-256k-capacity \
+  --experiments 'prod_hip_256k_token_igpu,prod_hip_256k_token_shared_igpu'
+```
+
+Finally select only allocation-qualified finalists. This performs an exact-token
+128K prompt and a 253952-token prompt, leaving 8192 tokens of the native 262144
+window for generation and server overhead:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-256k-full \
+  --experiments 'prod_hip_256k_token_shared_igpu'
+./run-bench.sh --tier rocm-256k-full \
+  --experiments 'prod_hip_256k_token_shared_igpu'
+```
+
+The startup-only tier proves model/context initialization, not populated KV
+residency. Only the near-full request proves the operational capacity. Do not use
+`--fail-fast` during screening: a failed low-migration candidate should not suppress
+the higher-migration fallbacks.
+
+The in-memory prompt-response cache is disabled in every candidate with
+`--cache-ram 0`. Disk-backed prompt caching remains valuable, but `--slot-save-path`
+only enables explicit slot actions; it is not an automatic bounded SSD cache. The
+separate acceptance criteria for adding one are tracked in
+[`FUTURE_TESTS.md`](FUTURE_TESTS.md).
 
 Benchmark the fork-specific Vulkan kernel and prefill knobs on the representative 88/12 placement:
 

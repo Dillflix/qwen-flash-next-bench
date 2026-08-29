@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.28.0"
+VERSION = "1.29.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -362,7 +362,7 @@ def fit_prompt_to_tokens(
     timeout_s: float,
     lane: int = 0,
 ) -> tuple[str, int]:
-    """Build a prompt at or just below an exact per-slot token budget."""
+    """Build a prompt with exactly the requested /tokenize token count."""
     lane_prefix = f"Independent benchmark lane {lane + 1}; lane marker {lane:08x}.\n"
     if target_tokens <= 0:
         prompt = lane_prefix + base
@@ -371,10 +371,10 @@ def fit_prompt_to_tokens(
     low_chars = 0
     high_chars = max(1024, target_tokens * 5)
 
-    def construct(filler_chars: int) -> str:
+    def construct(filler_chars: int, padding: str = "") -> str:
         prefix = "Reference material follows. Read it, then answer the task after END REFERENCE.\n\n"
         repeated = (corpus + "\n\n") * max(1, math.ceil(filler_chars / max(1, len(corpus))))
-        return f"{lane_prefix}{prefix}{repeated[:filler_chars]}\nEND REFERENCE\n\n{base}"
+        return f"{lane_prefix}{prefix}{repeated[:filler_chars]}{padding}\nEND REFERENCE\n\n{base}"
 
     low_prompt = construct(low_chars)
     low_count = tokenize_count(base_url, low_prompt, timeout_s)
@@ -390,8 +390,8 @@ def fit_prompt_to_tokens(
         high_prompt = construct(high_chars)
         high_count = tokenize_count(base_url, high_prompt, timeout_s)
 
-    best_prompt, best_count = low_prompt, low_count
-    for _ in range(8):
+    best_prompt, best_count, best_chars = low_prompt, low_count, low_chars
+    for _ in range(32):
         if high_count == low_count:
             break
         estimated = low_chars + int(
@@ -404,15 +404,31 @@ def fit_prompt_to_tokens(
             break
         prompt = construct(probe_chars)
         count = tokenize_count(base_url, prompt, timeout_s)
+        if count == target_tokens:
+            return prompt, count
         if count <= target_tokens:
             low_chars, low_prompt, low_count = probe_chars, prompt, count
             if count > best_count:
-                best_prompt, best_count = prompt, count
-            if target_tokens - count <= 16:
-                break
+                best_prompt, best_count, best_chars = prompt, count, probe_chars
         else:
             high_chars, high_prompt, high_count = probe_chars, prompt, count
-    return best_prompt, best_count
+        if high_chars - low_chars <= 1:
+            break
+
+    # Token counts can jump at a corpus boundary.  Add a tiny, semantically inert
+    # padding run before END REFERENCE and prove the final count instead of silently
+    # accepting a prompt that is merely close to the requested capacity.
+    for unit in (" benchmark", " x", " 0", "\npadding"):
+        for repeats in range(1, 65):
+            prompt = construct(best_chars, unit * repeats)
+            count = tokenize_count(base_url, prompt, timeout_s)
+            if count == target_tokens:
+                return prompt, count
+            if count > target_tokens + 8:
+                break
+    raise RuntimeError(
+        f"could not construct an exact {target_tokens}-token prompt; closest count was {best_count}"
+    )
 
 
 def command_text(command: list[str]) -> str:
@@ -2190,7 +2206,7 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                     for workload, depth in pending:
                         if stop_event.is_set():
                             break
-                        prompt = prepared_prompt(workload, depth, 0)[0]
+                        prompt, constructed_prompt_tokens = prepared_prompt(workload, depth, 0)
                         mark = server.telemetry.mark() if server.telemetry else 0
                         response, wall_ms, vision_metrics = request_one(workload, prompt, n_predict)
                         samples = server.telemetry.slice(mark) if server.telemetry else []
@@ -2198,6 +2214,8 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             run_id, experiment, round_index, workload, depth, n_predict,
                             response, wall_ms, server.startup_seconds, aggregate_telemetry(samples),
                         )
+                        if exact_prompt_tokens:
+                            row["constructed_prompt_tokens"] = constructed_prompt_tokens
                         if vision_mode:
                             row["vision"] = vision_metrics
                             min_anchor_score = float(tier.get("vision_min_anchor_score", 0.0))
@@ -2746,6 +2764,15 @@ def self_test() -> None:
     assert expanded["x"] == "/tmp/file"
     prompt = make_prompt("task", 100, "abcdef")
     assert prompt.endswith("task") and len(prompt) >= 400
+    original_tokenize_count = globals()["tokenize_count"]
+    try:
+        globals()["tokenize_count"] = lambda _url, content, _timeout: len(content)
+        exact_prompt, exact_count = fit_prompt_to_tokens(
+            "http://self-test", "task", 4096, "abcdef", 1.0,
+        )
+        assert exact_count == 4096 and len(exact_prompt) == 4096
+    finally:
+        globals()["tokenize_count"] = original_tokenize_count
     aggregate = aggregate_telemetry([
         {
             "pid_rss_bytes": 10,
@@ -3113,6 +3140,58 @@ def self_test() -> None:
     rocm_ple_override = option_value(rocm_ple_args[1], "--override-tensor") or ""
     assert "ffn_(down|gate|up)_exps" in rocm_ple_override
     assert "per_layer_token_embd" in rocm_ple_override and "=CPU" in rocm_ple_override
+    production_names = [
+        "prod_hip_256k_base",
+        "prod_hip_256k_token_igpu",
+        "prod_hip_256k_token_shared_igpu",
+        "prod_hip_256k_token_shared_output_igpu",
+        "prod_hip_256k_token_shared_output_fullattn_igpu",
+    ]
+    placement_screen = expanded_shipped_config["tiers"]["rocm-256k-placement-screen"]
+    capacity_screen = expanded_shipped_config["tiers"]["rocm-256k-capacity"]
+    full_context = expanded_shipped_config["tiers"]["rocm-256k-full"]
+    assert placement_screen["experiments"] == production_names
+    assert capacity_screen["experiments"] == production_names
+    assert full_context["experiments"] == production_names
+    assert int(placement_screen["ctx_size"]) == 65536
+    assert int(capacity_screen["ctx_size"]) == 262144
+    assert capacity_screen.get("startup_only") is True
+    assert int(capacity_screen["warmups"]) == 0
+    assert int(full_context["ctx_size"]) == 262144
+    assert full_context.get("exact_prompt_tokens") is True
+    assert max(int(value) for value in full_context["depths"]) == 253952
+    production_experiments = select_experiments(
+        expanded_shipped_config, placement_screen, None,
+    )
+    for experiment in production_experiments:
+        args = server_command(expanded_shipped_config, placement_screen, experiment)[1:]
+        assert option_value(args, "--cache-ram") == "0"
+        assert option_value(args, "--batch-size") == "2048"
+        assert option_value(args, "--ubatch-size") == "2048"
+        assert option_value(args, "--parallel") == "1"
+        assert option_value(args, "--cache-type-k") == "f16"
+        assert option_value(args, "--cache-type-v") == "f16"
+        assert option_value(args, "--spec-draft-type-k") == "f16"
+        assert option_value(args, "--spec-draft-type-v") == "f16"
+        assert option_value(args, "--spec-draft-device") == "ROCm0"
+        assert option_value(args, "--spec-draft-n-max") == "3"
+        assert "--no-kv-unified" in args and "--cont-batching" in args
+        override = option_value(args, "--override-tensor") or ""
+        assert (
+            "ffn_(down|gate|up)_exps" in override
+            or "ffn_(down|gate|up)_(exps|shexp)" in override
+        ) and "=ROCm1" in override
+        assert "per_layer_token_embd" in override and "=CPU" in override
+    production_overrides = [
+        option_value(server_command(expanded_shipped_config, placement_screen, item)[1:], "--override-tensor") or ""
+        for item in production_experiments
+    ]
+    assert "^token_embd\\.weight" not in production_overrides[0]
+    assert "^token_embd\\.weight" in production_overrides[1]
+    assert "shexp" in production_overrides[2]
+    assert "output" in production_overrides[3]
+    assert "output" in production_overrides[4]
+    assert "3|7|11|15|19|23|27|31|35|39|43|47" in production_overrides[4]
     rocm_vision_smoke = expanded_shipped_config["tiers"]["rocm-vision-smoke"]
     assert rocm_vision_smoke.get("mode") == "vision"
     assert rocm_vision_smoke.get("require_rocm_audit") is True
@@ -3122,8 +3201,8 @@ def self_test() -> None:
     )
     assert [item["name"] for item in rocm_vision_experiments] == [
         "vision_bf16_cpu_hip_no_mtp",
-        "vision_bf16_dgpu_hip_no_mtp",
-        "vision_bf16_dgpu_hip_mtp_n3",
+        "vision_bf16_igpu_hip_no_mtp",
+        "vision_bf16_igpu_hip_mtp_n3",
     ]
     rocm_vision_args = [
         server_command(expanded_shipped_config, rocm_vision_smoke, item)[1:]
@@ -3134,7 +3213,7 @@ def self_test() -> None:
     assert "--no-mmproj-offload" in rocm_vision_args[0]
     assert all("--mmproj-offload" in args for args in rocm_vision_args[1:])
     assert all(
-        item.get("env", {}).get("MTMD_BACKEND_DEVICE") == "ROCm0"
+        item.get("env", {}).get("MTMD_BACKEND_DEVICE") == "ROCm1"
         for item in rocm_vision_experiments[1:]
     )
     rocm_vision_mtp_args = rocm_vision_args[-1]
@@ -3142,7 +3221,14 @@ def self_test() -> None:
     assert option_value(rocm_vision_mtp_args, "--spec-draft-n-max") == "3"
     assert option_value(rocm_vision_mtp_args, "--spec-draft-type-k") == "f16"
     assert option_value(rocm_vision_mtp_args, "--spec-draft-type-v") == "f16"
-    for tier_name in ("rocm-ple-ssd", "rocm-vision-smoke", "rocm-vision"):
+    for tier_name in (
+        "rocm-ple-ssd",
+        "rocm-256k-placement-screen",
+        "rocm-256k-capacity",
+        "rocm-256k-full",
+        "rocm-vision-smoke",
+        "rocm-vision",
+    ):
         production_tier = expanded_shipped_config["tiers"][tier_name]
         for experiment in select_experiments(expanded_shipped_config, production_tier, None):
             production_args = server_command(
