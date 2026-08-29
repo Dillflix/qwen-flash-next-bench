@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.36.0"
+VERSION = "1.36.1"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -4199,11 +4199,17 @@ def self_test() -> None:
     assert HOST_CHECKPOINT_MARKER in host_checkpoint_patch_text
     assert "~LLAMA_STATE_SEQ_FLAGS_ON_DEVICE" in host_checkpoint_patch_text
     assert "forcing checkpoint state to host memory" in host_checkpoint_patch_text
+    assert not re.search(r"^@@ -\d+,0 ", host_checkpoint_patch_text, re.MULTILINE)
+    assert host_checkpoint_patch_text.count(
+        "flags = common_prompt_checkpoint_maybe_host_flags(flags);"
+    ) == 4
     build_script = pathlib.Path(__file__).with_name("build-rocm10-dual.sh").read_text(encoding="utf-8")
     assert "git -C \"$SOURCE_DIR\" apply" in build_script
     assert QWEN4EXP_MTP_MARKER in build_script
     assert QWEN4EXP_MTP_SCHED_MARKER in build_script
     assert HOST_CHECKPOINT_MARKER in build_script
+    assert "rocmfpx-host-checkpoints-v1-broken.patch" in build_script
+    assert "apply --reverse --check --unidiff-zero" in build_script
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 

@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 QWEN4EXP_MTP_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp.patch"
 QWEN4EXP_MTP_SCHED_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
 HOST_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-host-checkpoints.patch"
+LEGACY_HOST_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-host-checkpoints-v1-broken.patch"
 
 fail() {
     echo "ERROR: $*" >&2
@@ -25,6 +26,7 @@ actual_rev="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
 [[ -f "$QWEN4EXP_MTP_PATCH" ]] || fail "missing qwen4exp MTP patch: $QWEN4EXP_MTP_PATCH"
 [[ -f "$QWEN4EXP_MTP_SCHED_PATCH" ]] || fail "missing qwen4exp MTP scheduling patch: $QWEN4EXP_MTP_SCHED_PATCH"
 [[ -f "$HOST_CHECKPOINT_PATCH" ]] || fail "missing host-checkpoint patch: $HOST_CHECKPOINT_PATCH"
+[[ -f "$LEGACY_HOST_CHECKPOINT_PATCH" ]] || fail "missing legacy host-checkpoint repair patch: $LEGACY_HOST_CHECKPOINT_PATCH"
 
 # The pinned ROCmFPX commit has the generic MTP engine, but not the qwen4exp
 # sidecar loader/graph or the opt-in host-checkpoint policy. Apply the reviewed
@@ -57,6 +59,15 @@ apply_patch_once \
     "qwen4exp MTP hidden-state scheduling patch" \
     "src/models/qwen4exp.cpp" \
     "qwen4exp_mtp_h_pre_norm_scheduled"
+
+# Commit dc18127 shipped a zero-context patch whose additions were accepted by
+# git-apply at EOF instead of inside the four checkpoint methods. Repair source
+# trees that consumed that patch before applying the contextual replacement.
+if git -C "$SOURCE_DIR" apply --reverse --check --unidiff-zero "$LEGACY_HOST_CHECKPOINT_PATCH"; then
+    git -C "$SOURCE_DIR" apply --reverse --unidiff-zero "$LEGACY_HOST_CHECKPOINT_PATCH"
+    echo "Removed malformed v1 host-memory prompt-checkpoint patch."
+fi
+
 apply_patch_once \
     "$HOST_CHECKPOINT_PATCH" \
     "host-memory prompt-checkpoint patch" \

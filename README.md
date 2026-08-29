@@ -666,7 +666,9 @@ wrong source family, an incompatible existing CMake cache, or a library that doe
 not contain both required code objects. It also applies
 `patches/rocmfpx-qwen4exp-mtp.patch`, its hidden-state scheduling follow-up, and
 `patches/rocmfpx-host-checkpoints.patch` idempotently. This also upgrades a source
-tree that already has either earlier patch. The first two patches add the missing
+tree that already has either earlier MTP patch. Version 1.36.1 also detects and
+removes the malformed zero-context host-checkpoint patch shipped in commit
+`dc18127` before applying its contextual replacement. The first two patches add the missing
 Qwen4Exp MTP sidecar loader/graph integration. The third adds an opt-in
 `LLAMA_CKPT_FORCE_HOST=1` path that clears the device-storage flag only for prompt
 checkpoint save/restore, retaining those checkpoints in host/unified RAM instead

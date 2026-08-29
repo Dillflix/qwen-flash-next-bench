@@ -49,6 +49,9 @@ jobs:
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
+          git -C rocmfpx apply --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
+          git -C rocmfpx apply --reverse --check --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
+          git -C rocmfpx apply --reverse --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints.patch"
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints.patch"
           cmake -S rocmfpx -B rocmfpx/build-ci -G Ninja \

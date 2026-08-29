@@ -2,9 +2,7 @@ diff --git a/common/common.cpp b/common/common.cpp
 index 1421040..3728b63 100644
 --- a/common/common.cpp
 +++ b/common/common.cpp
-@@ -2171,2 +2171,18 @@ void common_prompt_checkpoint::update_pos(
--
-+
+@@ -2171,0 +2172,16 @@ void common_prompt_checkpoint::update_pos(
 +static llama_state_seq_flags common_prompt_checkpoint_maybe_host_flags(llama_state_seq_flags flags) {
 +    // Keep reusable prompt checkpoints out of scarce discrete-GPU VRAM while
 +    // retaining them in ordinary host/unified memory.
@@ -21,28 +19,15 @@ index 1421040..3728b63 100644
 +    return flags;
 +}
 +
- void common_prompt_checkpoint::update_tgt(
-@@ -2179,2 +2195,4 @@ void common_prompt_checkpoint::update_tgt(
--
-+
+@@ -2179,0 +2196,2 @@ void common_prompt_checkpoint::update_tgt(
 +    flags = common_prompt_checkpoint_maybe_host_flags(flags);
 +
-     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
-@@ -2206,2 +2224,4 @@ void common_prompt_checkpoint::update_dft(
--
-+
+@@ -2206,0 +2225,2 @@ void common_prompt_checkpoint::update_dft(
 +    flags = common_prompt_checkpoint_maybe_host_flags(flags);
 +
-     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
-@@ -2233,2 +2253,4 @@ bool common_prompt_checkpoint::load_tgt(
--
-+
+@@ -2233,0 +2254,2 @@ bool common_prompt_checkpoint::load_tgt(
 +    flags = common_prompt_checkpoint_maybe_host_flags(flags);
 +
-     if (data_tgt.empty()) {
-@@ -2255,2 +2277,4 @@ bool common_prompt_checkpoint::load_dft(
--
-+
+@@ -2255,0 +2278,2 @@ bool common_prompt_checkpoint::load_dft(
 +    flags = common_prompt_checkpoint_maybe_host_flags(flags);
 +
-     if (data_dft.empty()) {
