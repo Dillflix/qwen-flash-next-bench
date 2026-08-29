@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.25.1"
+VERSION = "1.26.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -3033,6 +3033,34 @@ def self_test() -> None:
         assert option_value(mtp_args, "--spec-draft-p-min") == "0.75"
         assert option_value(mtp_args, "--cache-type-k") == "f16"
         assert option_value(mtp_args, "--cache-type-v") == "f16"
+    mtp_window_tier = expanded_shipped_config["tiers"]["rocm-mtp-window"]
+    mtp_window_experiments = select_experiments(expanded_shipped_config, mtp_window_tier, None)
+    assert [item["name"] for item in mtp_window_experiments] == [
+        "expert_hip_f16kv_mtp_n4_dgpu",
+        "expert_hip_f16kv_mtp_n3_dgpu",
+        "expert_hip_f16kv_mtp_n2_dgpu",
+    ]
+    assert [
+        option_value(server_command(expanded_shipped_config, mtp_window_tier, item)[1:], "--spec-draft-n-max")
+        for item in mtp_window_experiments
+    ] == ["4", "3", "2"]
+    mtp_prefill_tier = expanded_shipped_config["tiers"]["rocm-mtp-prefill"]
+    mtp_prefill_experiments = select_experiments(expanded_shipped_config, mtp_prefill_tier, None)
+    assert [item["name"] for item in mtp_prefill_experiments] == [
+        "expert_hip_f16kv_mtp_n4_dgpu",
+        "expert_hip_f16kv_mtp_n4_dgpu_ub1024",
+        "expert_hip_f16kv_mtp_n4_dgpu_ub2048",
+        "expert_hip_f16kv_mtp_n4_dgpu_q8draftkv",
+    ]
+    assert [
+        option_value(server_command(expanded_shipped_config, mtp_prefill_tier, item)[1:], "--ubatch-size")
+        for item in mtp_prefill_experiments[:3]
+    ] == ["512", "1024", "2048"]
+    q8_draft_args = server_command(expanded_shipped_config, mtp_prefill_tier, mtp_prefill_experiments[-1])[1:]
+    assert option_value(q8_draft_args, "--cache-type-k") == "f16"
+    assert option_value(q8_draft_args, "--cache-type-v") == "f16"
+    assert option_value(q8_draft_args, "--spec-draft-type-k") == "q8_0"
+    assert option_value(q8_draft_args, "--spec-draft-type-v") == "q8_0"
     mtp_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-qwen4exp-mtp.patch"
     assert mtp_patch.is_file()
     mtp_patch_text = mtp_patch.read_text(encoding="utf-8")

@@ -779,6 +779,40 @@ F16 KV, batch 2048, 4K/32K prompts, and excluded 32K warm-up. Do not add
 be insufficient after the winning target placement, and an OOM is itself a useful
 result that should not discard the completed control and iGPU cells.
 
+The first successful run (`20260829-002156-rocm-mtp`) establishes the 7900 XT as
+the MTP device. Relative to no MTP, it raises decode from 31.18 to 42.44 tok/s at
+4K depth (+36%) and from 29.70 to 50.98 tok/s at 32K depth (+72%). It is also 17%
+to 20% faster at decode than iGPU MTP, with effectively identical acceptance.
+MTP is not free during prompt processing: the target exposes its 10,240-wide hidden
+state and the draft block processes the prompt to build its own attention KV. The
+7900 XT result therefore lowers prefill from 590.29 to 518.15 tok/s at 4K (-12%)
+and from 484.80 to 427.75 tok/s at 32K (-12%). For the tier's 256-token response,
+estimated prefill-plus-decode time is 17.37 versus 16.47 seconds at 4K (MTP wins)
+and 89.44 versus 96.62 seconds at 32K (no MTP wins). The approximate MTP break-even
+is 150 generated tokens at 4K and 767 at 32K; prompt/KV reuse lowers the practical
+break-even substantially on subsequent turns.
+
+Tune only the successful dGPU MTP topology. The draft-window tier deliberately uses
+only the 4K prompt so n=2 and n=3 do not repeat an identical expensive 32K prefill:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-mtp-window
+./run-bench.sh --tier rocm-mtp-window
+```
+
+Then test the knobs that can affect prompt processing at both 4K and 32K: ubatch
+512/1024/2048 and Q8 draft KV. Target KV stays F16 in every cell, so the Q8 result
+isolates only the sidecar cache:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-mtp-prefill
+./run-bench.sh --tier rocm-mtp-prefill
+```
+
+These are separate tiers because draft-window length changes decode work but not the
+sidecar's prompt prefill. Combine the winning window, ubatch, and draft-KV settings
+only after both focused sweeps complete.
+
 Benchmark the fork-specific Vulkan kernel and prefill knobs on the representative 88/12 placement:
 
 ```bash
