@@ -738,9 +738,22 @@ device list, `ROCm0` is the RX 7900 XT and `ROCm1` is the Radeon 8060S. The join
 PLE tensor remains on its native file-backed mmap path in every cell.
 
 The additional layer and row definitions remain available for deliberate follow-up,
-but are excluded from the recommended campaign. Do not run `rocm-mtp` until this
-focused tier identifies the target-model placement winner; then compare the Q8 MTP
-sidecar on the 7900 XT versus the iGPU using that one target layout.
+but are excluded from the recommended campaign. Once this focused tier identifies
+the target-model placement winner, run:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-mtp
+./run-bench.sh --tier rocm-mtp
+```
+
+The ROCm MTP tier fixes the target at the routed-expert placement: the joined PLE
+stays file-backed, routed experts stay on the iGPU, and shared experts plus remaining
+eligible target tensors stay on the 7900 XT. It compares no MTP against the Q8
+sidecar at n=4/p-min 0.75 first on the iGPU and then on the 7900 XT, using the same
+F16 KV, batch 2048, 4K/32K prompts, and excluded 32K warm-up. Do not add
+`--fail-fast`: the dGPU cell intentionally runs last because its 20 GiB capacity may
+be insufficient after the winning target placement, and an OOM is itself a useful
+result that should not discard the completed control and iGPU cells.
 
 Benchmark the fork-specific Vulkan kernel and prefill knobs on the representative 88/12 placement:
 

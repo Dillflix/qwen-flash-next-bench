@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.23.0"
+VERSION = "1.24.0"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -2874,7 +2874,9 @@ def self_test() -> None:
         if cache_state == "cold":
             assert int(tier.get("warmups", 0)) == 0, f"{tier_name}: cold tier has warm-ups"
     expanded_shipped_config = load_config(pathlib.Path(__file__).with_name("matrix.json"))
-    for tier_name in ("rocm-smoke", "rocm-depth", "backend-smoke-matched", "rocm-placement"):
+    for tier_name in (
+        "rocm-smoke", "rocm-depth", "backend-smoke-matched", "rocm-placement", "rocm-mtp",
+    ):
         rocm_tier = expanded_shipped_config["tiers"][tier_name]
         assert rocm_tier.get("cache_state") == "hot"
         assert int(rocm_tier.get("warmup_depth", 0)) >= max(
@@ -2932,6 +2934,21 @@ def self_test() -> None:
         list(placement_experiments[-1].get("args", [])), "--override-tensor",
     ) or ""
     assert "(exps|shexp)" in shared_override and "ffn_gate_inp_shexp" in shared_override
+    mtp_tier = expanded_shipped_config["tiers"]["rocm-mtp"]
+    mtp_experiments = select_experiments(expanded_shipped_config, mtp_tier, None)
+    assert [item["name"] for item in mtp_experiments] == [
+        "expert_hip_f16kv_no_mtp",
+        "expert_hip_f16kv_mtp_n4_igpu",
+        "expert_hip_f16kv_mtp_n4_dgpu",
+    ]
+    assert option_value(list(mtp_experiments[1]["args"]), "--spec-draft-device") == "ROCm1"
+    assert option_value(list(mtp_experiments[2]["args"]), "--spec-draft-device") == "ROCm0"
+    for experiment in mtp_experiments[1:]:
+        mtp_args = server_command(expanded_shipped_config, mtp_tier, experiment)[1:]
+        assert option_value(mtp_args, "--spec-draft-n-max") == "4"
+        assert option_value(mtp_args, "--spec-draft-p-min") == "0.75"
+        assert option_value(mtp_args, "--cache-type-k") == "f16"
+        assert option_value(mtp_args, "--cache-type-v") == "f16"
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 

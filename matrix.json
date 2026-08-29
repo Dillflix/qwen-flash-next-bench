@@ -762,26 +762,29 @@
       "request_timeout_s": 1800
     },
     "rocm-mtp": {
-      "description": "ROCm layer split with extra dGPU headroom for MTP n=2/3/4.",
+      "description": "Focused hot-cache ROCm MTP placement test on the winning routed-expert target topology: no MTP, Q8 MTP n=4 on iGPU, and Q8 MTP n=4 on 7900 XT.",
       "require_rocm_audit": true,
+      "cache_state": "hot",
       "experiments": [
-        "layer_90_10_hip_no_mtp",
-        "layer_90_10_hip_mtp_n2",
-        "layer_90_10_hip_mtp_n3",
-        "layer_90_10_hip_mtp_n4"
+        "expert_hip_f16kv_no_mtp",
+        "expert_hip_f16kv_mtp_n4_igpu",
+        "expert_hip_f16kv_mtp_n4_dgpu"
       ],
       "workloads": [
-        "code",
-        "json",
-        "prose"
+        "code"
       ],
       "depths": [
-        0
+        4096,
+        32768
       ],
-      "ctx_size": 8192,
+      "ctx_size": 65536,
       "n_predict": 256,
       "warmups": 1,
-      "rounds": 3
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "settle_seconds": 2,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
     },
     "backend": {
       "description": "Matched Vulkan and ROCm controls and heterogeneous placements.",
@@ -1879,6 +1882,44 @@
         "f16",
         "--cache-type-v",
         "f16"
+      ]
+    },
+    {
+      "name": "expert_hip_f16kv_mtp_n4_igpu",
+      "description": "Winning ROCm routed-expert target placement with Q8 MTP n=4 on the Radeon 8060S iGPU.",
+      "extends": "expert_hip_f16kv_no_mtp",
+      "args_append": [
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "ROCm1",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "4",
+        "--spec-draft-p-min",
+        "0.75"
+      ]
+    },
+    {
+      "name": "expert_hip_f16kv_mtp_n4_dgpu",
+      "description": "Winning ROCm routed-expert target placement with Q8 MTP n=4 on the RX 7900 XT; runs last so a VRAM-capacity failure preserves the iGPU result.",
+      "extends": "expert_hip_f16kv_no_mtp",
+      "args_append": [
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "ROCm0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "4",
+        "--spec-draft-p-min",
+        "0.75"
       ]
     },
     {
