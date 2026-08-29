@@ -688,6 +688,10 @@ test only shallow 0/512-token depths. If only the enabled experiment collapses,
 the remaining defect is isolated to the attention path rather than the ROCmFP4
 matrix kernels.
 
+The pinned ROCmFPX revision uses the older `--mmap`/`--no-mmap` interface and has
+mmap enabled by default. ROCm experiments therefore remove the newer Vulkan fork's
+`--load-mode mmap` option from inherited defaults; they do not disable mmap.
+
 If shallow performance is sane, localize the previously reported context cliff:
 
 ```bash

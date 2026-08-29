@@ -1765,6 +1765,9 @@
       "name": "apu_hip_joined_no_mtp",
       "description": "APU-only ROCm control; joined PLE is valid because HIP does not have Vulkan's 4 GiB storage-buffer limit.",
       "backend": "rocm",
+      "remove_server_options": [
+        "--load-mode"
+      ],
       "server": "{hip_server}",
       "model": "{model_joined}",
       "env": {
@@ -1787,6 +1790,9 @@
       "name": "expert_hip_no_mtp",
       "description": "Experimental heterogeneous ROCm placement without global managed-memory fallback.",
       "backend": "rocm",
+      "remove_server_options": [
+        "--load-mode"
+      ],
       "server": "{hip_server}",
       "model": "{model_ple16}",
       "env": {
@@ -1816,6 +1822,9 @@
       "description": "Clean ROCm diagnostic: APU only, no managed-memory fallback, split PLE mmap on CPU, no dGPU, and no MTP.",
       "backend": "rocm",
       "baseline": false,
+      "remove_server_options": [
+        "--load-mode"
+      ],
       "server": "{hip_server}",
       "model": "{model_ple16}",
       "env": {

@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.21.0"
+VERSION = "1.21.1"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -472,6 +472,20 @@ def canonicalize_server_args(args: list[str]) -> list[str]:
     return result
 
 
+def remove_server_options(args: list[str], options: set[str]) -> list[str]:
+    """Remove backend-incompatible options, including their singleton values."""
+    result: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token in options:
+            index += 2 if token in SINGLE_VALUE_SERVER_OPTIONS and index + 1 < len(args) else 1
+            continue
+        result.append(token)
+        index += 1
+    return result
+
+
 def server_command(config: dict[str, Any], tier: dict[str, Any], experiment: dict[str, Any]) -> list[str]:
     defaults = config.get("defaults", {})
     host = str(defaults.get("host", "127.0.0.1"))
@@ -488,7 +502,9 @@ def server_command(config: dict[str, Any], tier: dict[str, Any], experiment: dic
     command.extend(str(item) for item in experiment.get("args", []))
     if bool(tier.get("erase_slot_between_requests", defaults.get("erase_slot_between_requests", False))):
         command.extend(["--slot-save-path", effective_slot_save_path(config, tier)])
-    return [command[0], *canonicalize_server_args(command[1:])]
+    args = canonicalize_server_args(command[1:])
+    removed = {str(item) for item in experiment.get("remove_server_options", [])}
+    return [command[0], *remove_server_options(args, removed)]
 
 
 def effective_slot_save_path(config: dict[str, Any], tier: dict[str, Any]) -> str:
@@ -2571,6 +2587,10 @@ def self_test() -> None:
         "--jinja", "--cache-type-k", "f16", "--spec-draft-n-max", "4",
         "--kv-unified", "--mmproj-offload",
     ]
+    assert remove_server_options(
+        ["--load-mode", "mmap", "--jinja", "--flash-attn", "on"],
+        {"--load-mode"},
+    ) == ["--jinja", "--flash-attn", "on"]
     oai = {
         "choices": [{"message": {"content": "A red circle and UNSLOTH 42"}}],
         "timings": {"predicted_n": 16},
