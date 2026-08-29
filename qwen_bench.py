@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.26.0"
+VERSION = "1.26.1"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -3047,11 +3047,15 @@ def self_test() -> None:
     mtp_prefill_tier = expanded_shipped_config["tiers"]["rocm-mtp-prefill"]
     mtp_prefill_experiments = select_experiments(expanded_shipped_config, mtp_prefill_tier, None)
     assert [item["name"] for item in mtp_prefill_experiments] == [
-        "expert_hip_f16kv_mtp_n4_dgpu",
-        "expert_hip_f16kv_mtp_n4_dgpu_ub1024",
-        "expert_hip_f16kv_mtp_n4_dgpu_ub2048",
-        "expert_hip_f16kv_mtp_n4_dgpu_q8draftkv",
+        "expert_hip_f16kv_mtp_n3_dgpu",
+        "expert_hip_f16kv_mtp_n3_dgpu_ub1024",
+        "expert_hip_f16kv_mtp_n3_dgpu_ub2048",
+        "expert_hip_f16kv_mtp_n3_dgpu_q8draftkv",
     ]
+    assert all(
+        option_value(server_command(expanded_shipped_config, mtp_prefill_tier, item)[1:], "--spec-draft-n-max") == "3"
+        for item in mtp_prefill_experiments
+    )
     assert [
         option_value(server_command(expanded_shipped_config, mtp_prefill_tier, item)[1:], "--ubatch-size")
         for item in mtp_prefill_experiments[:3]

@@ -800,7 +800,11 @@ python3 qwen_bench.py preflight --tier rocm-mtp-window
 ./run-bench.sh --tier rocm-mtp-window
 ```
 
-Then test the knobs that can affect prompt processing at both 4K and 32K: ubatch
+Run `20260829-113303-rocm-mtp-window` selected n=3: 51.89 tok/s with 90.4%
+acceptance, versus 49.06 tok/s at n=2 and 46.91 tok/s at n=4. Prefill remained
+within 0.6% across the three cells. The next tier therefore uses n=3 exclusively.
+
+Test the knobs that can affect prompt processing at both 4K and 32K: ubatch
 512/1024/2048 and Q8 draft KV. Target KV stays F16 in every cell, so the Q8 result
 isolates only the sidecar cache:
 
