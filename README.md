@@ -700,7 +700,7 @@ After it passes, run the semantically matched control:
 ./run-bench.sh --tier backend-smoke-matched --fail-fast
 ```
 
-That tier holds CPU-mapped PLE, Q8 KV, batch 2048, ubatch 512, context, prompts,
+That tier holds CPU-mapped PLE, F16 KV, batch 2048, ubatch 512, context, prompts,
 decode length, and flash-attention state constant. Only the backend/device spelling
 and the equivalent mmap syntax differ.
 

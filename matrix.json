@@ -710,7 +710,7 @@
       "request_timeout_s": 1800
     },
     "backend-smoke-matched": {
-      "description": "Semantically matched Vulkan/ROCm APU-only comparison with explicit mmap, CPU PLE, Q8 KV, batch 2048, ubatch 512, and flash attention off/on.",
+      "description": "Semantically matched Vulkan/ROCm APU-only comparison with explicit mmap, CPU PLE, F16 KV, batch 2048, ubatch 512, and flash attention off/on.",
       "require_rocm_audit": true,
       "cache_state": "hot",
       "experiments": [
@@ -1697,14 +1697,18 @@
     },
     {
       "name": "apu_vk_ple16_cpu_no_mtp",
-      "description": "Vulkan APU-only control matched to the ROCm smoke deployment: CPU-mmap PLE16, Q8 KV, batch 2048, ubatch 512, and no MTP.",
+      "description": "Vulkan APU-only control matched to the ROCm smoke deployment: CPU-mmap PLE16, F16 KV, batch 2048, ubatch 512, and no MTP.",
       "extends": "apu_vk_no_mtp",
       "baseline": false,
       "args_append": [
         "--override-tensor",
         "^ple_ngram_embd\\.[0-9]+\\.weight$=CPU",
         "--batch-size",
-        "2048"
+        "2048",
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
       ]
     },
     {
@@ -1873,7 +1877,7 @@
     },
     {
       "name": "apu_hip_ple16_cpu_no_mtp",
-      "description": "Clean ROCm diagnostic: APU only, no managed-memory fallback, split PLE mmap on CPU, no dGPU, and no MTP.",
+      "description": "Clean ROCm diagnostic: APU only, no managed-memory fallback, split PLE mmap on CPU, F16 KV, no dGPU, and no MTP.",
       "backend": "rocm",
       "baseline": false,
       "translate_server_options": {
@@ -1901,7 +1905,11 @@
         "--override-tensor",
         "^ple_ngram_embd\\.[0-9]+\\.weight$=CPU",
         "--batch-size",
-        "2048"
+        "2048",
+        "--cache-type-k",
+        "f16",
+        "--cache-type-v",
+        "f16"
       ]
     },
     {

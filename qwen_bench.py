@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.22.1"
+VERSION = "1.22.2"
 SUCCESS_STATES = {"ok"}
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
@@ -514,6 +514,19 @@ def server_command(config: dict[str, Any], tier: dict[str, Any], experiment: dic
     args = canonicalize_server_args(command[1:])
     translations = experiment.get("translate_server_options", {})
     return [command[0], *translate_server_options(args, translations)]
+
+
+def server_arg_compatibility_errors(args: list[str]) -> list[str]:
+    """Reject known llama.cpp option combinations before an expensive model load."""
+    flash_attn = (option_value(args, "--flash-attn") or "auto").lower()
+    cache_v = (option_value(args, "--cache-type-v") or "f16").lower()
+    errors: list[str] = []
+    if flash_attn == "off" and cache_v.startswith("q"):
+        errors.append(
+            f"quantized V cache ({cache_v}) requires flash attention; "
+            "use F16/BF16 V cache or enable flash attention"
+        )
+    return errors
 
 
 def effective_slot_save_path(config: dict[str, Any], tier: dict[str, Any]) -> str:
@@ -1525,6 +1538,9 @@ def preflight(
             if not skip_path_check and not exists:
                 errors.append(f"vision case {case_name}: missing image {image}; run python3 qwen_vision.py fixtures")
     for experiment in experiments:
+        effective_args = server_command(config, tier, experiment)[1:]
+        for error in server_arg_compatibility_errors(effective_args):
+            errors.append(f"{experiment['name']}: {error}")
         for kind in ("server", "model"):
             path = pathlib.Path(str(experiment[kind]))
             entry = {"experiment": experiment["name"], "kind": kind, "path": str(path)}
@@ -2600,6 +2616,12 @@ def self_test() -> None:
         ["--load-mode", "mmap", "--jinja", "--flash-attn", "on"],
         {"--load-mode": {"mmap": ["--mmap"]}},
     ) == ["--mmap", "--jinja", "--flash-attn", "on"]
+    assert server_arg_compatibility_errors([
+        "--flash-attn", "off", "--cache-type-v", "q8_0",
+    ])
+    assert not server_arg_compatibility_errors([
+        "--flash-attn", "off", "--cache-type-v", "f16",
+    ])
     oai = {
         "choices": [{"message": {"content": "A red circle and UNSLOTH 42"}}],
         "timings": {"predicted_n": 16},
@@ -2851,6 +2873,15 @@ def self_test() -> None:
             )), f"{tier_name}: hot tier does not erase slot KV state"
         if cache_state == "cold":
             assert int(tier.get("warmups", 0)) == 0, f"{tier_name}: cold tier has warm-ups"
+    expanded_shipped_config = load_config(pathlib.Path(__file__).with_name("matrix.json"))
+    matched_tier = expanded_shipped_config["tiers"]["backend-smoke-matched"]
+    matched_experiments = select_experiments(expanded_shipped_config, matched_tier, None)
+    assert len(matched_experiments) == 4
+    for experiment in matched_experiments:
+        matched_args = server_command(expanded_shipped_config, matched_tier, experiment)[1:]
+        assert option_value(matched_args, "--cache-type-k") == "f16"
+        assert option_value(matched_args, "--cache-type-v") == "f16"
+        assert not server_arg_compatibility_errors(matched_args)
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 
