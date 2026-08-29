@@ -913,27 +913,63 @@ python3 qwen_inventory.py scan \
 Upload `preflight/qwen-gguf-inventory.tar.gz` for placement analysis; the matching
 `.sha256` sidecar is optional.
 
-Then run the 64K screen. Every candidate holds these production invariants fixed:
-Q8_0 MTP weights on `ROCm0`, draft depth 3, F16 target and draft KV, batch/ubatch
-2048, routed experts on `ROCm1`, joined PLE explicitly CPU-mapped, and
-`--cache-ram 0`. Candidates incrementally move the token embedding, shared experts,
-LM head, and finally the twelve full-attention blocks to the iGPU. The screen exists
-to measure both the freed 7900 XT residency and its prefill/decode cost:
+The measured inventory for the current files is:
+
+| Target family | Exact data span |
+| --- | ---: |
+| PLE | 50.66 GiB |
+| routed experts | 59.77 GiB |
+| attention projections | 1.07 GiB |
+| token embedding | 0.49 GiB |
+| LM head | 0.49 GiB |
+| linear-attention state weights | 0.29 GiB |
+| routers | 0.23 GiB |
+| shared experts | 0.12 GiB |
+
+The Q8_0 MTP sidecar has a 3.84 GiB data section, dominated by 2.49 GiB of
+routed-expert weights plus two 0.63 GiB embedding/output matrices.
+
+The first 64K screen held Q8_0 MTP on `ROCm0`, draft depth 3, F16 target and
+draft KV, batch/ubatch 2048, routed experts on `ROCm1`, CPU-mapped PLE, and
+`--cache-ram 0`:
 
 ```bash
 python3 qwen_bench.py preflight --tier rocm-256k-placement-screen
 ./run-bench.sh --tier rocm-256k-placement-screen
 ```
 
+Run `20260829-143406-rocm-256k-placement-screen` disqualifies the cumulative
+tensor-family strategy. Token embedding migration reduced decode by about 11.5%
+without reducing peak 7900 XT residency. Shared experts saved only about 0.1 GiB,
+reduced 32K decode by 26% and prefill by 14%, and caused the 32K response to follow
+text embedded in the reference corpus instead of the requested coding task. The
+LM-head and full-attention candidates inherited that correctness failure. Linear
+extrapolation of measured request peaks estimates 20.94 GiB at 253952 tokens for
+the base, 19.43 GiB for the shared-plus-output candidate, and 18.90 GiB for the
+largest migration. These are planning estimates, not capacity proofs.
+
+The follow-up therefore leaves token embedding, shared experts, and LM head alone.
+It tests dGPU-first contiguous tail-layer splits. This is the important distinction
+from the old APU-first 82/18 test: `--device ROCm0,ROCm1` keeps most target layers
+on the 7900 XT, while a small tail moves to the iGPU. Routed experts remain
+explicitly on the iGPU, PLE remains CPU-mapped, and MTP remains explicitly on
+`ROCm0`. A successful tail split can free both static target tensors and target KV
+for the moved layers with one contiguous boundary:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-256k-tail-screen
+./run-bench.sh --tier rocm-256k-tail-screen
+```
+
 Do not jump directly from a successful 64K run to the near-full prompt. Select the
-least expensive candidates that leave credible 7900 XT headroom, and prove that a
-single 262144-token slot starts first:
+least expensive tail candidate that leaves credible 7900 XT headroom, and prove
+that a single 262144-token slot starts first:
 
 ```bash
 python3 qwen_bench.py preflight --tier rocm-256k-capacity \
-  --experiments 'prod_hip_256k_token_igpu,prod_hip_256k_token_shared_igpu'
+  --experiments 'prod_hip_256k_tail_88_12,prod_hip_256k_tail_84_16'
 ./run-bench.sh --tier rocm-256k-capacity \
-  --experiments 'prod_hip_256k_token_igpu,prod_hip_256k_token_shared_igpu'
+  --experiments 'prod_hip_256k_tail_88_12,prod_hip_256k_tail_84_16'
 ```
 
 Finally select only allocation-qualified finalists. This performs an exact-token
@@ -942,9 +978,9 @@ window for generation and server overhead:
 
 ```bash
 python3 qwen_bench.py preflight --tier rocm-256k-full \
-  --experiments 'prod_hip_256k_token_shared_igpu'
+  --experiments 'prod_hip_256k_tail_84_16'
 ./run-bench.sh --tier rocm-256k-full \
-  --experiments 'prod_hip_256k_token_shared_igpu'
+  --experiments 'prod_hip_256k_tail_84_16'
 ```
 
 The startup-only tier proves model/context initialization, not populated KV
@@ -954,8 +990,10 @@ the higher-migration fallbacks.
 
 The in-memory prompt-response cache is disabled in every candidate with
 `--cache-ram 0`. Disk-backed prompt caching remains valuable, but `--slot-save-path`
-only enables explicit slot actions; it is not an automatic bounded SSD cache. The
-separate acceptance criteria for adding one are tracked in
+only enables explicit slot actions; it is not an automatic bounded SSD cache. This
+ROCmFPX build now advertises `--cache-disk PATH`, so that specific implementation is
+the future A/B subject after native 256K capacity is established. Its separate
+acceptance criteria are tracked in
 [`FUTURE_TESTS.md`](FUTURE_TESTS.md).
 
 Benchmark the fork-specific Vulkan kernel and prefill knobs on the representative 88/12 placement:

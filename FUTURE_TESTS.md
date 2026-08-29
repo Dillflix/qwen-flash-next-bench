@@ -2,16 +2,22 @@
 
 ## Bounded SSD-backed prompt-response cache
 
-Status: deferred until a genuinely file-backed implementation exists. Production
-controls use `--cache-ram 0`; an 8 GiB anonymous-RAM cache is not an acceptable
-substitute on the 128 GiB unified-memory host.
+Status: deferred until native 256K capacity is proven. Production controls use
+`--cache-ram 0`; an 8 GiB anonymous-RAM cache is not an acceptable substitute on
+the 128 GiB unified-memory host.
 
 The feature is valuable if repeated prompt state can live on SSD and be restored
 without permanently consuming unified RAM. `--slot-save-path` by itself only gives
 the server a directory for explicit slot save/restore actions. It does not establish
 automatic cache lookup, eviction, persistence, or an 8 GiB disk budget.
 
-An implementation is eligible for benchmarking only after it provides:
+The current ROCmFPX server log explicitly advertises `--cache-disk PATH` alongside
+`--cache-ram N`. That makes its native disk cache the implementation to test; it is
+no longer necessary to wait for a new cache implementation. Before adding a matrix
+tier, capture `llama-server --help` for its companion size/eviction flags and verify
+whether the cache includes both target and MTP state.
+
+The native implementation is eligible for production only after it proves:
 
 - a bounded on-disk store with automatic lookup and eviction;
 - cache keys covering model/build identity, sampler-relevant prompt bytes, target

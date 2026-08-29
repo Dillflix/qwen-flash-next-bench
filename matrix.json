@@ -922,16 +922,43 @@
       "startup_timeout_s": 1200,
       "request_timeout_s": 1800
     },
+    "rocm-256k-tail-screen": {
+      "description": "64K follow-up using dGPU-first contiguous tail-layer splits. Routed experts remain on the iGPU, PLE remains CPU-mapped, and n=3 Q8_0 MTP plus F16 draft KV remain fixed on the 7900 XT.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_base",
+        "prod_hip_256k_tail_88_12",
+        "prod_hip_256k_tail_84_16",
+        "prod_hip_256k_tail_76_24"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        4096,
+        32768
+      ],
+      "ctx_size": 65536,
+      "n_predict": 512,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "settle_seconds": 5,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1800
+    },
     "rocm-256k-capacity": {
       "description": "Allocation-only one-slot native-256K screen; use its experiment selector after the 64K placement results identify candidates.",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
       "experiments": [
         "prod_hip_256k_base",
-        "prod_hip_256k_token_igpu",
-        "prod_hip_256k_token_shared_igpu",
-        "prod_hip_256k_token_shared_output_igpu",
-        "prod_hip_256k_token_shared_output_fullattn_igpu"
+        "prod_hip_256k_tail_88_12",
+        "prod_hip_256k_tail_84_16",
+        "prod_hip_256k_tail_76_24"
       ],
       "workloads": [
         "code"
@@ -956,10 +983,9 @@
       "cache_state": "hot",
       "experiments": [
         "prod_hip_256k_base",
-        "prod_hip_256k_token_igpu",
-        "prod_hip_256k_token_shared_igpu",
-        "prod_hip_256k_token_shared_output_igpu",
-        "prod_hip_256k_token_shared_output_fullattn_igpu"
+        "prod_hip_256k_tail_88_12",
+        "prod_hip_256k_tail_84_16",
+        "prod_hip_256k_tail_76_24"
       ],
       "workloads": [
         "code"
@@ -2275,6 +2301,33 @@
       "args_append": [
         "--override-tensor",
         "^blk\\.[0-9]+\\.ffn_(down|gate|up)_(exps|shexp)\\.weight$=ROCm1,^blk\\.[0-9]+\\.ffn_gate_inp_shexp\\.weight$=ROCm1,^blk\\.(3|7|11|15|19|23|27|31|35|39|43|47)\\..*=ROCm1,^token_embd\\.weight$=ROCm1,^output\\.weight$=ROCm1,^per_layer_token_embd\\.weight$=CPU"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_88_12",
+      "description": "Production base with a dGPU-first 88/12 contiguous layer split. This should move only the tail target layers and their target KV to the iGPU; MTP remains explicitly on ROCm0.",
+      "extends": "prod_hip_256k_base",
+      "args_append": [
+        "--tensor-split",
+        "88,12"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_84_16",
+      "description": "Production base with a dGPU-first 84/16 contiguous layer split for additional static and target-KV headroom.",
+      "extends": "prod_hip_256k_base",
+      "args_append": [
+        "--tensor-split",
+        "84,16"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_76_24",
+      "description": "Capacity-safe production fallback with a dGPU-first 76/24 contiguous layer split; MTP remains on ROCm0 and routed experts remain on ROCm1.",
+      "extends": "prod_hip_256k_base",
+      "args_append": [
+        "--tensor-split",
+        "76,24"
       ]
     },
     {

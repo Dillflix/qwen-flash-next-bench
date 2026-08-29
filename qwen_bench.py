@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.29.0"
+VERSION = "1.30.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -3140,51 +3140,65 @@ def self_test() -> None:
     rocm_ple_override = option_value(rocm_ple_args[1], "--override-tensor") or ""
     assert "ffn_(down|gate|up)_exps" in rocm_ple_override
     assert "per_layer_token_embd" in rocm_ple_override and "=CPU" in rocm_ple_override
-    production_names = [
+    placement_names = [
         "prod_hip_256k_base",
         "prod_hip_256k_token_igpu",
         "prod_hip_256k_token_shared_igpu",
         "prod_hip_256k_token_shared_output_igpu",
         "prod_hip_256k_token_shared_output_fullattn_igpu",
     ]
+    tail_names = [
+        "prod_hip_256k_base",
+        "prod_hip_256k_tail_88_12",
+        "prod_hip_256k_tail_84_16",
+        "prod_hip_256k_tail_76_24",
+    ]
     placement_screen = expanded_shipped_config["tiers"]["rocm-256k-placement-screen"]
+    tail_screen = expanded_shipped_config["tiers"]["rocm-256k-tail-screen"]
     capacity_screen = expanded_shipped_config["tiers"]["rocm-256k-capacity"]
     full_context = expanded_shipped_config["tiers"]["rocm-256k-full"]
-    assert placement_screen["experiments"] == production_names
-    assert capacity_screen["experiments"] == production_names
-    assert full_context["experiments"] == production_names
+    assert placement_screen["experiments"] == placement_names
+    assert tail_screen["experiments"] == tail_names
+    assert capacity_screen["experiments"] == tail_names
+    assert full_context["experiments"] == tail_names
     assert int(placement_screen["ctx_size"]) == 65536
+    assert int(tail_screen["ctx_size"]) == 65536
     assert int(capacity_screen["ctx_size"]) == 262144
     assert capacity_screen.get("startup_only") is True
     assert int(capacity_screen["warmups"]) == 0
     assert int(full_context["ctx_size"]) == 262144
     assert full_context.get("exact_prompt_tokens") is True
     assert max(int(value) for value in full_context["depths"]) == 253952
-    production_experiments = select_experiments(
+    placement_experiments = select_experiments(
         expanded_shipped_config, placement_screen, None,
     )
-    for experiment in production_experiments:
-        args = server_command(expanded_shipped_config, placement_screen, experiment)[1:]
-        assert option_value(args, "--cache-ram") == "0"
-        assert option_value(args, "--batch-size") == "2048"
-        assert option_value(args, "--ubatch-size") == "2048"
-        assert option_value(args, "--parallel") == "1"
-        assert option_value(args, "--cache-type-k") == "f16"
-        assert option_value(args, "--cache-type-v") == "f16"
-        assert option_value(args, "--spec-draft-type-k") == "f16"
-        assert option_value(args, "--spec-draft-type-v") == "f16"
-        assert option_value(args, "--spec-draft-device") == "ROCm0"
-        assert option_value(args, "--spec-draft-n-max") == "3"
-        assert "--no-kv-unified" in args and "--cont-batching" in args
-        override = option_value(args, "--override-tensor") or ""
-        assert (
-            "ffn_(down|gate|up)_exps" in override
-            or "ffn_(down|gate|up)_(exps|shexp)" in override
-        ) and "=ROCm1" in override
-        assert "per_layer_token_embd" in override and "=CPU" in override
+    tail_experiments = select_experiments(expanded_shipped_config, tail_screen, None)
+    for tier, experiments in (
+        (placement_screen, placement_experiments),
+        (tail_screen, tail_experiments),
+    ):
+        for experiment in experiments:
+            args = server_command(expanded_shipped_config, tier, experiment)[1:]
+            assert option_value(args, "--cache-ram") == "0"
+            assert option_value(args, "--batch-size") == "2048"
+            assert option_value(args, "--ubatch-size") == "2048"
+            assert option_value(args, "--parallel") == "1"
+            assert option_value(args, "--cache-type-k") == "f16"
+            assert option_value(args, "--cache-type-v") == "f16"
+            assert option_value(args, "--spec-draft-type-k") == "f16"
+            assert option_value(args, "--spec-draft-type-v") == "f16"
+            assert option_value(args, "--spec-draft-device") == "ROCm0"
+            assert option_value(args, "--spec-draft-n-max") == "3"
+            assert "--no-kv-unified" in args and "--cont-batching" in args
+            override = option_value(args, "--override-tensor") or ""
+            assert (
+                "ffn_(down|gate|up)_exps" in override
+                or "ffn_(down|gate|up)_(exps|shexp)" in override
+            ) and "=ROCm1" in override
+            assert "per_layer_token_embd" in override and "=CPU" in override
     production_overrides = [
         option_value(server_command(expanded_shipped_config, placement_screen, item)[1:], "--override-tensor") or ""
-        for item in production_experiments
+        for item in placement_experiments
     ]
     assert "^token_embd\\.weight" not in production_overrides[0]
     assert "^token_embd\\.weight" in production_overrides[1]
@@ -3192,6 +3206,14 @@ def self_test() -> None:
     assert "output" in production_overrides[3]
     assert "output" in production_overrides[4]
     assert "3|7|11|15|19|23|27|31|35|39|43|47" in production_overrides[4]
+    tail_args = [
+        server_command(expanded_shipped_config, tail_screen, item)[1:]
+        for item in tail_experiments
+    ]
+    assert all(option_value(args, "--device") == "ROCm0,ROCm1" for args in tail_args)
+    assert [option_value(args, "--tensor-split") for args in tail_args] == [
+        "1,0", "88,12", "84,16", "76,24",
+    ]
     rocm_vision_smoke = expanded_shipped_config["tiers"]["rocm-vision-smoke"]
     assert rocm_vision_smoke.get("mode") == "vision"
     assert rocm_vision_smoke.get("require_rocm_audit") is True
@@ -3224,6 +3246,7 @@ def self_test() -> None:
     for tier_name in (
         "rocm-ple-ssd",
         "rocm-256k-placement-screen",
+        "rocm-256k-tail-screen",
         "rocm-256k-capacity",
         "rocm-256k-full",
         "rocm-vision-smoke",
