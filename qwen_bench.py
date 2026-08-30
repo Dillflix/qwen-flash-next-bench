@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.45.0"
+VERSION = "1.45.1"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -4824,10 +4824,13 @@ def self_test() -> None:
     assert QWEN4EXP_PLE_ROLLBACK_MARKER in production_launcher_text
     assert MTP_VERIFIER_STATE_MARKER in production_launcher_text
     assert 'command+=(' in production_launcher_text
+    assert 'slot_save_path="${LLAMA_SLOT_SAVE_PATH:-}"' in production_launcher_text
+    assert 'command+=(--slot-save-path "$slot_save_path")' in production_launcher_text
     production_env = (
         pathlib.Path(__file__).with_name("deployment") / "qwen-flash-next.env.example"
     ).read_text(encoding="utf-8")
     assert "LLAMA_MTP_MODE=off" in production_env
+    assert "LLAMA_SLOT_SAVE_PATH=" in production_env
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 

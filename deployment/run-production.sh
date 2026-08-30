@@ -19,6 +19,10 @@ are accepted by llama-server. Use --check to validate without starting it.
 MTP is disabled by default because long agentic text responses failed the
 target-only equivalence check. LLAMA_MTP_MODE=strict is an experimental opt-in
 that requires the patched Qwen4Exp state-correctness and strict-verification runtime.
+
+Set LLAMA_SLOT_SAVE_PATH to an existing writable absolute directory only for
+diagnostics that use the slots erase endpoint. It is empty by default because
+production does not import or persist slot state.
 EOF
 }
 
@@ -86,6 +90,7 @@ threads="${THREADS:-16}"
 target_split="${TARGET_SPLIT:-88,12}"
 require_auto_vision_bypass="${REQUIRE_AUTO_VISION_BYPASS:-1}"
 mtp_mode="${LLAMA_MTP_MODE:-off}"
+slot_save_path="${LLAMA_SLOT_SAVE_PATH:-}"
 
 api_key="${api_key_override:-${LLAMA_API_KEY:-${QWEN_API_KEY:-${API_KEY:-}}}}"
 api_key_file="${api_key_file_override:-${LLAMA_ARG_API_KEY_FILE:-}}"
@@ -121,6 +126,16 @@ fi
 if [[ "$mtp_mode" != "off" && "$mtp_mode" != "strict" ]]; then
     echo "LLAMA_MTP_MODE must be 'off' or 'strict'" >&2
     exit 64
+fi
+if [[ -n "$slot_save_path" ]]; then
+    if [[ "$slot_save_path" != /* ]]; then
+        echo "LLAMA_SLOT_SAVE_PATH must be an absolute path" >&2
+        exit 64
+    fi
+    if [[ ! -d "$slot_save_path" || ! -w "$slot_save_path" ]]; then
+        echo "LLAMA_SLOT_SAVE_PATH must be an existing writable directory: $slot_save_path" >&2
+        exit 66
+    fi
 fi
 
 if [[ ! -x "$llama_server" ]]; then
@@ -213,8 +228,10 @@ if (( check_only )); then
     auth_mode="none (loopback only)"
     [[ -n "$api_key" ]] && auth_mode="API key"
     [[ -n "$api_key_file" ]] && auth_mode="API-key file"
-    printf 'Production configuration valid: ROCm, 1x256K, split %s, ubatch 1536, MTP: %s, auth: %s\n' \
-        "$target_split" "$mtp_mode" "$auth_mode"
+    slot_mode="disabled"
+    [[ -n "$slot_save_path" ]] && slot_mode="$slot_save_path"
+    printf 'Production configuration valid: ROCm, 1x256K, split %s, ubatch 1536, MTP: %s, auth: %s, slot actions: %s\n' \
+        "$target_split" "$mtp_mode" "$auth_mode" "$slot_mode"
     exit 0
 fi
 
@@ -265,6 +282,10 @@ if [[ "$mtp_mode" == "strict" ]]; then
         --spec-draft-type-v f16
         --spec-mtp-strict-qwen
     )
+fi
+
+if [[ -n "$slot_save_path" ]]; then
+    command+=(--slot-save-path "$slot_save_path")
 fi
 
 exec "${command[@]}"

@@ -43,7 +43,7 @@ jobs:
           LLAMA_SERVER=/bin/true \
           MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
           ROCM_PATH=/usr HIP_PATH=/usr REQUIRE_AUTO_VISION_BYPASS=0 \
-          LLAMA_HOST=0.0.0.0 LLAMA_API_KEY=test-key \
+          LLAMA_HOST=0.0.0.0 LLAMA_API_KEY=test-key LLAMA_SLOT_SAVE_PATH=/tmp \
             deployment/run-production.sh --check
           LLAMA_SERVER=/bin/true \
           MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
@@ -55,6 +55,14 @@ jobs:
              LLAMA_HOST=0.0.0.0 \
                deployment/run-production.sh --check; then
             echo "non-loopback unauthenticated launch unexpectedly passed" >&2
+            exit 1
+          fi
+          if LLAMA_SERVER=/bin/true \
+             MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
+             ROCM_PATH=/usr HIP_PATH=/usr REQUIRE_AUTO_VISION_BYPASS=0 \
+             LLAMA_HOST=127.0.0.1 LLAMA_SLOT_SAVE_PATH=relative/path \
+               deployment/run-production.sh --check; then
+            echo "relative slot-save path unexpectedly passed" >&2
             exit 1
           fi
 

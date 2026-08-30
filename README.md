@@ -659,6 +659,11 @@ and rejects target splits other than the qualified 88/12 layout. It also pins
 the process to `/opt/rocm-10.0.0` by default so systemd cannot resolve a different
 host ROCm installation.
 
+`LLAMA_SLOT_SAVE_PATH` is empty by default. The strict MTP diagnostic requires
+an existing writable absolute directory there because it erases slot 0 before
+every request. Do not set it for normal production: the qualified topology
+does not import or persist slot state.
+
 `LLAMA_MTP_MODE=off` is the safe default in the checked-in environment file.
 There is an explicit experimental `LLAMA_MTP_MODE=strict` mode which loads the
 Q8_0 sidecar on the RX 7900 XT, enables n=3 with F16 draft KV, and requires the
@@ -725,6 +730,15 @@ token mismatch to be correlated with the responsible verification cycle. The
 runner parses each request-scoped canonical `accepted X/Y draft tokens` trace
 line into structured evidence. It excludes the later debug-only
 `new n_tokens` summary for that same cycle, so event counts are not doubled.
+The diagnostic also erases slot 0 before every matrix cell. Create a private
+temporary directory and set `LLAMA_SLOT_SAVE_PATH` when launching either
+diagnostic server; the launcher then passes the required `--slot-save-path`
+without enabling slot persistence in normal production:
+
+```bash
+install -d -m0700 /tmp/qwen-mtp-diag-slots
+export LLAMA_SLOT_SAVE_PATH=/tmp/qwen-mtp-diag-slots
+```
 
 Run a one-pass smoke against a foreground server whose stdout/stderr is also
 being written to a file:
