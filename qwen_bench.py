@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.45.1"
+VERSION = "1.45.2"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -4818,8 +4818,11 @@ def self_test() -> None:
     production_launcher = pathlib.Path(__file__).with_name("deployment") / "run-production.sh"
     production_launcher_text = production_launcher.read_text(encoding="utf-8")
     assert 'mtp_mode="${LLAMA_MTP_MODE:-off}"' in production_launcher_text
+    assert 'context_size="${LLAMA_CONTEXT_SIZE:-262144}"' in production_launcher_text
     assert '[[ "$mtp_mode" == "strict" ]]' in production_launcher_text
+    assert "checkpoint-diagnostic" in production_launcher_text
     assert "--spec-mtp-strict-qwen" in production_launcher_text
+    assert "--spec-mtp-strict-qwen4exp-vision" in production_launcher_text
     assert QWEN4EXP_MTP_ROLLBACK_MARKER in production_launcher_text
     assert QWEN4EXP_PLE_ROLLBACK_MARKER in production_launcher_text
     assert MTP_VERIFIER_STATE_MARKER in production_launcher_text
@@ -4830,6 +4833,7 @@ def self_test() -> None:
         pathlib.Path(__file__).with_name("deployment") / "qwen-flash-next.env.example"
     ).read_text(encoding="utf-8")
     assert "LLAMA_MTP_MODE=off" in production_env
+    assert "LLAMA_CONTEXT_SIZE=262144" in production_env
     assert "LLAMA_SLOT_SAVE_PATH=" in production_env
     print(f"qwen_bench.py {VERSION}: self-test passed")
 

@@ -17,8 +17,10 @@ not copied into the llama-server command line. Multiple comma-separated keys
 are accepted by llama-server. Use --check to validate without starting it.
 
 MTP is disabled by default because long agentic text responses failed the
-target-only equivalence check. LLAMA_MTP_MODE=strict is an experimental opt-in
-that requires the patched Qwen4Exp state-correctness and strict-verification runtime.
+target-only equivalence check. LLAMA_MTP_MODE=strict is the experimental
+multi-row/bounded-rollback path. LLAMA_MTP_MODE=checkpoint-diagnostic is an
+isolation arm that replaces it with single-row verification and full-state
+checkpoints. Neither mode is production-qualified.
 
 Set LLAMA_SLOT_SAVE_PATH to an existing writable absolute directory only for
 diagnostics that use the slots erase endpoint. It is empty by default because
@@ -88,6 +90,7 @@ listen_host="${LLAMA_HOST:-127.0.0.1}"
 listen_port="${LLAMA_PORT:-8080}"
 threads="${THREADS:-16}"
 target_split="${TARGET_SPLIT:-88,12}"
+context_size="${LLAMA_CONTEXT_SIZE:-262144}"
 require_auto_vision_bypass="${REQUIRE_AUTO_VISION_BYPASS:-1}"
 mtp_mode="${LLAMA_MTP_MODE:-off}"
 slot_save_path="${LLAMA_SLOT_SAVE_PATH:-}"
@@ -115,6 +118,10 @@ if [[ ! "$threads" =~ ^[0-9]+$ ]] || (( threads < 1 )); then
     echo "THREADS must be a positive integer" >&2
     exit 64
 fi
+if [[ ! "$context_size" =~ ^[0-9]+$ ]] || (( context_size < 4096 )); then
+    echo "LLAMA_CONTEXT_SIZE must be an integer of at least 4096" >&2
+    exit 64
+fi
 if [[ "$target_split" != "88,12" ]]; then
     echo "TARGET_SPLIT=$target_split is not the allocation-qualified production split (88,12)" >&2
     exit 64
@@ -123,8 +130,17 @@ if [[ "$require_auto_vision_bypass" != "0" && "$require_auto_vision_bypass" != "
     echo "REQUIRE_AUTO_VISION_BYPASS must be 0 or 1" >&2
     exit 64
 fi
-if [[ "$mtp_mode" != "off" && "$mtp_mode" != "strict" ]]; then
-    echo "LLAMA_MTP_MODE must be 'off' or 'strict'" >&2
+case "$mtp_mode" in
+    off|strict|checkpoint-diagnostic) ;;
+    *)
+        echo "LLAMA_MTP_MODE must be 'off', 'strict', or 'checkpoint-diagnostic'" >&2
+        exit 64
+        ;;
+esac
+mtp_enabled=0
+[[ "$mtp_mode" != "off" ]] && mtp_enabled=1
+if [[ "$mtp_mode" != "checkpoint-diagnostic" && "$context_size" != "262144" ]]; then
+    echo "LLAMA_CONTEXT_SIZE=$context_size is diagnostic-only; production and bounded strict require 262144" >&2
     exit 64
 fi
 if [[ -n "$slot_save_path" ]]; then
@@ -153,11 +169,11 @@ for required in "$model" "$mmproj"; do
         exit 66
     fi
 done
-if [[ "$mtp_mode" == "strict" && ! -f "$mtp" ]]; then
+if (( mtp_enabled )) && [[ ! -f "$mtp" ]]; then
     echo "Required MTP model file is missing: $mtp" >&2
     exit 66
 fi
-if [[ "$mtp_mode" == "strict" && "$require_auto_vision_bypass" == "1" ]] &&
+if (( mtp_enabled )) && [[ "$require_auto_vision_bypass" == "1" ]] &&
         ! grep -aFq 'multimodal request detected; speculative decoding disabled automatically' "$llama_server"; then
     echo "llama-server lacks automatic multimodal MTP bypass; rebuild with ./build-rocm10-dual.sh" >&2
     exit 66
@@ -167,25 +183,30 @@ if [[ "$mtp_mode" == "strict" ]] &&
     echo "llama-server lacks Qwen4Exp text strict verification; rebuild with ./build-rocm10-dual.sh" >&2
     exit 66
 fi
-if [[ "$mtp_mode" == "strict" && ! -f "$llama_library" ]]; then
-    echo "Strict MTP requires libllama.so beside the selected server build" >&2
+if [[ "$mtp_mode" == "checkpoint-diagnostic" ]] &&
+        ! grep -aFq 'Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints' "$llama_server"; then
+    echo "llama-server lacks Qwen4Exp checkpoint-backed verification; rebuild with ./build-rocm10-dual.sh" >&2
     exit 66
 fi
-if [[ "$mtp_mode" == "strict" && ! -f "$common_library" ]]; then
-    echo "Strict MTP requires libllama-common.so beside the selected server build" >&2
+if (( mtp_enabled )) && [[ ! -f "$llama_library" ]]; then
+    echo "MTP diagnostics require libllama.so beside the selected server build" >&2
     exit 66
 fi
-if [[ "$mtp_mode" == "strict" ]] &&
+if (( mtp_enabled )) && [[ ! -f "$common_library" ]]; then
+    echo "MTP diagnostics require libllama-common.so beside the selected server build" >&2
+    exit 66
+fi
+if (( mtp_enabled )) &&
         ! grep -aFq 'qwen4exp recurrent conv rollback snapshots enabled' "$llama_library"; then
     echo "libllama.so lacks Qwen4Exp recurrent rollback snapshots; rebuild with ./build-rocm10-dual.sh" >&2
     exit 66
 fi
-if [[ "$mtp_mode" == "strict" ]] &&
+if (( mtp_enabled )) &&
         ! grep -aFq 'non-consecutive Qwen4Exp PLE history position' "$llama_library"; then
     echo "libllama.so lacks rollback-aware Qwen4Exp PLE history; rebuild with ./build-rocm10-dual.sh" >&2
     exit 66
 fi
-if [[ "$mtp_mode" == "strict" ]] &&
+if (( mtp_enabled )) &&
         ! grep -aFq 'MTP verifier state-correctness patch active' "$common_library"; then
     echo "libllama-common.so lacks the MTP verifier state fix; rebuild with ./build-rocm10-dual.sh" >&2
     exit 66
@@ -201,7 +222,7 @@ case "${LD_LIBRARY_PATH:-}" in
 esac
 export LLAMA_CKPT_FORCE_HOST=1
 export MTMD_BACKEND_DEVICE=ROCm1
-if [[ "$mtp_mode" == "strict" ]]; then
+if (( mtp_enabled )); then
     export LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL=1
 else
     unset LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL
@@ -230,8 +251,8 @@ if (( check_only )); then
     [[ -n "$api_key_file" ]] && auth_mode="API-key file"
     slot_mode="disabled"
     [[ -n "$slot_save_path" ]] && slot_mode="$slot_save_path"
-    printf 'Production configuration valid: ROCm, 1x256K, split %s, ubatch 1536, MTP: %s, auth: %s, slot actions: %s\n' \
-        "$target_split" "$mtp_mode" "$auth_mode" "$slot_mode"
+    printf 'Production configuration valid: ROCm, context %s, split %s, ubatch 1536, MTP: %s, auth: %s, slot actions: %s\n' \
+        "$context_size" "$target_split" "$mtp_mode" "$auth_mode" "$slot_mode"
     exit 0
 fi
 
@@ -240,7 +261,7 @@ command=(
     -m "$model" \
     --host "$listen_host" \
     --port "$listen_port" \
-    --ctx-size 262144 \
+    --ctx-size "$context_size" \
     --parallel 1 \
     --no-kv-unified \
     --cont-batching \
@@ -270,7 +291,7 @@ command=(
     --metrics
 )
 
-if [[ "$mtp_mode" == "strict" ]]; then
+if (( mtp_enabled )); then
     command+=(
         -md "$mtp"
         --spec-draft-device ROCm0
@@ -280,8 +301,15 @@ if [[ "$mtp_mode" == "strict" ]]; then
         --spec-draft-p-min 0.75
         --spec-draft-type-k f16
         --spec-draft-type-v f16
-        --spec-mtp-strict-qwen
     )
+    if [[ "$mtp_mode" == "strict" ]]; then
+        command+=(--spec-mtp-strict-qwen)
+    else
+        # Despite the upstream-facing flag name, this branch is selected by
+        # speculative verifier rows, not by request media. With mmproj loaded
+        # it is therefore a valid text isolation arm: ubatch=1 + full checkpoints.
+        command+=(--spec-mtp-strict-qwen4exp-vision)
+    fi
 fi
 
 if [[ -n "$slot_save_path" ]]; then

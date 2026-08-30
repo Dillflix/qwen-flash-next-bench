@@ -672,6 +672,22 @@ systemd environment until its output matches the target-only control on the
 same long OpenWebUI/tool-calling prompts; acceptance rate and token throughput
 are not correctness tests.
 
+`LLAMA_MTP_MODE=checkpoint-diagnostic` loads the same sidecar and placement but
+replaces bounded recurrent rollback and multi-row target verification with the
+already compiled single-row/full-checkpoint path. The internal llama-server
+flag retains `vision` in its name, but its single-row decision is based on
+speculative verifier rows rather than request media, so it also applies to this
+text diagnostic while mmproj is loaded. This is an isolation arm, not a proposed
+production setting: if it restores exact n=0/n=1 equivalence, the remaining
+fault is in bounded rollback or batched target verification; if it still
+diverges, those two mechanisms are not the cause.
+`LLAMA_CONTEXT_SIZE` remains fixed at `262144` in production and bounded strict
+mode. Only `checkpoint-diagnostic` may lower it; the short isolation command
+uses 8192 because its prompt is about 2106 tokens and every known divergence is
+before generated token 142. Its n=0 control is run in the same process, so this
+reduces full-state checkpoint cost without weakening the within-run equality
+test.
+
 Disabling MTP is containment, not the proposed backend fix. The candidate source
 fix is `rocmfpx-qwen4exp-mtp-state-correctness.patch`; it repairs rollback-aware
 PLE token history, Qwen4Exp recurrent-convolution snapshots, complete verifier
@@ -782,6 +798,56 @@ python3 qwen_mtp_diag.py reclassify results/REPLACE-mtp-diagnostic-run
 
 This writes `comparisons-reclassified.json` and `summary-reclassified.md` while
 preserving the original evidence and report.
+
+To run the first rollback-versus-batch-shape discriminator, start the diagnostic
+server exactly as before except for the mode override:
+
+```bash
+sudo systemctl stop qwen-flash-next
+tmux kill-session -t qwen-mtp-strict 2>/dev/null || true
+install -d -m0700 /tmp/qwen-mtp-diag-slots
+: > /tmp/qwen-mtp-checkpoint-server.log
+
+tmux new-session -d -s qwen-mtp-checkpoint \
+  "bash -lc 'cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench; set -a; source /etc/qwen-flash-next.env; set +a; export LLAMA_MTP_MODE=checkpoint-diagnostic LLAMA_CONTEXT_SIZE=8192 LLAMA_TRACE=1 LLAMA_LOG_VERBOSITY=4 LLAMA_SLOT_SAVE_PATH=/tmp/qwen-mtp-diag-slots; exec ./deployment/run-production.sh >>/tmp/qwen-mtp-checkpoint-server.log 2>&1'"
+
+for _ in {1..60}; do
+  grep -q "listening on" /tmp/qwen-mtp-checkpoint-server.log && break
+  tmux has-session -t qwen-mtp-checkpoint 2>/dev/null || {
+    tail -n 100 /tmp/qwen-mtp-checkpoint-server.log
+    exit 1
+  }
+  sleep 5
+done
+grep -q "listening on" /tmp/qwen-mtp-checkpoint-server.log || {
+  tail -n 100 /tmp/qwen-mtp-checkpoint-server.log
+  echo "checkpoint diagnostic server did not become ready within 300 seconds" >&2
+  exit 1
+}
+```
+
+Run the 256-token matrix and package it:
+
+```bash
+read -rsp "API key: " QWEN_TEST_API_KEY
+echo
+export QWEN_TEST_API_KEY
+python3 qwen_mtp_diag.py run \
+  --url http://127.0.0.1:8080 \
+  --server-label checkpoint-short \
+  --server-log /tmp/qwen-mtp-checkpoint-server.log \
+  --max-tokens 256
+unset QWEN_TEST_API_KEY
+
+RUN=$(ls -dt results/*-mtp-diagnostic-checkpoint-short | head -1)
+python3 qwen_bench.py archive "$RUN"
+
+tmux kill-session -t qwen-mtp-checkpoint
+sudo systemctl start qwen-flash-next
+```
+
+Do not combine the bounded strict and checkpoint flags; the launcher
+deliberately selects exactly one.
 
 For final qualification, first run the same three-repeat matrix against a
 target-only server and retain its result directory. Then run the strict
