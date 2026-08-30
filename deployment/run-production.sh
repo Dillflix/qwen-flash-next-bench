@@ -15,6 +15,10 @@ Authentication priority:
 The API key is passed to llama-server through its native environment variable,
 not copied into the llama-server command line. Multiple comma-separated keys
 are accepted by llama-server. Use --check to validate without starting it.
+
+MTP is disabled by default because long agentic text responses failed the
+target-only equivalence check. LLAMA_MTP_MODE=strict is an experimental opt-in
+that requires the patched Qwen4Exp strict-verification runtime.
 EOF
 }
 
@@ -81,6 +85,7 @@ listen_port="${LLAMA_PORT:-8080}"
 threads="${THREADS:-16}"
 target_split="${TARGET_SPLIT:-88,12}"
 require_auto_vision_bypass="${REQUIRE_AUTO_VISION_BYPASS:-1}"
+mtp_mode="${LLAMA_MTP_MODE:-off}"
 
 api_key="${api_key_override:-${LLAMA_API_KEY:-${QWEN_API_KEY:-${API_KEY:-}}}}"
 api_key_file="${api_key_file_override:-${LLAMA_ARG_API_KEY_FILE:-}}"
@@ -113,20 +118,33 @@ if [[ "$require_auto_vision_bypass" != "0" && "$require_auto_vision_bypass" != "
     echo "REQUIRE_AUTO_VISION_BYPASS must be 0 or 1" >&2
     exit 64
 fi
+if [[ "$mtp_mode" != "off" && "$mtp_mode" != "strict" ]]; then
+    echo "LLAMA_MTP_MODE must be 'off' or 'strict'" >&2
+    exit 64
+fi
 
 if [[ ! -x "$llama_server" ]]; then
     echo "llama-server is missing or not executable: $llama_server" >&2
     exit 66
 fi
-for required in "$model" "$mtp" "$mmproj"; do
+for required in "$model" "$mmproj"; do
     if [[ ! -f "$required" ]]; then
         echo "Required model file is missing: $required" >&2
         exit 66
     fi
 done
-if [[ "$require_auto_vision_bypass" == "1" ]] &&
+if [[ "$mtp_mode" == "strict" && ! -f "$mtp" ]]; then
+    echo "Required MTP model file is missing: $mtp" >&2
+    exit 66
+fi
+if [[ "$mtp_mode" == "strict" && "$require_auto_vision_bypass" == "1" ]] &&
         ! grep -aFq 'multimodal request detected; speculative decoding disabled automatically' "$llama_server"; then
     echo "llama-server lacks automatic multimodal MTP bypass; rebuild with ./build-rocm10-dual.sh" >&2
+    exit 66
+fi
+if [[ "$mtp_mode" == "strict" ]] &&
+        ! grep -aFq 'Qwen/Qwen4Exp strict MTP: boundary-safe multi-row verification' "$llama_server"; then
+    echo "llama-server lacks Qwen4Exp text strict verification; rebuild with ./build-rocm10-dual.sh" >&2
     exit 66
 fi
 
@@ -140,7 +158,11 @@ case "${LD_LIBRARY_PATH:-}" in
 esac
 export LLAMA_CKPT_FORCE_HOST=1
 export MTMD_BACKEND_DEVICE=ROCm1
-export LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL=1
+if [[ "$mtp_mode" == "strict" ]]; then
+    export LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL=1
+else
+    unset LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL
+fi
 if [[ -n "$api_key" ]]; then
     export LLAMA_API_KEY="$api_key"
     unset QWEN_API_KEY API_KEY
@@ -163,12 +185,13 @@ if (( check_only )); then
     auth_mode="none (loopback only)"
     [[ -n "$api_key" ]] && auth_mode="API key"
     [[ -n "$api_key_file" ]] && auth_mode="API-key file"
-    printf 'Production configuration valid: ROCm, 1x256K, split %s, ubatch 1536, auth: %s\n' \
-        "$target_split" "$auth_mode"
+    printf 'Production configuration valid: ROCm, 1x256K, split %s, ubatch 1536, MTP: %s, auth: %s\n' \
+        "$target_split" "$mtp_mode" "$auth_mode"
     exit 0
 fi
 
-exec "$llama_server" \
+command=(
+    "$llama_server"
     -m "$model" \
     --host "$listen_host" \
     --port "$listen_port" \
@@ -193,14 +216,6 @@ exec "$llama_server" \
     --batch-size 2048 \
     --ubatch-size 1536 \
     --cache-ram 0 \
-    -md "$mtp" \
-    --spec-draft-device ROCm0 \
-    --spec-draft-ngl 999 \
-    --spec-type draft-mtp \
-    --spec-draft-n-max 3 \
-    --spec-draft-p-min 0.75 \
-    --spec-draft-type-k f16 \
-    --spec-draft-type-v f16 \
     --mmproj "$mmproj" \
     --image-min-tokens 1024 \
     --image-max-tokens 2240 \
@@ -208,3 +223,20 @@ exec "$llama_server" \
     --threads "$threads" \
     --jinja \
     --metrics
+)
+
+if [[ "$mtp_mode" == "strict" ]]; then
+    command+=(
+        -md "$mtp"
+        --spec-draft-device ROCm0
+        --spec-draft-ngl 999
+        --spec-type draft-mtp
+        --spec-draft-n-max 3
+        --spec-draft-p-min 0.75
+        --spec-draft-type-k f16
+        --spec-draft-type-v f16
+        --spec-mtp-strict-qwen
+    )
+fi
+
+exec "${command[@]}"

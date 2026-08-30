@@ -248,15 +248,18 @@ The first follow-up server patch made request-level disabling complete. When the
 request's effective `speculative.n_max` was zero it suppressed speculative target
 embeddings, pre-normalized hidden-state output, and post-processing; restored
 backend sampling; and prevented enabled and disabled requests from sharing the
-same target batch. MTP state is still cleared safely on slot reset, and text
-requests with n=3 are unchanged. The resulting A/B proved the target-only path,
-but requiring every caller to know this backend detail is not a production API.
+same target batch. MTP state is still cleared safely on slot reset. At that
+point text requests with n=3 were intentionally unchanged; later long agentic
+testing showed that path was not production-safe. The resulting vision A/B
+proved the target-only path, but requiring every caller to know this backend
+detail is not a production API.
 
 Version 1.43 moves the decision into the server scheduler under the production
 `LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL=1` policy. It detects actual media chunks in
 the incoming prompt, forces that request's draft budget to zero before
 sampler/graph setup, and emits an automatic
-bypass marker. Text-only requests retain n=3 MTP. The A/B deliberately sends no
+bypass marker. This remains useful to experimental MTP servers; the production
+launcher now disables MTP for all requests. The A/B deliberately sends no
 `speculative.n_max` field, so it fails if client knowledge is still required:
 
 ```bash
@@ -612,14 +615,18 @@ allocations rather than process RSS alone.
 
 ### Qualified ROCm production deployment
 
-The checked-in launcher now reproduces the configuration that actually passed
-the 256K allocation, near-full-context, text-MTP, and vision qualification:
+The checked-in launcher reproduces the configuration that passed 256K
+allocation, near-full-context, and vision qualification. It now defaults to
+**target-only text generation** because a real long agentic prompt produced a
+complete, coherent response with `speculative.n_max=0` but structurally corrupt
+output with n=3. The earlier throughput and short-prompt MTP runs did not prove
+lossless generation and are not sufficient production qualification.
 
 - joined ROCmFP4 model with its 51.2B PLE tensor CPU-mapped;
 - ROCm devices ordered `ROCm0,ROCm1`, with an 88/12 target split and routed
   experts forced to the iGPU;
-- one 262,144-token slot, F16 target/draft KV, batch 2048, and ubatch 1536;
-- Q8_0 MTP n=3 on the RX 7900 XT;
+- one 262,144-token slot, F16 target KV, batch 2048, and ubatch 1536;
+- MTP disabled by default, leaving the Q8_0 sidecar unloaded;
 - eight host-resident prompt checkpoints at 32K-token intervals;
 - BF16 projector on the iGPU; and
 - no prompt-response RAM cache and no context shifting.
@@ -652,14 +659,20 @@ and rejects target splits other than the qualified 88/12 layout. It also pins
 the process to `/opt/rocm-10.0.0` by default so systemd cannot resolve a different
 host ROCm installation.
 
-First rebuild and audit the server with automatic media routing. The launcher
-will refuse to start an older binary that lacks the compiled marker:
+`LLAMA_MTP_MODE=off` is the safe default in the checked-in environment file.
+There is an explicit experimental `LLAMA_MTP_MODE=strict` mode which loads the
+Q8_0 sidecar on the RX 7900 XT, enables n=3 with F16 draft KV, and requires the
+patched boundary-safe Qwen4Exp verification marker. Do not enable it in the
+systemd environment until its output matches the target-only control on the
+same long OpenWebUI/tool-calling prompts; acceptance rate and token throughput
+are not correctness tests.
+
+Rebuild and audit the server normally. The target-only launcher does not require
+the experimental MTP marker; strict mode will refuse to start without it:
 
 ```bash
 ./build-rocm10-dual.sh
 python3 qwen_bench.py rocm-audit --run-ops
-python3 qwen_bench.py preflight --tier rocm-vision-mtp-auto-bypass-ab
-./run-bench.sh --tier rocm-vision-mtp-auto-bypass-ab --fail-fast
 ```
 
 Then install the launcher, configuration, and hardened systemd unit:
@@ -702,10 +715,10 @@ encrypt traffic. If binding directly to another interface, set both
 connect while the log says the server is listening on `127.0.0.1`; use the
 host's LAN/Tailscale address or `0.0.0.0` when direct remote access is intended.
 
-Vision clients send normal OpenAI-compatible multimodal requests. The server
-detects media and selects the target-only vision path automatically; callers do
-not send `speculative.n_max` or need to know that MTP exists. Text requests keep
-n=3 MTP. Metrics remain available at `/metrics`.
+Vision clients send normal OpenAI-compatible multimodal requests. With the safe
+production default, both text and vision are target-only, so callers do not send
+`speculative.n_max` or need to know that an experimental MTP mode exists.
+Metrics remain available at `/metrics`.
 
 ### Historical, unqualified two-user Vulkan work
 

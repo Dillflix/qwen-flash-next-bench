@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.43.0"
+VERSION = "1.44.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -49,6 +49,7 @@ HOST_CHECKPOINT_MARKER = "LLAMA_CKPT_FORCE_HOST"
 MTP_VISION_RESYNC_MARKER = "MTP multimodal resync: skipping direct image decode"
 QWEN4EXP_VISION_STRICT_MARKER = "Qwen4Exp vision MTP: single-row target verification enabled"
 QWEN4EXP_VISION_CHECKPOINT_MARKER = "Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints"
+QWEN4EXP_TEXT_STRICT_MARKER = "Qwen/Qwen4Exp strict MTP: boundary-safe multi-row verification"
 REQUEST_SPEC_BYPASS_MARKER = "speculative decoding disabled for request; target hidden-state export bypassed"
 AUTO_MTMD_SPEC_BYPASS_MARKER = "multimodal request detected; speculative decoding disabled automatically"
 SINGLE_VALUE_SERVER_OPTIONS = {
@@ -1620,6 +1621,9 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["server"]["qwen4exp_vision_checkpoint_marker"] = (
                 QWEN4EXP_VISION_CHECKPOINT_MARKER.encode("ascii") in server.read_bytes()
             )
+            result["server"]["qwen4exp_text_strict_marker"] = (
+                QWEN4EXP_TEXT_STRICT_MARKER.encode("ascii") in server.read_bytes()
+            )
             result["server"]["request_spec_bypass_marker"] = (
                 REQUEST_SPEC_BYPASS_MARKER.encode("ascii") in server.read_bytes()
             )
@@ -1630,12 +1634,14 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["server"]["mtp_vision_resync_marker"] = False
             result["server"]["qwen4exp_vision_strict_marker"] = False
             result["server"]["qwen4exp_vision_checkpoint_marker"] = False
+            result["server"]["qwen4exp_text_strict_marker"] = False
             result["server"]["request_spec_bypass_marker"] = False
             result["server"]["auto_mtmd_spec_bypass_marker"] = False
     else:
         result["server"]["mtp_vision_resync_marker"] = False
         result["server"]["qwen4exp_vision_strict_marker"] = False
         result["server"]["qwen4exp_vision_checkpoint_marker"] = False
+        result["server"]["qwen4exp_text_strict_marker"] = False
         result["server"]["request_spec_bypass_marker"] = False
         result["server"]["auto_mtmd_spec_bypass_marker"] = False
     return result
@@ -4668,6 +4674,12 @@ def self_test() -> None:
     assert QWEN4EXP_VISION_CHECKPOINT_MARKER in mtp_vision_checkpoint_patch_text
     assert "mtp_strict_qwen4exp_vision ? 0" in mtp_vision_checkpoint_patch_text
     assert "--spec-mtp-strict-qwen4exp-vision" in mtp_vision_checkpoint_patch_text
+    mtp_text_strict_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-qwen4exp-text-strict.patch"
+    assert mtp_text_strict_patch.is_file()
+    mtp_text_strict_patch_text = mtp_text_strict_patch.read_text(encoding="utf-8")
+    assert QWEN4EXP_TEXT_STRICT_MARKER in mtp_text_strict_patch_text
+    assert "(is_qwen35 || is_qwen4exp)" in mtp_text_strict_patch_text
+    assert "--spec-mtp-strict-qwen" in mtp_text_strict_patch_text
     request_spec_bypass_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-request-spec-bypass.patch"
     assert request_spec_bypass_patch.is_file()
     request_spec_bypass_patch_text = request_spec_bypass_patch.read_text(encoding="utf-8")
@@ -4700,9 +4712,11 @@ def self_test() -> None:
     assert MTP_VISION_RESYNC_MARKER in build_script
     assert QWEN4EXP_VISION_STRICT_MARKER in build_script
     assert QWEN4EXP_VISION_CHECKPOINT_MARKER in build_script
+    assert QWEN4EXP_TEXT_STRICT_MARKER in build_script
     assert REQUEST_SPEC_BYPASS_MARKER in build_script
     assert "rocmfpx-qwen4exp-vision-strict.patch" in build_script
     assert "rocmfpx-qwen4exp-vision-strict-checkpoint.patch" in build_script
+    assert "rocmfpx-qwen4exp-text-strict.patch" in build_script
     assert "rocmfpx-request-spec-bypass.patch" in build_script
     assert "rocmfpx-auto-mtmd-spec-bypass.patch" in build_script
     assert 'SERVER_BINARY="$BUILD_DIR/bin/llama-server"' in build_script
@@ -4717,6 +4731,7 @@ def self_test() -> None:
             b"runtime\x00" + MTP_VISION_RESYNC_MARKER.encode("ascii") + b"\x00" +
             QWEN4EXP_VISION_STRICT_MARKER.encode("ascii") + b"\x00" +
             QWEN4EXP_VISION_CHECKPOINT_MARKER.encode("ascii") + b"\x00" +
+            QWEN4EXP_TEXT_STRICT_MARKER.encode("ascii") + b"\x00" +
             REQUEST_SPEC_BYPASS_MARKER.encode("ascii") + b"\x00" +
             AUTO_MTMD_SPEC_BYPASS_MARKER.encode("ascii")
         )
@@ -4726,9 +4741,20 @@ def self_test() -> None:
         assert fake_fingerprint["server"]["mtp_vision_resync_marker"] is True
         assert fake_fingerprint["server"]["qwen4exp_vision_strict_marker"] is True
         assert fake_fingerprint["server"]["qwen4exp_vision_checkpoint_marker"] is True
+        assert fake_fingerprint["server"]["qwen4exp_text_strict_marker"] is True
         assert fake_fingerprint["server"]["request_spec_bypass_marker"] is True
         assert fake_fingerprint["server"]["auto_mtmd_spec_bypass_marker"] is True
         assert "server_impl_library" not in fake_fingerprint
+    production_launcher = pathlib.Path(__file__).with_name("deployment") / "run-production.sh"
+    production_launcher_text = production_launcher.read_text(encoding="utf-8")
+    assert 'mtp_mode="${LLAMA_MTP_MODE:-off}"' in production_launcher_text
+    assert '[[ "$mtp_mode" == "strict" ]]' in production_launcher_text
+    assert "--spec-mtp-strict-qwen" in production_launcher_text
+    assert 'command+=(' in production_launcher_text
+    production_env = (
+        pathlib.Path(__file__).with_name("deployment") / "qwen-flash-next.env.example"
+    ).read_text(encoding="utf-8")
+    assert "LLAMA_MTP_MODE=off" in production_env
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 

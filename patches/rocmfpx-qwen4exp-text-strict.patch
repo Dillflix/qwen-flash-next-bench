@@ -1,0 +1,41 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -3394,7 +3394,7 @@ common_params_context common_params_parser_init(common_params & params, llama_e
+     add_opt(common_arg(
+         {"--spec-mtp-strict-qwen"},
+         {"--no-spec-mtp-strict-qwen"},
+-        "use boundary-safe multi-row verification with bounded recurrent rollback for exact greedy Qwen35/Qwen35MoE MTP output; requires one slot/sequence (default: disabled)",
++        "use boundary-safe multi-row verification with bounded recurrent rollback for exact greedy Qwen35/Qwen35MoE/Qwen4Exp MTP output; requires one slot/sequence (default: disabled)",
+         [](common_params & params, bool value) {
+             params.speculative.mtp_strict_qwen = value;
+         }
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -837,10 +837,11 @@ struct server_context_impl {
+             strict_hy3_mtp_verification = is_hy3 && has_mtp && params_base.speculative.mtp_strict;
+-            strict_qwen_mtp_verification = is_qwen35 && has_mtp && params_base.speculative.mtp_strict_qwen;
++            strict_qwen_mtp_verification =
++                (is_qwen35 || is_qwen4exp) && has_mtp && params_base.speculative.mtp_strict_qwen;
+             strict_qwen4exp_vision_mtp_verification =
+                 is_qwen4exp && has_mtp && !params_base.mmproj.path.empty() &&
+                 params_base.speculative.mtp_strict_qwen4exp_vision;
+ 
+             if (params_base.speculative.mtp_strict_qwen && !strict_qwen_mtp_verification) {
+-                SRV_ERR("%s", "--spec-mtp-strict-qwen requires a qwen35 or qwen35moe target with draft-mtp enabled\n");
++                SRV_ERR("%s", "--spec-mtp-strict-qwen requires a qwen35, qwen35moe, or qwen4exp target with draft-mtp enabled\n");
+                 return false;
+             }
+@@ -861,9 +862,9 @@ struct server_context_impl {
+                 if (llama_n_rs_seq(ctx_tgt) < (uint32_t) params_base.speculative.draft.n_max) {
+                     SRV_ERR("%s", "Qwen strict MTP requires bounded recurrent rollback covering the full draft\n");
+                     return false;
+                 }
+-                SRV_WRN("%s", "Qwen strict MTP: boundary-safe multi-row verification with bounded recurrent rollback is enabled for exact greedy output\n");
+-            } else if (is_qwen35 && has_mtp) {
++                SRV_WRN("%s", "Qwen/Qwen4Exp strict MTP: boundary-safe multi-row verification with bounded recurrent rollback is enabled for exact greedy output\n");
++            } else if ((is_qwen35 || is_qwen4exp) && has_mtp) {
+                 SRV_WRN("%s", "Qwen MTP strict verification is disabled; greedy output may diverge from no-spec decoding (enable --spec-mtp-strict-qwen)\n");
+             }
+ 
