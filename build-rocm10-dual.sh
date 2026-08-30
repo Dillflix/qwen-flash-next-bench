@@ -290,6 +290,8 @@ grep -aFq 'qwen4exp MTP requires exactly one appended prediction layer' "$LLAMA_
     || fail "libllama.so lacks the compiled qwen4exp MTP integration marker"
 grep -aFq 'qwen4exp_mtp_h_pre_norm_scheduled' "$LLAMA_LIBRARY" \
     || fail "libllama.so lacks the compiled qwen4exp MTP hidden-state scheduling marker"
+grep -aFq 'qwen4exp_mtp_h_pre_norm_post_logits' "$LLAMA_LIBRARY" \
+    || fail "libllama.so lacks the compiled qwen4exp target-export ordering marker"
 grep -aFq 'qwen4exp recurrent conv rollback snapshots enabled' "$LLAMA_LIBRARY" \
     || fail "libllama.so lacks compiled Qwen4Exp recurrent rollback snapshots"
 grep -aFq 'non-consecutive Qwen4Exp PLE history position' "$LLAMA_LIBRARY" \

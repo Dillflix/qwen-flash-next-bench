@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.45.5"
+VERSION = "1.45.6"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -2020,10 +2020,19 @@ def run_rocm_audit(
     if not qwen4exp_mtp_source["ready"]:
         mtp_reasons.append("the pinned source tree lacks the complete qwen4exp MTP sidecar integration")
     if not compiled_qwen4exp_mtp:
+        required_markers = (
+            ("libllama.so", "qwen4exp MTP integration", fingerprint.get("llama_library", {}).get("qwen4exp_mtp_marker")),
+            ("libllama.so", "hidden-state scheduling", fingerprint.get("llama_library", {}).get("qwen4exp_mtp_scheduling_marker")),
+            ("libllama.so", "target-export ordering", fingerprint.get("llama_library", {}).get("qwen4exp_target_export_order_marker")),
+            ("libllama.so", "recurrent rollback", fingerprint.get("llama_library", {}).get("qwen4exp_mtp_rollback_marker")),
+            ("libllama.so", "PLE-history rollback", fingerprint.get("llama_library", {}).get("qwen4exp_ple_rollback_marker")),
+            ("libllama-common.so", "verifier state-correctness", fingerprint.get("common_library", {}).get("mtp_verifier_state_marker")),
+            ("llama-server", "prompt-logit mask", fingerprint.get("server", {}).get("mtp_prompt_logit_mask_marker")),
+        )
+        missing = [f"{artifact}: {marker}" for artifact, marker, present in required_markers if not present]
         mtp_reasons.append(
-            "llama-server, libllama.so, or libllama-common.so lacks the compiled qwen4exp MTP "
-            "integration, prompt-logit mask, rollback, PLE-history, or verifier-state marker; rebuild "
-            "with build-rocm10-dual.sh"
+            "compiled qwen4exp MTP markers missing: " + ", ".join(missing) +
+            "; rebuild with build-rocm10-dual.sh"
         )
     if not host_checkpoint_source["ready"]:
         host_checkpoint_reasons.append(
