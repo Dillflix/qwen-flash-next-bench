@@ -1,7 +1,7 @@
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -3255,6 +3255,10 @@ private:
+@@ -3255,5 +3255,9 @@ private:
                          // output buffer, and must not force vocabulary logits for every
                          // prompt token. Qwen4Exp MTP prompt logits remain last-token-only.
 +                        if (slot.need_embd_pre_norm() && slot.n_prompt_tokens_processed == 0) {

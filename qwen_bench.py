@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.45.7"
+VERSION = "1.45.8"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -4833,6 +4833,14 @@ def self_test() -> None:
     prompt_logit_marker_text = prompt_logit_marker_patch.read_text(encoding="utf-8")
     assert MTP_PROMPT_LOGIT_MASK_MARKER in prompt_logit_marker_text
     assert "slot.need_embd_pre_norm() && slot.n_prompt_tokens_processed == 0" in prompt_logit_marker_text
+    parsed_marker_patch = subprocess.run(
+        ["git", "apply", "--numstat", str(prompt_logit_marker_patch)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert parsed_marker_patch.returncode == 0, parsed_marker_patch.stderr
     host_checkpoint_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-host-checkpoints.patch"
     assert host_checkpoint_patch.is_file()
     host_checkpoint_patch_text = host_checkpoint_patch.read_text(encoding="utf-8")
