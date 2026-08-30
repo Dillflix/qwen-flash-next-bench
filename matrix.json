@@ -1555,6 +1555,37 @@
       "startup_timeout_s": 1200,
       "request_timeout_s": 1200
     },
+    "rocm-vision-mtp-request-disable-ab": {
+      "description": "Matched vision A/B for a production server that keeps n=3 MTP loaded for text but disables drafting on vision requests with speculative.n_max=0.",
+      "mode": "vision",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "vision_bf16_igpu_hip_no_mtp_strict_ab",
+        "vision_bf16_igpu_hip_mtp_loaded_request_disabled"
+      ],
+      "vision_cases": [
+        "shapes"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 8192,
+      "n_predict": 64,
+      "request": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "vision_min_anchor_score": 1.0,
+      "warmups": 1,
+      "rounds": 2,
+      "settle_seconds": 2,
+      "telemetry_interval_s": 0.2,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1200
+    },
     "rocm-vision": {
       "description": "Two-round BF16 ROCm vision validation at the native 256K allocation using the production 88/12, ubatch-1536 placement, iGPU projector, and an otherwise matched no-MTP control.",
       "mode": "vision",
@@ -3357,6 +3388,34 @@
       "description": "n=3 Q8_0 MTP candidate with automatic Qwen4Exp vision single-row target verification.",
       "extends": "vision_bf16_igpu_hip_mtp_n3",
       "baseline": false
+    },
+    {
+      "name": "vision_bf16_igpu_hip_mtp_loaded_request_disabled",
+      "description": "Fast text-MTP server topology with the Q8_0 sidecar retained on the 7900 XT, while this vision request disables drafting explicitly.",
+      "extends": "vision_bf16_igpu_hip_no_mtp",
+      "baseline": false,
+      "require_zero_draft": true,
+      "request": {
+        "speculative.n_max": 0
+      },
+      "args_append": [
+        "-md",
+        "{mtp}",
+        "--spec-draft-device",
+        "ROCm0",
+        "--spec-draft-ngl",
+        "999",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "3",
+        "--spec-draft-p-min",
+        "0.75",
+        "--spec-draft-type-k",
+        "f16",
+        "--spec-draft-type-v",
+        "f16"
+      ]
     },
     {
       "name": "vision_bf16_igpu_prod_hip_no_mtp",

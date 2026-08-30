@@ -234,11 +234,29 @@ keeps the host-checkpoint safety gate reproducible without creating an unrelated
 periodic prompt checkpoint in this 8192-token qualification context; the MTP
 arm's per-draft rollback checkpoint is still forced into host/unified memory.
 
-Only after the strict A/B passes should the complete fixture set run. This final
-tier allocates the native 262144-token context and uses
-the selected production topology: 88/12 target split, ubatch 1536, CPU-mmap PLE,
-host checkpoints, iGPU BF16 projector, F16 target/draft KV, and n=3 Q8_0 MTP on
-the 7900 XT. Its no-MTP arm is otherwise matched:
+The completed strict A/B restored 100% vision anchors, but proved the strict
+checkpoint path unsuitable for production: 13.99 tok/s median decode versus
+32.52 tok/s for target-only, a 57% regression. Prefill and image processing were
+effectively unchanged. The next A/B tests the server's per-request control
+instead. The candidate keeps the Q8_0 MTP sidecar loaded on the 7900 XT for text
+requests, retains the fast bounded-rollback target context, and sends
+`"speculative.n_max": 0` only on vision requests. No rebuild or new audit is
+required:
+
+```bash
+python3 qwen_bench.py preflight --tier rocm-vision-mtp-request-disable-ab
+./run-bench.sh --tier rocm-vision-mtp-request-disable-ab --fail-fast
+```
+
+The harness fails the candidate if the response reports any drafted tokens.
+Production can use one loaded server for fast text MTP and exact target-only
+vision only if this arm matches the control hash and recovers target-only speed.
+
+Do not run the complete fixture set until the per-request-disable A/B passes.
+That result determines whether the final 262144-token tier should keep the MTP
+sidecar loaded and bypass it for vision, or launch without MTP. The remaining
+production topology stays fixed: 88/12 target split, ubatch 1536, CPU-mmap PLE,
+host checkpoints, iGPU BF16 projector, and F16 target/draft KV.
 
 ```bash
 python3 qwen_bench.py preflight --tier rocm-vision

@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.38.2"
+VERSION = "1.39.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -649,6 +649,15 @@ def merged_env(config: dict[str, Any], experiment: dict[str, Any]) -> dict[str, 
         for key, value in source.items():
             env[str(key)] = str(value)
     return env
+
+
+def merged_request(
+    config: dict[str, Any], tier: dict[str, Any], experiment: dict[str, Any],
+) -> dict[str, Any]:
+    request = dict(config.get("defaults", {}).get("request", {}))
+    request.update(tier.get("request", {}))
+    request.update(experiment.get("request", {}))
+    return request
 
 
 def canonicalize_server_args(args: list[str]) -> list[str]:
@@ -2068,8 +2077,16 @@ def preflight(
         })
     for experiment in experiments:
         effective_args = server_command(config, tier, experiment)[1:]
+        effective_request = merged_request(config, tier, experiment)
         for error in server_arg_compatibility_errors(effective_args):
             errors.append(f"{experiment['name']}: {error}")
+        if experiment.get("require_zero_draft"):
+            if "-md" not in effective_args:
+                errors.append(f"{experiment['name']}: require_zero_draft requires a loaded draft model")
+            if effective_request.get("speculative.n_max") != 0:
+                errors.append(
+                    f"{experiment['name']}: require_zero_draft requires request speculative.n_max=0"
+                )
         if HOST_CHECKPOINT_MARKER in experiment.get("env", {}):
             if option_value(effective_args, "--checkpoint-every-n-tokens") is None:
                 errors.append(
@@ -2423,6 +2440,7 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
         "experiments": experiments,
         "commands": {item["name"]: server_command(config, tier, item) for item in experiments},
         "request": effective_request,
+        "requests": {item["name"]: merged_request(config, tier, item) for item in experiments},
         "vision_cases": {name: vision_cases_all[name] for name in workload_names} if vision_mode else None,
         "quality_cases": {name: quality_cases_all[name] for name in workload_names} if quality_mode else None,
         "argv": sys.argv,
@@ -2449,7 +2467,6 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
     erase_between_requests = bool(
         tier.get("erase_slot_between_requests", defaults.get("erase_slot_between_requests", False))
     )
-    extra_request = effective_request
     stop_event = threading.Event()
 
     def handle_signal(signum: int, _frame: Any) -> None:
@@ -2490,6 +2507,7 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                 suffix = f"r{round_index + 1:02d}-{safe_name(experiment['name'])}"
                 command = server_command(config, tier, experiment)
                 effective_args = command[1:]
+                extra_request = merged_request(config, tier, experiment)
                 host_checkpoint_runtime_verified = False
                 host_checkpoint_required = (
                     HOST_CHECKPOINT_MARKER in experiment.get("env", {})
@@ -2596,6 +2614,16 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             request_timeout_s,
                             extra_request,
                         )
+                        timing = extract_timing(response)
+                        draft_n = timing.get("draft_n")
+                        if (
+                            experiment.get("require_zero_draft")
+                            and isinstance(draft_n, (int, float))
+                            and draft_n > 0
+                        ):
+                            raise RuntimeError(
+                                f"vision request required speculation disabled, but server drafted {int(draft_n)} tokens"
+                            )
                         log_metrics = extract_vision_log_metrics(file_since(server.log_path, log_offset))
                         if (
                             tier.get("require_rocm_mtp_vision")
@@ -4386,6 +4414,27 @@ def self_test() -> None:
     )
     assert "--spec-mtp-strict-qwen4exp-vision" not in mtp_strict_ab_args[0]
     assert "--spec-mtp-strict-qwen4exp-vision" in mtp_strict_ab_args[1]
+    request_disable_tier = expanded_shipped_config["tiers"]["rocm-vision-mtp-request-disable-ab"]
+    assert request_disable_tier.get("require_rocm_mtp") is True
+    assert request_disable_tier.get("require_rocm_mtp_vision") is not True
+    request_disable_experiments = select_experiments(
+        expanded_shipped_config, request_disable_tier, None,
+    )
+    assert [item["name"] for item in request_disable_experiments] == [
+        "vision_bf16_igpu_hip_no_mtp_strict_ab",
+        "vision_bf16_igpu_hip_mtp_loaded_request_disabled",
+    ]
+    request_disable_args = [
+        server_command(expanded_shipped_config, request_disable_tier, item)[1:]
+        for item in request_disable_experiments
+    ]
+    assert "-md" not in request_disable_args[0]
+    assert "-md" in request_disable_args[1]
+    assert all("--spec-mtp-strict-qwen4exp-vision" not in args for args in request_disable_args)
+    assert request_disable_experiments[1].get("require_zero_draft") is True
+    assert merged_request(
+        expanded_shipped_config, request_disable_tier, request_disable_experiments[1],
+    ).get("speculative.n_max") == 0
     rocm_vision_full = expanded_shipped_config["tiers"]["rocm-vision"]
     assert rocm_vision_full.get("require_rocm_mtp_vision") is True
     assert int(rocm_vision_full["ctx_size"]) == 262144
