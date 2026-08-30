@@ -3261,6 +3261,8 @@
         "LLAMA_CKPT_FORCE_HOST": "1"
       },
       "args_append": [
+        "--checkpoint-every-n-tokens",
+        "32768",
         "--mmproj",
         "{mmproj_bf16}",
         "--no-mmproj-offload",

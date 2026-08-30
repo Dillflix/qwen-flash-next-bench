@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.38.1"
+VERSION = "1.38.2"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -4380,6 +4380,10 @@ def self_test() -> None:
         server_command(expanded_shipped_config, mtp_strict_ab_tier, item)[1:]
         for item in mtp_strict_ab_experiments
     ]
+    assert all(
+        option_value(args, "--checkpoint-every-n-tokens") == "32768"
+        for args in mtp_strict_ab_args
+    )
     assert "--spec-mtp-strict-qwen4exp-vision" not in mtp_strict_ab_args[0]
     assert "--spec-mtp-strict-qwen4exp-vision" in mtp_strict_ab_args[1]
     rocm_vision_full = expanded_shipped_config["tiers"]["rocm-vision"]

@@ -229,6 +229,10 @@ checkpoint-backed rollback markers; 100% anchors and hash agreement are the
 correctness criteria. Compare decode speed only after those pass. If
 strict verification restores correctness but loses to target-only, production
 vision should automatically omit MTP rather than accept a quality regression.
+Both arms explicitly set the prompt-checkpoint cadence to 32768 tokens. That
+keeps the host-checkpoint safety gate reproducible without creating an unrelated
+periodic prompt checkpoint in this 8192-token qualification context; the MTP
+arm's per-draft rollback checkpoint is still forced into host/unified memory.
 
 Only after the strict A/B passes should the complete fixture set run. This final
 tier allocates the native 262144-token context and uses
