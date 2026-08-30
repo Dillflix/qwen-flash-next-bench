@@ -616,17 +616,17 @@ allocations rather than process RSS alone.
 ### Qualified ROCm production deployment
 
 The checked-in launcher reproduces the configuration that passed 256K
-allocation, near-full-context, and vision qualification. It now defaults to
-**target-only text generation** because a real long agentic prompt produced a
-complete, coherent response with `speculative.n_max=0` but structurally corrupt
-output with n=3. The earlier throughput and short-prompt MTP runs did not prove
-lossless generation and are not sufficient production qualification.
+allocation, near-full-context, vision, and strict-MTP text qualification. The
+prompt-logit mask and state-correctness repairs eliminated the earlier corrupt
+long agentic response. Strict mode is qualified only after one real n=3 startup
+prime initializes its scheduler/graph regime; systemd performs that prime before
+the service reaches the active state.
 
 - joined ROCmFP4 model with its 51.2B PLE tensor CPU-mapped;
 - ROCm devices ordered `ROCm0,ROCm1`, with an 88/12 target split and routed
   experts forced to the iGPU;
 - one 262,144-token slot, F16 target KV, batch 2048, and ubatch 1536;
-- MTP disabled by default, leaving the Q8_0 sidecar unloaded;
+- Q8_0 MTP sidecar on the RX 7900 XT, strict n=3 verification, and F16 draft KV;
 - eight host-resident prompt checkpoints at 32K-token intervals;
 - BF16 projector on the iGPU; and
 - no prompt-response RAM cache and no context shifting.
@@ -659,18 +659,36 @@ and rejects target splits other than the qualified 88/12 layout. It also pins
 the process to `/opt/rocm-10.0.0` by default so systemd cannot resolve a different
 host ROCm installation.
 
+The foreground launcher cannot run its own post-start request because it
+`exec`s llama-server. For strict mode, launch it in one terminal and run
+`deployment/prime-production.py` from a second terminal with the same exported
+environment before admitting clients. The systemd unit is the recommended
+production entry point because it performs and gates this step automatically.
+
 `LLAMA_SLOT_SAVE_PATH` is empty by default. The strict MTP diagnostic requires
 an existing writable absolute directory there because it erases slot 0 before
 every request. Do not set it for normal production: the qualified topology
 does not import or persist slot state.
 
-`LLAMA_MTP_MODE=off` is the safe default in the checked-in environment file.
-There is an explicit experimental `LLAMA_MTP_MODE=strict` mode which loads the
-Q8_0 sidecar on the RX 7900 XT, enables n=3 with F16 draft KV, and requires the
-patched boundary-safe Qwen4Exp verification marker. Do not enable it in the
-systemd environment until its output matches the target-only control on the
-same long OpenWebUI/tool-calling prompts; acceptance rate and token throughput
-are not correctness tests.
+`LLAMA_MTP_MODE=strict` is the qualified text default in the checked-in
+environment file. It loads the Q8_0 sidecar on the RX 7900 XT, enables n=3 with
+F16 draft KV, and requires the patched boundary-safe Qwen4Exp verification
+marker. The `20260830-194009-mtp-diagnostic-strict-256k-production-n03` run
+proved the exact 262,144-token allocation: both long agentic arms completed as
+valid tool calls, both stream pairs matched, 1,338/1,869 drafts were accepted,
+and all rollback distances passed across 2,144 verifier events. The recorded
+`FAIL (0/0)` greedy label came from harness 1.7.0 and is `N/A` after 1.7.1.
+The streamed strict arm averaged 30.25 tok/s versus 27.40 tok/s target-only in
+that run. Treat the 10.4% difference as an observed production-workload result,
+not a controlled speedup: temperature-1 produced different completion lengths.
+
+`LLAMA_STARTUP_PRIME=1` is mandatory with strict mode. The systemd
+`ExecStartPost` helper waits for health and sends one authenticated synthetic
+n=3 request containing roughly 2K-4K prompt tokens and at most 16 generated
+tokens. This reserves the real MTP graph without performing a 256K prefill.
+The helper verifies that drafting occurred; failure keeps the unit from becoming
+active. `LLAMA_MTP_MODE=off` remains the target-only fallback and skips the
+prime. Vision requests automatically bypass MTP and remain target-only.
 
 `LLAMA_MTP_MODE=checkpoint-diagnostic` loads the same sidecar and placement but
 replaces bounded recurrent rollback and multi-row target verification with the
@@ -1174,6 +1192,8 @@ Then install the launcher, configuration, and hardened systemd unit:
 cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
 sudo install -Dm0755 deployment/run-production.sh \
   /usr/local/libexec/qwen-flash-next
+sudo install -Dm0755 deployment/prime-production.py \
+  /usr/local/libexec/qwen-flash-next-prime
 sudo install -Dm0644 deployment/qwen-flash-next.service \
   /etc/systemd/system/qwen-flash-next.service
 sudo install -Dm0640 -o root -g jdillman \
@@ -1183,6 +1203,22 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now qwen-flash-next.service
 systemctl status qwen-flash-next.service --no-pager
 journalctl -u qwen-flash-next.service -n 100 --no-pager
+```
+
+A successful start includes `Strict MTP startup prime complete` in the journal.
+The service remains `activating` during model load and the bounded prime; clients
+should not be sent to it until systemd reports `active (running)`.
+
+When upgrading an existing installation, do not overwrite its environment file
+with the example because it may contain the bind address and API-key-file path.
+Install the updated launcher, prime helper, and unit, then add or replace these
+settings with `sudoedit /etc/qwen-flash-next.env`:
+
+```ini
+LLAMA_MTP_MODE=strict
+LLAMA_STARTUP_PRIME=1
+LLAMA_STARTUP_PRIME_TIMEOUT=1800
+LLAMA_STARTUP_PRIME_REQUEST_TIMEOUT=300
 ```
 
 For the service, either set `LLAMA_API_KEY` in the root-managed environment file
@@ -1208,10 +1244,11 @@ encrypt traffic. If binding directly to another interface, set both
 connect while the log says the server is listening on `127.0.0.1`; use the
 host's LAN/Tailscale address or `0.0.0.0` when direct remote access is intended.
 
-Vision clients send normal OpenAI-compatible multimodal requests. With the safe
-production default, both text and vision are target-only, so callers do not send
-`speculative.n_max` or need to know that an experimental MTP mode exists.
-Metrics remain available at `/metrics`.
+Vision clients send normal OpenAI-compatible multimodal requests. The server
+automatically disables speculative decoding for requests containing media, so
+callers do not send `speculative.n_max` or need to route vision separately.
+Text uses strict n=3 after the startup prime; vision remains target-only. Metrics
+remain available at `/metrics`.
 
 ### Historical, unqualified two-user Vulkan work
 

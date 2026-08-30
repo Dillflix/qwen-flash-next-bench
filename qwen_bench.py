@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.45.10"
+VERSION = "1.46.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -4978,11 +4978,19 @@ def self_test() -> None:
     assert 'command+=(' in production_launcher_text
     assert 'slot_save_path="${LLAMA_SLOT_SAVE_PATH:-}"' in production_launcher_text
     assert 'command+=(--slot-save-path "$slot_save_path")' in production_launcher_text
+    production_prime = (
+        pathlib.Path(__file__).with_name("deployment") / "prime-production.py"
+    ).read_text(encoding="utf-8")
+    assert '"speculative.n_max": 3' in production_prime
+    assert '"max_tokens": 16' in production_prime
+    assert 'LLAMA_STARTUP_PRIME' in production_prime
+    assert 'draft_n <= 0' in production_prime
     production_env = (
         pathlib.Path(__file__).with_name("deployment") / "qwen-flash-next.env.example"
     ).read_text(encoding="utf-8")
-    assert "LLAMA_MTP_MODE=off" in production_env
+    assert "LLAMA_MTP_MODE=strict" in production_env
     assert "LLAMA_CONTEXT_SIZE=262144" in production_env
+    assert "LLAMA_STARTUP_PRIME=1" in production_env
     assert "LLAMA_SLOT_SAVE_PATH=" in production_env
     print(f"qwen_bench.py {VERSION}: self-test passed")
 

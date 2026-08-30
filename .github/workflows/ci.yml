@@ -26,12 +26,14 @@ jobs:
           python -m py_compile qwen_rocm.py
           python -m py_compile qwen_inventory.py
           python -m py_compile qwen_mtp_diag.py
+          python -m py_compile deployment/prime-production.py
           python qwen_bench.py self-test
           python qwen_quant.py self-test
           python qwen_vision.py self-test
           python qwen_rocm.py self-test
           python qwen_inventory.py self-test
           python qwen_mtp_diag.py self-test
+          python deployment/prime-production.py --self-test
           python -m json.tool matrix.json >/dev/null
           python -m json.tool prompts.json >/dev/null
           python -m json.tool vision_cases.json >/dev/null
@@ -40,6 +42,8 @@ jobs:
       - name: Validate production deployment
         run: |
           bash -n deployment/run-production.sh
+          LLAMA_MTP_MODE=off LLAMA_STARTUP_PRIME=1 \
+            python deployment/prime-production.py --check
           LLAMA_SERVER=/bin/true \
           MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
           ROCM_PATH=/usr HIP_PATH=/usr REQUIRE_AUTO_VISION_BYPASS=0 \

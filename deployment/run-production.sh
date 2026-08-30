@@ -16,11 +16,10 @@ The API key is passed to llama-server through its native environment variable,
 not copied into the llama-server command line. Multiple comma-separated keys
 are accepted by llama-server. Use --check to validate without starting it.
 
-MTP is disabled by default because long agentic text responses failed the
-target-only equivalence check. LLAMA_MTP_MODE=strict is the experimental
-multi-row/bounded-rollback path. LLAMA_MTP_MODE=checkpoint-diagnostic is an
-isolation arm that replaces it with single-row verification and full-state
-checkpoints. Neither mode is production-qualified.
+LLAMA_MTP_MODE=strict is the qualified text path when systemd completes the
+required authenticated n=3 startup prime. LLAMA_MTP_MODE=off is the target-only
+fallback. LLAMA_MTP_MODE=checkpoint-diagnostic is an isolation arm that replaces
+strict verification with single-row verification and full-state checkpoints.
 
 Set LLAMA_SLOT_SAVE_PATH to an existing writable absolute directory only for
 diagnostics that use the slots erase endpoint. It is empty by default because

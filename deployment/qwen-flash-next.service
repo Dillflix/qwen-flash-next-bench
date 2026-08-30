@@ -14,7 +14,9 @@ WorkingDirectory=/srv/llm
 EnvironmentFile=/etc/qwen-flash-next.env
 Environment=XDG_CACHE_HOME=/var/cache/qwen-flash-next
 ExecStartPre=/usr/local/libexec/qwen-flash-next --check
+ExecStartPre=/usr/bin/python3 /usr/local/libexec/qwen-flash-next-prime --check
 ExecStart=/usr/local/libexec/qwen-flash-next
+ExecStartPost=/usr/bin/python3 /usr/local/libexec/qwen-flash-next-prime
 Restart=on-failure
 RestartPreventExitStatus=64 66
 RestartSec=10
