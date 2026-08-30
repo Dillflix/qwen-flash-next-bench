@@ -914,6 +914,38 @@ the real MTP/pre-norm graph before measuring. Unlike an `n_max=0` prime, an MTP
 prime is not used by the classifier as evidence of ordinary target cold-start
 repeatability.
 
+The `20260830-185213-mtp-diagnostic-mtp-primed-full-short` run cleared the
+short correctness screen after one real `n_max=3` prime: greedy n=1/2/3 was
+exactly target-equivalent, all eight stream/non-stream pairs matched, and the
+n=3 verifier exercised 0/3, 1/3, and 2/3 rollback. Its explicit 256-token cap
+made response-completeness verdicts intentionally inconclusive. Use the
+`production-n03` profile for the final bounded qualification. It runs only the
+production temperature with target-only and n=3, streamed and non-streamed.
+Two repeats are eight measured requests rather than the full matrix's 32:
+
+```bash
+read -rsp "API key: " QWEN_TEST_API_KEY
+echo
+export QWEN_TEST_API_KEY
+
+python3 qwen_mtp_diag.py run \
+  --url http://127.0.0.1:8080 \
+  --server-label production-n03 \
+  --server-log /tmp/qwen-mtp-full-server.log \
+  --matrix-profile production-n03 \
+  --prime-requests 1 \
+  --prime-n-max 3 \
+  --repeats 2
+
+unset QWEN_TEST_API_KEY
+RUN=$(ls -dt results/*-mtp-diagnostic-production-n03 | head -1)
+python3 qwen_bench.py archive "$RUN"
+```
+
+Do not pass `--max-tokens` in this qualification. The fixture's 4096-token
+allowance permits a normal `stop` or `tool_calls` completion and therefore
+tests the malformed/truncated OpenWebUI failure that the short run could not.
+
 The forced-export arm proves graph-path parity only by making the n=0 control
 use the hidden-state-export graph. It is not a production fix: ordinary target
 decoding must remain the reference. The next candidate changes only Qwen4Exp's

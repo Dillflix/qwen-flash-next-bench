@@ -30,7 +30,7 @@ import urllib.parse
 from typing import Any
 
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 DEFAULT_FIXTURE = pathlib.Path(__file__).resolve().parent / "diagnostics" / "mtp-agentic-openwebui.json"
 API_KEY_REDACTION = "[REDACTED_API_KEY]"
 
@@ -897,6 +897,10 @@ def condition_matrix(repeats: int, profile: str = "full") -> list[dict[str, Any]
         temperatures = (0.0,)
         n_max_values = (0, 1)
         stream_values = (False,)
+    elif profile == "production-n03":
+        temperatures = (1.0,)
+        n_max_values = (0, 3)
+        stream_values = (False, True)
     else:
         raise ValueError(f"unknown diagnostic matrix profile: {profile}")
 
@@ -1923,6 +1927,19 @@ def print_verdict(report: dict[str, Any]) -> None:
         f"({coverage.get('baseline_repeatability_observed', 0)}/"
         f"{coverage.get('baseline_repeatability_expected', 0)} evaluated)"
     )
+    repeat_gate = report["acceptance"].get("fixed_seed_repeatability_pass")
+    repeat_label = "N/A" if repeat_gate is None else "PASS" if repeat_gate else "FAIL"
+    repeat_matched = sum(
+        item.get("exact_match") is True
+        for item in report.get("comparisons", [])
+        if item.get("kind") == "fixed_seed_repeatability"
+    )
+    print(
+        f"Fixed-seed repeatability: {repeat_label} "
+        f"({repeat_matched}/{coverage.get('fixed_seed_repeatability_expected', 0)} matched; "
+        f"{coverage.get('fixed_seed_repeatability_observed', 0)}/"
+        f"{coverage.get('fixed_seed_repeatability_expected', 0)} evaluated)"
+    )
     transport_gate = report["acceptance"]["stream_transport_pass"]
     print(
         f"Stream transport: {'N/A' if transport_gate is None else 'PASS' if transport_gate else 'FAIL'} "
@@ -1941,6 +1958,13 @@ def print_verdict(report: dict[str, Any]) -> None:
         f"n_max=3 rollback coverage: "
         f"{'N/A' if rollback_gate is None else 'PASS' if rollback_gate else 'FAIL'} "
         f"(observed: {observed}; missing: {missing})"
+    )
+    contract_gate = report["acceptance"].get("response_contract_pass")
+    contract_failures = len(report.get("response_contract_failures", []))
+    print(
+        f"Response completeness: "
+        f"{'N/A' if contract_gate is None else 'PASS' if contract_gate else 'FAIL'} "
+        f"({contract_failures} contract failures)"
     )
     for divergence in report["greedy_divergences"]:
         first = divergence.get("first_divergence") or {}
@@ -2165,6 +2189,17 @@ def self_test() -> None:
     } == {
         (0.0, 0, False, 1), (0.0, 1, False, 1),
         (0.0, 0, False, 2), (0.0, 1, False, 2),
+    }
+    production_matrix = condition_matrix(2, "production-n03")
+    assert len(production_matrix) == 8
+    assert {
+        (item["temperature"], item["n_max"], item["stream"], item["repeat"])
+        for item in production_matrix
+    } == {
+        (1.0, n_max, stream, repeat)
+        for repeat in (1, 2)
+        for n_max in (0, 3)
+        for stream in (False, True)
     }
     try:
         condition_matrix(1, "not-a-profile")
@@ -2778,9 +2813,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--matrix-profile",
-        choices=("full", "greedy-n01"),
+        choices=("full", "greedy-n01", "production-n03"),
         default="full",
-        help="full 16-cell matrix or the short greedy n=0/n=1 isolation matrix",
+        help=(
+            "full 16-cell matrix, short greedy n=0/n=1 isolation matrix, or "
+            "focused temperature=1 production n=0/n=3 stream matrix"
+        ),
     )
     run.add_argument("--timeout", type=float, default=1800.0)
     run.add_argument("--require-pass", action="store_true")
