@@ -177,17 +177,16 @@ LLAMA_LIBRARY="$BUILD_DIR/bin/libllama.so"
 COMMON_LIBRARY="$BUILD_DIR/bin/libllama-common.so"
 [[ -f "$COMMON_LIBRARY" ]] || COMMON_LIBRARY="$BUILD_DIR/lib/libllama-common.so"
 [[ -f "$COMMON_LIBRARY" ]] || fail "build completed without libllama-common.so"
-SERVER_LIBRARY="$BUILD_DIR/bin/libllama-server-impl.so"
-[[ -f "$SERVER_LIBRARY" ]] || SERVER_LIBRARY="$BUILD_DIR/lib/libllama-server-impl.so"
-[[ -f "$SERVER_LIBRARY" ]] || fail "build completed without libllama-server-impl.so"
+SERVER_BINARY="$BUILD_DIR/bin/llama-server"
+[[ -f "$SERVER_BINARY" ]] || fail "build completed without llama-server"
 grep -aFq 'qwen4exp MTP requires exactly one appended prediction layer' "$LLAMA_LIBRARY" \
     || fail "libllama.so lacks the compiled qwen4exp MTP integration marker"
 grep -aFq 'qwen4exp_mtp_h_pre_norm_scheduled' "$LLAMA_LIBRARY" \
     || fail "libllama.so lacks the compiled qwen4exp MTP hidden-state scheduling marker"
 grep -aFq 'LLAMA_CKPT_FORCE_HOST' "$COMMON_LIBRARY" \
     || fail "libllama-common.so lacks the compiled host-checkpoint marker"
-grep -aFq 'MTP multimodal resync: skipping direct image decode' "$SERVER_LIBRARY" \
-    || fail "libllama-server-impl.so lacks the compiled MTP multimodal-resync marker"
+grep -aFq 'MTP multimodal resync: skipping direct image decode' "$SERVER_BINARY" \
+    || fail "llama-server lacks the compiled MTP multimodal-resync marker"
 
 targets="$(strings "$HIP_LIBRARY" | grep -oE 'gfx[0-9a-f]{3,5}[a-z]*' | sort -u | tr '\n' ' ')"
 [[ " $targets " == *' gfx1100 '* ]] || fail "libggml-hip.so lacks a gfx1100 code object"

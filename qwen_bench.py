@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.37.0"
+VERSION = "1.37.1"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -1548,13 +1548,6 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
         build_root / "lib" / "libllama-common.so",
     ]
     common_library = next((path for path in common_candidates if path.is_file()), common_candidates[0])
-    server_impl_candidates = [
-        build_root / "bin" / "libllama-server-impl.so",
-        build_root / "lib" / "libllama-server-impl.so",
-    ]
-    server_impl_library = next(
-        (path for path in server_impl_candidates if path.is_file()), server_impl_candidates[0]
-    )
     test_binary = build_root / "bin" / "test-backend-ops"
     result: dict[str, Any] = {}
     for name, path in (
@@ -1562,7 +1555,6 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
         ("hip_library", library),
         ("llama_library", llama_library),
         ("common_library", common_library),
-        ("server_impl_library", server_impl_library),
         ("test_backend_ops", test_binary),
     ):
         result[name] = {
@@ -1604,15 +1596,15 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["common_library"]["host_checkpoint_marker"] = False
     else:
         result["common_library"]["host_checkpoint_marker"] = False
-    if server_impl_library.is_file():
+    if server.is_file():
         try:
-            result["server_impl_library"]["mtp_vision_resync_marker"] = (
-                MTP_VISION_RESYNC_MARKER.encode("ascii") in server_impl_library.read_bytes()
+            result["server"]["mtp_vision_resync_marker"] = (
+                MTP_VISION_RESYNC_MARKER.encode("ascii") in server.read_bytes()
             )
         except OSError:
-            result["server_impl_library"]["mtp_vision_resync_marker"] = False
+            result["server"]["mtp_vision_resync_marker"] = False
     else:
-        result["server_impl_library"]["mtp_vision_resync_marker"] = False
+        result["server"]["mtp_vision_resync_marker"] = False
     return result
 
 
@@ -1810,7 +1802,7 @@ def run_rocm_audit(
         ready_for_model_benchmarks and host_checkpoint_source["ready"] and compiled_host_checkpoints
     )
     compiled_mtp_vision_resync = bool(
-        fingerprint.get("server_impl_library", {}).get("mtp_vision_resync_marker")
+        fingerprint.get("server", {}).get("mtp_vision_resync_marker")
     )
     ready_for_mtp_vision_benchmarks = bool(
         ready_for_mtp_benchmarks and mtp_vision_resync_source["ready"] and compiled_mtp_vision_resync
@@ -1849,7 +1841,7 @@ def run_rocm_audit(
         )
     if not compiled_mtp_vision_resync:
         mtp_vision_reasons.append(
-            "libllama-server-impl.so lacks the compiled MTP multimodal-resync marker; rebuild with build-rocm10-dual.sh"
+            "llama-server lacks the compiled MTP multimodal-resync marker; rebuild with build-rocm10-dual.sh"
         )
     if not ready_for_mtp_benchmarks:
         mtp_vision_reasons.append(
@@ -1905,7 +1897,6 @@ def validate_rocm_audit(
     fingerprint_keys = ["server", "hip_library", "llama_library"]
     if require_mtp_vision:
         require_mtp = True
-        fingerprint_keys.append("server_impl_library")
     if require_host_checkpoints:
         fingerprint_keys.append("common_library")
     for key in fingerprint_keys:
@@ -1929,8 +1920,8 @@ def validate_rocm_audit(
         return report, f"ROCm audit has not proven host-resident prompt checkpoints: {reasons}"
     if require_mtp_vision and int(report.get("schema", 0)) < 6:
         return report, "ROCm audit predates the MTP multimodal-resync gate; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
-    if require_mtp_vision and not current.get("server_impl_library", {}).get("mtp_vision_resync_marker"):
-        return report, "current libllama-server-impl.so lacks the MTP multimodal-resync fix; rerun `./build-rocm10-dual.sh` and the ROCm audit"
+    if require_mtp_vision and not current.get("server", {}).get("mtp_vision_resync_marker"):
+        return report, "current llama-server lacks the MTP multimodal-resync fix; rerun `./build-rocm10-dual.sh` and the ROCm audit"
     if require_mtp_vision and not report.get("ready_for_mtp_vision_benchmarks"):
         reasons = "; ".join(str(item) for item in report.get("mtp_vision_reasons", []))
         return report, f"ROCm audit has not proven MTP plus vision support: {reasons}"
@@ -4383,8 +4374,20 @@ def self_test() -> None:
     assert QWEN4EXP_MTP_SCHED_MARKER in build_script
     assert HOST_CHECKPOINT_MARKER in build_script
     assert MTP_VISION_RESYNC_MARKER in build_script
+    assert 'SERVER_BINARY="$BUILD_DIR/bin/llama-server"' in build_script
+    assert "libllama-server-impl.so" not in build_script
     assert "rocmfpx-host-checkpoints-v1-broken.patch" in build_script
     assert "apply --reverse --check --unidiff-zero" in build_script
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        fake_bin = pathlib.Path(raw_tmp) / "bin"
+        fake_bin.mkdir()
+        fake_server = fake_bin / "llama-server"
+        fake_server.write_bytes(b"runtime\x00" + MTP_VISION_RESYNC_MARKER.encode("ascii"))
+        fake_fingerprint = rocm_build_fingerprint({
+            "variables": {"hip_server": str(fake_server)},
+        })
+        assert fake_fingerprint["server"]["mtp_vision_resync_marker"] is True
+        assert "server_impl_library" not in fake_fingerprint
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
 

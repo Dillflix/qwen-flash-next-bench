@@ -205,7 +205,7 @@ python3 qwen_bench.py preflight --tier rocm-vision-mtp-resync-smoke
 ```
 
 The preflight requires both a source marker and the compiled marker in
-`libllama-server-impl.so`, so the old crashing server cannot accidentally be
+`llama-server`, so the old crashing server cannot accidentally be
 benchmarked. Every MTP vision request must also emit the runtime resync marker or
 the harness fails the cell. If the focused cell passes its 100% anchor gate, run the complete
 fixture set. This final tier allocates the native 262144-token context and uses
@@ -715,7 +715,7 @@ against `/opt/rocm-10.0.0` with:
 - `gfx1100;gfx1151` in both `CMAKE_HIP_ARCHITECTURES` and `GPU_TARGETS`;
 - `test-backend-ops` and compile-command metadata enabled;
 - a compiled Qwen4Exp MTP marker in `libllama.so`;
-- a compiled MTP multimodal-resync marker in `libllama-server-impl.so`;
+- a compiled MTP multimodal-resync marker in `llama-server`;
 - a compiled host-checkpoint marker in `libllama-common.so`.
 
 Collect the new build evidence, then run the numerical gate:
@@ -731,7 +731,7 @@ python3 qwen_bench.py rocm-audit --run-ops
 
 Both commands create one `.tar.gz` plus a SHA-256 file automatically. The audit
 archive is written even when a gate fails, so failed numerical output is preserved.
-Any rebuild changes the server/HIP/libllama/libllama-common/server-implementation fingerprints, so the audit must be rerun
+Any rebuild changes the server/HIP/libllama/libllama-common fingerprints, so the audit must be rerun
 before model benchmarks.
 
 The audit has two independent functional gates on both GPUs:

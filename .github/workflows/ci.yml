@@ -66,4 +66,4 @@ jobs:
             -DLLAMA_BUILD_TESTS=OFF
           cmake --build rocmfpx/build-ci --parallel 2 --target llama-cli llama-server
           grep -aFq 'MTP multimodal resync: skipping direct image decode' \
-            rocmfpx/build-ci/bin/libllama-server-impl.so
+            rocmfpx/build-ci/bin/llama-server
