@@ -284,6 +284,23 @@ python3 qwen_bench.py preflight --tier rocm-vision
 ./run-bench.sh --tier rocm-vision --fail-fast
 ```
 
+Run `20260830-024815-rocm-vision` qualified the complete production behavior:
+all 12 measured responses passed their anchors, and the MTP-loaded/bypassed arm
+matched the target-only output hash in every cell. Overall it was 1.005x decode,
+0.990x prefill, and 0.998x balanced versus target-only. The bypass marker was
+present on every candidate request and the draft engine reported zero calls and
+zero generated or accepted draft tokens. At the native 256K allocation the
+loaded sidecar used 18.97 GiB of 7900 XT VRAM versus 12.43 GiB without MTP, while
+minimum host-available memory remained about 54 GiB.
+
+That archive also revealed that the old vision warm-up covered only the first
+fixture and only 32 output tokens. Consequently the nominally hot measured
+`invoice` and `chart` requests still read roughly 10.5 and 6.3 GiB from storage;
+even `shapes` read about 1 GiB after its partial warm-up. Version 1.42 changes
+the full vision tier to a full-budget, per-cell warm-up immediately before each
+measurement. Rerunning the tier is storage-hot characterization only: the
+correctness, placement, and MTP-bypass decisions above are already qualified.
+
 Both ROCm tiers explicitly use F16 target KV and F16 draft KV. Q8 draft KV is not
 present. The Q8 projector is also excluded because the earlier Vulkan run failed
 the OCR quality gate; that is independent of the draft-KV decision. Strict

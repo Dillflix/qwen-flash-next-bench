@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.41.0"
+VERSION = "1.42.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -2208,6 +2208,14 @@ def preflight(
     concurrency = int(tier.get("concurrency", 1))
     if concurrency < 1:
         errors.append("concurrency must be at least 1")
+    warmup_scope = str(tier.get("warmup_scope", "experiment"))
+    if warmup_scope not in {"experiment", "per_cell"}:
+        errors.append("warmup_scope must be experiment or per_cell")
+    if warmup_scope == "per_cell" and concurrency != 1:
+        errors.append("per-cell warm-ups currently require concurrency 1")
+    warmup_n_predict = int(tier.get("warmup_n_predict", min(32, int(tier.get("n_predict", 0)))))
+    if int(tier.get("warmups", 0)) > 0 and not 1 <= warmup_n_predict <= int(tier.get("n_predict", 0)):
+        errors.append("warmup_n_predict must be between 1 and n_predict")
     if quality_mode:
         if concurrency != 1:
             errors.append("deterministic quality tiers currently require concurrency 1")
@@ -2524,6 +2532,8 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
     n_predict = int(tier.get("n_predict", 128))
     request_timeout_s = float(tier.get("request_timeout_s", defaults.get("request_timeout_s", 900)))
     warmups = int(tier.get("warmups", 1))
+    warmup_scope = str(tier.get("warmup_scope", "experiment"))
+    warmup_n_predict = int(tier.get("warmup_n_predict", min(32, n_predict)))
     concurrency = int(tier.get("concurrency", 1))
     startup_only = bool(tier.get("startup_only", False))
     exact_prompt_tokens = bool(tier.get("exact_prompt_tokens", False))
@@ -2740,8 +2750,44 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             )
                         host_checkpoint_runtime_verified = True
 
+                    def run_sequential_warmup(
+                        workload: str, depth: int, warmup_index: int,
+                    ) -> None:
+                        mark = server.telemetry.mark() if server.telemetry else 0
+                        warm_prompt = prepared_prompt(workload, depth, 0)[0]
+                        warm_response, warm_wall_ms, warm_vision_metrics = request_one(
+                            workload, warm_prompt, warmup_n_predict,
+                        )
+                        verify_host_checkpoint_runtime([warm_response])
+                        samples = server.telemetry.slice(mark) if server.telemetry else []
+                        warm_group = concurrent_metrics([warm_response], warm_wall_ms)
+                        warm_row = {
+                            "schema": 1,
+                            "status": "warmup",
+                            "ts": utc_now(),
+                            "run_id": run_id,
+                            "experiment": experiment["name"],
+                            "round": round_index,
+                            "warmup": warmup_index,
+                            "lane": 0,
+                            "concurrency": 1,
+                            "workload": workload,
+                            "requested_depth_tokens": depth,
+                            "http_wall_ms": round(warm_wall_ms, 3),
+                            "concurrent_group": warm_group,
+                            "timing": extract_timing(warm_response),
+                            "telemetry": aggregate_telemetry(samples),
+                        }
+                        if vision_mode:
+                            warm_row["vision"] = warm_vision_metrics
+                        if erase_between_requests:
+                            warm_row["slot_erase"] = erase_slot(
+                                base_url, response_slot_id(warm_response), request_timeout_s,
+                            )
+                        append_jsonl(run_dir / "warmups.jsonl", warm_row)
+
                     warmup_depth = int(tier.get("warmup_depth", 0))
-                    for warmup_index in range(warmups):
+                    for warmup_index in range(warmups if warmup_scope == "experiment" else 0):
                         mark = server.telemetry.mark() if server.telemetry else 0
                         if concurrency > 1:
                             warm_prompts = [
@@ -2749,17 +2795,13 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                                 for lane, workload in enumerate(workload_names)
                             ]
                             warm_responses, warm_walls, warm_group_wall = concurrent_completion_requests(
-                                base_url + "/completion", warm_prompts, min(32, n_predict),
+                                base_url + "/completion", warm_prompts, warmup_n_predict,
                                 request_timeout_s, extra_request,
                             )
                             warm_vision = [{} for _ in warm_responses]
                         else:
-                            warm_prompt = prepared_prompt(workload_names[0], warmup_depth, 0)[0]
-                            warm_response, warm_wall_ms, warm_vision_metrics = request_one(
-                                workload_names[0], warm_prompt, min(32, n_predict),
-                            )
-                            warm_responses, warm_walls, warm_group_wall = [warm_response], [warm_wall_ms], warm_wall_ms
-                            warm_vision = [warm_vision_metrics]
+                            run_sequential_warmup(workload_names[0], warmup_depth, warmup_index)
+                            continue
                         verify_host_checkpoint_runtime(warm_responses)
                         samples = server.telemetry.slice(mark) if server.telemetry else []
                         warm_group = concurrent_metrics(warm_responses, warm_group_wall)
@@ -2872,6 +2914,9 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                     for workload, depth in pending:
                         if stop_event.is_set():
                             break
+                        if warmup_scope == "per_cell":
+                            for warmup_index in range(warmups):
+                                run_sequential_warmup(workload, depth, warmup_index)
                         prompt, constructed_prompt_tokens = prepared_prompt(workload, depth, 0)
                         mark = server.telemetry.mark() if server.telemetry else 0
                         response, wall_ms, vision_metrics = request_one(workload, prompt, n_predict)
@@ -4511,6 +4556,8 @@ def self_test() -> None:
     rocm_vision_full = expanded_shipped_config["tiers"]["rocm-vision"]
     assert rocm_vision_full.get("require_rocm_mtp_vision") is not True
     assert rocm_vision_full.get("require_rocm_request_spec_bypass") is True
+    assert rocm_vision_full.get("warmup_scope") == "per_cell"
+    assert int(rocm_vision_full.get("warmup_n_predict", 0)) == int(rocm_vision_full["n_predict"])
     assert int(rocm_vision_full["ctx_size"]) == 262144
     rocm_vision_full_experiments = select_experiments(
         expanded_shipped_config, rocm_vision_full, None,
