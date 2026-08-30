@@ -1,5 +1,20 @@
 # Future benchmark subjects
 
+## General Qwen4Exp PLE/MTP state lifecycle
+
+The current state-correctness candidate is intentionally scoped to the qualified
+one-slot service: one target context, `--cache-ram 0`, `--no-context-shift`, and
+no imported slot state. Its full PLE token journal can truncate an in-process
+speculative or prompt-checkpoint rewind exactly, but that journal is still owned
+by the model rather than llama context memory.
+
+Before enabling MTP outside that topology, move or serialize PLE history with the
+rest of per-sequence state and test sequence copy/add/keep, context shifting,
+multiple contexts sharing a model, explicit slot save/load, and restore after a
+server restart. A separate stop-boundary test must force EOG inside a multi-token
+accepted draft and verify that target KV, recurrent state, PLE history, and the MTP
+boundary are rolled back to the last token actually emitted to the caller.
+
 ## Bounded SSD-backed prompt-response cache
 
 Status: deferred until native 256K capacity is proven. Production controls use

@@ -25,14 +25,17 @@ jobs:
           python -m py_compile qwen_vision.py
           python -m py_compile qwen_rocm.py
           python -m py_compile qwen_inventory.py
+          python -m py_compile qwen_mtp_diag.py
           python qwen_bench.py self-test
           python qwen_quant.py self-test
           python qwen_vision.py self-test
           python qwen_rocm.py self-test
           python qwen_inventory.py self-test
+          python qwen_mtp_diag.py self-test
           python -m json.tool matrix.json >/dev/null
           python -m json.tool prompts.json >/dev/null
           python -m json.tool vision_cases.json >/dev/null
+          python -m json.tool diagnostics/mtp-agentic-openwebui.json >/dev/null
           python -c 'import pathlib, qwen_bench; qwen_bench.load_config(pathlib.Path("matrix.json"))'
       - name: Validate production deployment
         run: |
@@ -75,6 +78,10 @@ jobs:
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-vision-strict.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-vision-strict-checkpoint.patch"
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-vision-strict-checkpoint.patch"
+          git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-text-strict.patch"
+          git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-text-strict.patch"
+          git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp-state-correctness.patch"
+          git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp-state-correctness.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-request-spec-bypass.patch"
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-request-spec-bypass.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-auto-mtmd-spec-bypass.patch"
@@ -99,6 +106,14 @@ jobs:
             rocmfpx/build-ci/bin/llama-server
           grep -aFq 'Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints' \
             rocmfpx/build-ci/bin/llama-server
+          grep -aFq 'Qwen/Qwen4Exp strict MTP: boundary-safe multi-row verification' \
+            rocmfpx/build-ci/bin/llama-server
+          grep -aFq 'qwen4exp recurrent conv rollback snapshots enabled' \
+            rocmfpx/build-ci/bin/libllama.so
+          grep -aFq 'non-consecutive Qwen4Exp PLE history position' \
+            rocmfpx/build-ci/bin/libllama.so
+          grep -aFq 'MTP verifier state-correctness patch active' \
+            rocmfpx/build-ci/bin/libllama-common.so
           grep -aFq 'speculative decoding disabled for request; target hidden-state export bypassed' \
             rocmfpx/build-ci/bin/llama-server
           grep -aFq 'multimodal request detected; speculative decoding disabled automatically' \

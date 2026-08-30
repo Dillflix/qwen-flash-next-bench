@@ -11,6 +11,7 @@ EXPECTED_REV="${ROCMFPX_REV:-36e9acd40e10a87cd3c3ef8ec734668757dc8520}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 QWEN4EXP_MTP_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp.patch"
 QWEN4EXP_MTP_SCHED_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
+QWEN4EXP_MTP_STATE_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp-state-correctness.patch"
 MTP_VISION_RESYNC_PATCH="$SCRIPT_DIR/patches/rocmfpx-mtp-vision-resync.patch"
 QWEN4EXP_VISION_STRICT_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-vision-strict.patch"
 QWEN4EXP_VISION_STRICT_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-vision-strict-checkpoint.patch"
@@ -31,6 +32,7 @@ actual_rev="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
     || fail "ROCmFPX is at $actual_rev, expected pinned revision $EXPECTED_REV"
 [[ -f "$QWEN4EXP_MTP_PATCH" ]] || fail "missing qwen4exp MTP patch: $QWEN4EXP_MTP_PATCH"
 [[ -f "$QWEN4EXP_MTP_SCHED_PATCH" ]] || fail "missing qwen4exp MTP scheduling patch: $QWEN4EXP_MTP_SCHED_PATCH"
+[[ -f "$QWEN4EXP_MTP_STATE_PATCH" ]] || fail "missing qwen4exp MTP state-correctness patch: $QWEN4EXP_MTP_STATE_PATCH"
 [[ -f "$MTP_VISION_RESYNC_PATCH" ]] || fail "missing MTP vision-resync patch: $MTP_VISION_RESYNC_PATCH"
 [[ -f "$QWEN4EXP_VISION_STRICT_PATCH" ]] || fail "missing Qwen4Exp vision strict-verification patch: $QWEN4EXP_VISION_STRICT_PATCH"
 [[ -f "$QWEN4EXP_VISION_STRICT_CHECKPOINT_PATCH" ]] || fail "missing Qwen4Exp vision checkpoint-backed strict patch: $QWEN4EXP_VISION_STRICT_CHECKPOINT_PATCH"
@@ -92,6 +94,11 @@ apply_patch_once \
     "tools/server/server-context.cpp" \
     "Qwen/Qwen4Exp strict MTP: boundary-safe multi-row verification"
 apply_patch_once \
+    "$QWEN4EXP_MTP_STATE_PATCH" \
+    "Qwen4Exp MTP state-correctness patch" \
+    "src/models/qwen4exp.cpp" \
+    "qwen4exp recurrent conv rollback snapshots enabled"
+apply_patch_once \
     "$REQUEST_SPEC_BYPASS_PATCH" \
     "per-request speculative-bypass patch" \
     "tools/server/server-context.cpp" \
@@ -130,6 +137,20 @@ grep -Fq 'Qwen4Exp vision MTP: recurrent rollback disabled; using full-state che
     || fail "server source lacks the Qwen4Exp vision checkpoint-backed strict marker"
 grep -Fq 'Qwen/Qwen4Exp strict MTP: boundary-safe multi-row verification' "$SOURCE_DIR/tools/server/server-context.cpp" \
     || fail "server source lacks the Qwen4Exp text strict-verification marker"
+grep -Fq 'qwen4exp recurrent conv rollback snapshots enabled' "$SOURCE_DIR/src/models/qwen4exp.cpp" \
+    || fail "qwen4exp source lacks recurrent convolution rollback snapshots"
+grep -Fq 'non-consecutive Qwen4Exp PLE history position' "$SOURCE_DIR/src/models/qwen4exp.cpp" \
+    || fail "qwen4exp source lacks rollback-aware PLE token history"
+grep -Fq 'Qwen4Exp PLE requires an n-gram size of at least two' "$SOURCE_DIR/src/models/qwen4exp.cpp" \
+    || fail "qwen4exp PLE history lacks its n-gram invariant"
+grep -Fq 'llama_pos                first_pos = -1;' "$SOURCE_DIR/src/models/models.h" \
+    || fail "qwen4exp PLE history cannot retain a rollback prefix"
+grep -Fq 'MTP verifier state-correctness patch active' "$SOURCE_DIR/common/speculative.cpp" \
+    || fail "speculative source lacks the MTP state-correctness marker"
+grep -Fq 'const size_t n_verify_floats = (size_t) n_rows * n_embd;' "$SOURCE_DIR/common/speculative.cpp" \
+    || fail "MTP source does not retain every verifier hidden-state row"
+grep -Fq 'ring_prune_after(seq_id, pending_h_pos[seq_id]);' "$SOURCE_DIR/common/speculative.cpp" \
+    || fail "MTP source retains rejected verifier rows in its rollback ring"
 grep -Fq 'speculative decoding disabled for request; target hidden-state export bypassed' "$SOURCE_DIR/tools/server/server-context.cpp" \
     || fail "server source lacks the per-request speculative-bypass marker"
 grep -Fq 'can_speculate() == other_slot.can_speculate()' "$SOURCE_DIR/tools/server/server-context.cpp" \
@@ -238,8 +259,14 @@ grep -aFq 'qwen4exp MTP requires exactly one appended prediction layer' "$LLAMA_
     || fail "libllama.so lacks the compiled qwen4exp MTP integration marker"
 grep -aFq 'qwen4exp_mtp_h_pre_norm_scheduled' "$LLAMA_LIBRARY" \
     || fail "libllama.so lacks the compiled qwen4exp MTP hidden-state scheduling marker"
+grep -aFq 'qwen4exp recurrent conv rollback snapshots enabled' "$LLAMA_LIBRARY" \
+    || fail "libllama.so lacks compiled Qwen4Exp recurrent rollback snapshots"
+grep -aFq 'non-consecutive Qwen4Exp PLE history position' "$LLAMA_LIBRARY" \
+    || fail "libllama.so lacks compiled rollback-aware Qwen4Exp PLE history"
 grep -aFq 'LLAMA_CKPT_FORCE_HOST' "$COMMON_LIBRARY" \
     || fail "libllama-common.so lacks the compiled host-checkpoint marker"
+grep -aFq 'MTP verifier state-correctness patch active' "$COMMON_LIBRARY" \
+    || fail "libllama-common.so lacks the compiled MTP verifier state-correctness marker"
 grep -aFq 'MTP multimodal resync: skipping direct image decode' "$SERVER_BINARY" \
     || fail "llama-server lacks the compiled MTP multimodal-resync marker"
 grep -aFq 'Qwen4Exp vision MTP: single-row target verification enabled' "$SERVER_BINARY" \
@@ -264,6 +291,7 @@ echo "  build:  $BUILD_DIR"
 echo "  ROCm:   $ROCM_ROOT"
 echo "  code objects: $targets"
 echo "  qwen4exp MTP: compiled"
+echo "  qwen4exp MTP rollback + verifier state correctness: compiled"
 echo "  MTP + vision resync: compiled"
 echo "  Qwen4Exp vision strict verification: compiled"
 echo "  Qwen4Exp vision strict checkpoints: compiled"

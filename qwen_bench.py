@@ -41,10 +41,13 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.44.0"
+VERSION = "1.45.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
+QWEN4EXP_MTP_ROLLBACK_MARKER = "qwen4exp recurrent conv rollback snapshots enabled"
+QWEN4EXP_PLE_ROLLBACK_MARKER = "non-consecutive Qwen4Exp PLE history position"
+MTP_VERIFIER_STATE_MARKER = "MTP verifier state-correctness patch active"
 HOST_CHECKPOINT_MARKER = "LLAMA_CKPT_FORCE_HOST"
 MTP_VISION_RESYNC_MARKER = "MTP multimodal resync: skipping direct image decode"
 QWEN4EXP_VISION_STRICT_MARKER = "Qwen4Exp vision MTP: single-row target verification enabled"
@@ -1589,27 +1592,44 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
         result["hip_library"]["gfx_targets"] = []
     if llama_library.is_file():
         try:
+            llama_binary = llama_library.read_bytes()
             result["llama_library"]["qwen4exp_mtp_marker"] = (
-                QWEN4EXP_MTP_MARKER.encode("ascii") in llama_library.read_bytes()
+                QWEN4EXP_MTP_MARKER.encode("ascii") in llama_binary
             )
             result["llama_library"]["qwen4exp_mtp_scheduling_marker"] = (
-                QWEN4EXP_MTP_SCHED_MARKER.encode("ascii") in llama_library.read_bytes()
+                QWEN4EXP_MTP_SCHED_MARKER.encode("ascii") in llama_binary
+            )
+            result["llama_library"]["qwen4exp_mtp_rollback_marker"] = (
+                QWEN4EXP_MTP_ROLLBACK_MARKER.encode("ascii") in llama_binary
+            )
+            result["llama_library"]["qwen4exp_ple_rollback_marker"] = (
+                QWEN4EXP_PLE_ROLLBACK_MARKER.encode("ascii") in llama_binary
             )
         except OSError:
             result["llama_library"]["qwen4exp_mtp_marker"] = False
             result["llama_library"]["qwen4exp_mtp_scheduling_marker"] = False
+            result["llama_library"]["qwen4exp_mtp_rollback_marker"] = False
+            result["llama_library"]["qwen4exp_ple_rollback_marker"] = False
     else:
         result["llama_library"]["qwen4exp_mtp_marker"] = False
         result["llama_library"]["qwen4exp_mtp_scheduling_marker"] = False
+        result["llama_library"]["qwen4exp_mtp_rollback_marker"] = False
+        result["llama_library"]["qwen4exp_ple_rollback_marker"] = False
     if common_library.is_file():
         try:
+            common_binary = common_library.read_bytes()
             result["common_library"]["host_checkpoint_marker"] = (
-                HOST_CHECKPOINT_MARKER.encode("ascii") in common_library.read_bytes()
+                HOST_CHECKPOINT_MARKER.encode("ascii") in common_binary
+            )
+            result["common_library"]["mtp_verifier_state_marker"] = (
+                MTP_VERIFIER_STATE_MARKER.encode("ascii") in common_binary
             )
         except OSError:
             result["common_library"]["host_checkpoint_marker"] = False
+            result["common_library"]["mtp_verifier_state_marker"] = False
     else:
         result["common_library"]["host_checkpoint_marker"] = False
+        result["common_library"]["mtp_verifier_state_marker"] = False
     if server.is_file():
         try:
             result["server"]["mtp_vision_resync_marker"] = (
@@ -1684,6 +1704,17 @@ def inspect_qwen4exp_mtp_sources(repo: pathlib.Path) -> dict[str, Any]:
             QWEN4EXP_MTP_SCHED_MARKER,
             "nextn.eh_proj",
             "t_h_pre_norm",
+            QWEN4EXP_MTP_ROLLBACK_MARKER,
+            QWEN4EXP_PLE_ROLLBACK_MARKER,
+            "Qwen4Exp PLE requires an n-gram size of at least two",
+        ),
+        "src/models/models.h": (
+            "llama_pos                first_pos = -1;",
+        ),
+        "common/speculative.cpp": (
+            MTP_VERIFIER_STATE_MARKER,
+            "const size_t n_verify_floats = (size_t) n_rows * n_embd;",
+            "ring_prune_after(seq_id, pending_h_pos[seq_id]);",
         ),
         "src/llama-model.cpp": (
             "LLM_ARCH_QWEN4EXP",
@@ -1880,7 +1911,10 @@ def run_rocm_audit(
     functional_pass = standard_control_pass and custom_functional_pass
     compiled_qwen4exp_mtp = bool(
         fingerprint.get("llama_library", {}).get("qwen4exp_mtp_marker") and
-        fingerprint.get("llama_library", {}).get("qwen4exp_mtp_scheduling_marker")
+        fingerprint.get("llama_library", {}).get("qwen4exp_mtp_scheduling_marker") and
+        fingerprint.get("llama_library", {}).get("qwen4exp_mtp_rollback_marker") and
+        fingerprint.get("llama_library", {}).get("qwen4exp_ple_rollback_marker") and
+        fingerprint.get("common_library", {}).get("mtp_verifier_state_marker")
     )
     ready_for_model_benchmarks = bool(
         source["static_dispatch_ready"] and dual_arch_ready and functional_pass
@@ -1934,7 +1968,11 @@ def run_rocm_audit(
     if not qwen4exp_mtp_source["ready"]:
         mtp_reasons.append("the pinned source tree lacks the complete qwen4exp MTP sidecar integration")
     if not compiled_qwen4exp_mtp:
-        mtp_reasons.append("libllama.so lacks the compiled qwen4exp MTP integration or hidden-state scheduling marker; rebuild with build-rocm10-dual.sh")
+        mtp_reasons.append(
+            "libllama.so or libllama-common.so lacks the compiled qwen4exp MTP "
+            "integration, rollback, PLE-history, or verifier-state marker; rebuild "
+            "with build-rocm10-dual.sh"
+        )
     if not host_checkpoint_source["ready"]:
         host_checkpoint_reasons.append(
             "the pinned source tree lacks the LLAMA_CKPT_FORCE_HOST checkpoint-to-host integration"
@@ -1976,7 +2014,7 @@ def run_rocm_audit(
             "the prerequisite qwen4exp MTP audit gate has not passed"
         )
     report = {
-        "schema": 10,
+        "schema": 11,
         "ts": utc_now(),
         "harness_version": VERSION,
         "ready_for_model_benchmarks": ready_for_model_benchmarks,
@@ -2029,17 +2067,22 @@ def validate_rocm_audit(
     fingerprint_keys = ["server", "hip_library", "llama_library"]
     if require_mtp_vision or require_request_spec_bypass:
         require_mtp = True
-    if require_host_checkpoints:
+    if require_mtp or require_host_checkpoints:
         fingerprint_keys.append("common_library")
     for key in fingerprint_keys:
         expected = audited.get(key, {}).get("sha256")
         actual = current.get(key, {}).get("sha256")
         if not expected or expected != actual:
             return report, f"ROCm audit is stale because {key} changed; rerun `python3 qwen_bench.py rocm-audit --run-ops`"
-    if require_mtp and int(report.get("schema", 0)) < 4:
-        return report, "ROCm audit predates the hidden-state scheduling gate; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
-    if require_mtp and not current.get("llama_library", {}).get("qwen4exp_mtp_scheduling_marker"):
-        return report, "current libllama.so lacks the qwen4exp hidden-state scheduling fix; rerun `./build-rocm10-dual.sh` and the ROCm audit"
+    if require_mtp and int(report.get("schema", 0)) < 11:
+        return report, "ROCm audit predates the Qwen4Exp MTP rollback/state-correctness gate; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
+    if require_mtp and not all((
+        current.get("llama_library", {}).get("qwen4exp_mtp_scheduling_marker"),
+        current.get("llama_library", {}).get("qwen4exp_mtp_rollback_marker"),
+        current.get("llama_library", {}).get("qwen4exp_ple_rollback_marker"),
+        current.get("common_library", {}).get("mtp_verifier_state_marker"),
+    )):
+        return report, "current ROCm runtime lacks the Qwen4Exp MTP scheduling, rollback, PLE-history, or verifier-state fix; rerun `./build-rocm10-dual.sh` and the ROCm audit"
     if require_mtp and not report.get("ready_for_mtp_benchmarks"):
         reasons = "; ".join(str(item) for item in report.get("mtp_reasons", []))
         return report, f"ROCm audit has not proven qwen4exp MTP support: {reasons}"
@@ -4657,6 +4700,16 @@ def self_test() -> None:
     mtp_sched_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-qwen4exp-mtp-schedule-output.patch"
     assert mtp_sched_patch.is_file()
     assert QWEN4EXP_MTP_SCHED_MARKER in mtp_sched_patch.read_text(encoding="utf-8")
+    mtp_state_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-qwen4exp-mtp-state-correctness.patch"
+    assert mtp_state_patch.is_file()
+    mtp_state_patch_text = mtp_state_patch.read_text(encoding="utf-8")
+    assert QWEN4EXP_MTP_ROLLBACK_MARKER in mtp_state_patch_text
+    assert QWEN4EXP_PLE_ROLLBACK_MARKER in mtp_state_patch_text
+    assert MTP_VERIFIER_STATE_MARKER in mtp_state_patch_text
+    assert "const size_t n_verify_floats = (size_t) n_rows * n_embd;" in mtp_state_patch_text
+    assert "first_pos = -1" in mtp_state_patch_text
+    assert "ring_prune_after(seq_id, pending_h_pos[seq_id]);" in mtp_state_patch_text
+    assert "Qwen4Exp PLE requires an n-gram size of at least two" in mtp_state_patch_text
     mtp_vision_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-mtp-vision-resync.patch"
     assert mtp_vision_patch.is_file()
     mtp_vision_patch_text = mtp_vision_patch.read_text(encoding="utf-8")
@@ -4708,6 +4761,9 @@ def self_test() -> None:
     assert "git -C \"$SOURCE_DIR\" apply" in build_script
     assert QWEN4EXP_MTP_MARKER in build_script
     assert QWEN4EXP_MTP_SCHED_MARKER in build_script
+    assert QWEN4EXP_MTP_ROLLBACK_MARKER in build_script
+    assert QWEN4EXP_PLE_ROLLBACK_MARKER in build_script
+    assert MTP_VERIFIER_STATE_MARKER in build_script
     assert HOST_CHECKPOINT_MARKER in build_script
     assert MTP_VISION_RESYNC_MARKER in build_script
     assert QWEN4EXP_VISION_STRICT_MARKER in build_script
@@ -4717,6 +4773,7 @@ def self_test() -> None:
     assert "rocmfpx-qwen4exp-vision-strict.patch" in build_script
     assert "rocmfpx-qwen4exp-vision-strict-checkpoint.patch" in build_script
     assert "rocmfpx-qwen4exp-text-strict.patch" in build_script
+    assert "rocmfpx-qwen4exp-mtp-state-correctness.patch" in build_script
     assert "rocmfpx-request-spec-bypass.patch" in build_script
     assert "rocmfpx-auto-mtmd-spec-bypass.patch" in build_script
     assert 'SERVER_BINARY="$BUILD_DIR/bin/llama-server"' in build_script
@@ -4735,6 +4792,16 @@ def self_test() -> None:
             REQUEST_SPEC_BYPASS_MARKER.encode("ascii") + b"\x00" +
             AUTO_MTMD_SPEC_BYPASS_MARKER.encode("ascii")
         )
+        (fake_bin / "libllama.so").write_bytes(
+            QWEN4EXP_MTP_MARKER.encode("ascii") + b"\x00" +
+            QWEN4EXP_MTP_SCHED_MARKER.encode("ascii") + b"\x00" +
+            QWEN4EXP_MTP_ROLLBACK_MARKER.encode("ascii") + b"\x00" +
+            QWEN4EXP_PLE_ROLLBACK_MARKER.encode("ascii")
+        )
+        (fake_bin / "libllama-common.so").write_bytes(
+            HOST_CHECKPOINT_MARKER.encode("ascii") + b"\x00" +
+            MTP_VERIFIER_STATE_MARKER.encode("ascii")
+        )
         fake_fingerprint = rocm_build_fingerprint({
             "variables": {"hip_server": str(fake_server)},
         })
@@ -4744,12 +4811,18 @@ def self_test() -> None:
         assert fake_fingerprint["server"]["qwen4exp_text_strict_marker"] is True
         assert fake_fingerprint["server"]["request_spec_bypass_marker"] is True
         assert fake_fingerprint["server"]["auto_mtmd_spec_bypass_marker"] is True
+        assert fake_fingerprint["llama_library"]["qwen4exp_mtp_rollback_marker"] is True
+        assert fake_fingerprint["llama_library"]["qwen4exp_ple_rollback_marker"] is True
+        assert fake_fingerprint["common_library"]["mtp_verifier_state_marker"] is True
         assert "server_impl_library" not in fake_fingerprint
     production_launcher = pathlib.Path(__file__).with_name("deployment") / "run-production.sh"
     production_launcher_text = production_launcher.read_text(encoding="utf-8")
     assert 'mtp_mode="${LLAMA_MTP_MODE:-off}"' in production_launcher_text
     assert '[[ "$mtp_mode" == "strict" ]]' in production_launcher_text
     assert "--spec-mtp-strict-qwen" in production_launcher_text
+    assert QWEN4EXP_MTP_ROLLBACK_MARKER in production_launcher_text
+    assert QWEN4EXP_PLE_ROLLBACK_MARKER in production_launcher_text
+    assert MTP_VERIFIER_STATE_MARKER in production_launcher_text
     assert 'command+=(' in production_launcher_text
     production_env = (
         pathlib.Path(__file__).with_name("deployment") / "qwen-flash-next.env.example"

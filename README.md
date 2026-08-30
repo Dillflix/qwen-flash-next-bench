@@ -667,6 +667,129 @@ systemd environment until its output matches the target-only control on the
 same long OpenWebUI/tool-calling prompts; acceptance rate and token throughput
 are not correctness tests.
 
+Disabling MTP is containment, not the proposed backend fix. The candidate source
+fix is `rocmfpx-qwen4exp-mtp-state-correctness.patch`; it repairs rollback-aware
+PLE token history, Qwen4Exp recurrent-convolution snapshots, complete verifier
+hidden rows, and stale verifier-ring replacement.
+The strict boundary mode is layered on top of those repairs and is not a fix by
+itself. `qwen_mtp_diag.py` is the token-level qualification gate. The ordinary
+text benchmark cannot perform that job: it calls `/completion`, whereas the
+observed failure came through OpenAI chat completions with thinking, tool
+schemas, and streaming.
+
+This candidate deliberately targets the qualified production topology: one
+target context/slot, `--cache-ram 0`, and `--no-context-shift`. Its compact PLE
+history is reconstructed or truncated inside the live process; it is not yet a
+general serialized llama-state feature. Do not extend strict MTP to persisted
+slot-state restore, sequence copy/add, context shifting, or multiple target
+contexts until those PLE lifecycle operations have dedicated tests and state
+serialization support.
+
+The diagnostic sends one fixed agentic request through the complete 16-cell
+matrix:
+
+- `temperature` 0 and 1 with seed 1234;
+- streaming and non-streaming OpenAI chat completions; and
+- per-request `speculative.n_max` 0, 1, 2, and 3.
+
+Before every request it erases slot 0 and requires the server to report zero
+cached prompt tokens. It saves the exact request, raw JSON or SSE body, parsed
+SSE events, canonical reasoning/content/tool calls, exact generated token IDs,
+byte sequences, finite logprobs, and top-candidate evidence for non-stream
+requests, HTTP headers, and a request-scoped server-log slice. A non-stream cell
+missing any of that token evidence fails rather than silently weakening the
+comparison.
+The API key is never written to the result directory. Exact key occurrences
+are redacted from caller-supplied server logs, response bodies/headers, parsed
+artifacts, manifests, and result rows before those artifacts are saved or
+hashed.
+The fixture also defines a deliberately modest completion contract (nontrivial
+reasoning and final-answer lengths, a `benchmark` anchor, normal stop, and no
+tool call for this creative task), so a reproducibly garbled temperature-1
+answer cannot pass merely because stochastic cross-window tokens are allowed to
+differ.
+
+The checked-in fixture is a sanitized synthetic reproduction with the exact
+user prompt and substantial agentic tool schemas. For final qualification,
+replace only its `request` object with the exact OpenWebUI POST body captured
+from the failing request. Keep that private if its messages or tool definitions
+are sensitive; a diagnostic archive contains the complete request by design.
+The runner deliberately removes any request-level `reasoning_format` override,
+leaving llama-server's automatic Qwen handling in control.
+
+For the diagnostic server, set `LLAMA_TRACE=1` and
+`LLAMA_LOG_VERBOSITY=4` (or pass `-lv 4`) and tee stdout/stderr to the file
+given to `--server-log`. The trace records accepted-draft blocks while debug
+logging records sampled IDs and state transitions, allowing the external first
+token mismatch to be correlated with the responsible verification cycle. The
+runner parses each request-scoped canonical `accepted X/Y draft tokens` trace
+line into structured evidence. It excludes the later debug-only
+`new n_tokens` summary for that same cycle, so event counts are not doubled.
+
+Run a one-pass smoke against a foreground server whose stdout/stderr is also
+being written to a file:
+
+```bash
+read -rsp "API key: " QWEN_TEST_API_KEY
+echo
+export QWEN_TEST_API_KEY
+
+python3 qwen_mtp_diag.py run \
+  --url http://127.0.0.1:8080 \
+  --server-label strict \
+  --server-log /tmp/qwen-mtp-strict-server.log
+
+unset QWEN_TEST_API_KEY
+```
+
+For final qualification, first run the same three-repeat matrix against a
+target-only server and retain its result directory. Then run the strict
+candidate with that target directory as the no-sidecar reference:
+
+```bash
+python3 qwen_mtp_diag.py run \
+  --url http://127.0.0.1:8080 \
+  --server-label target \
+  --server-log /tmp/qwen-mtp-target-server.log \
+  --repeats 3
+
+# Restart with LLAMA_MTP_MODE=strict before running the candidate.
+python3 qwen_mtp_diag.py run \
+  --url http://127.0.0.1:8080 \
+  --server-label strict \
+  --server-log /tmp/qwen-mtp-strict-server.log \
+  --reference-run results/REPLACE-target-run \
+  --repeats 3 \
+  --require-pass
+```
+
+Use `--repeats 3 --require-pass` only for the final candidate. The pass gate
+refuses to run without `--reference-run`, and it requires every target-only
+n=0/non-stream temperature-and-repeat cell to have the identical request-body
+SHA-256, be successful, and retain a complete nonempty exact token trace. At
+temperature zero, n=1/2/3 must match n=0 token-for-token while reporting
+nonzero drafted tokens; the report gives the exact first mismatching token ID,
+byte sequence, logprob, and preceding prefix. A
+loaded-sidecar n=0 mismatch against the target-only reference implicates the
+request bypass or hidden-state export.
+An n=1 greedy mismatch implicates single-row state/acceptance; n=1 matching with
+n=2/3 failures instead points at multi-row verification, recurrent rollback, or
+the 256-cell attention boundary. In addition, `--require-pass` requires the
+n=3 arms collectively to contain 0/3, 1/3, and 2/3 partial-acceptance events in
+their `LLAMA_TRACE` slices. Those events exercise rollback distances three, two,
+and one respectively; merely drafting tokens or observing full 3/3 acceptance
+does not qualify the rollback repair. The summary reports counts and case IDs
+for each required event and names any missing path. Streaming must reconstruct
+to the same reasoning, answer, tool calls, and finish reason as its paired
+non-stream arm.
+
+llama-server rejects `logprobs` together with tools and streaming. Consequently,
+the exact token trace comes from each paired non-stream request, while the raw
+SSE arm independently tests transport and chat parsing. Temperature-1
+cross-window token differences are recorded but are not an exact-equivalence
+failure because speculative sampling may consume RNG differently; fixed-seed
+repeatability and stream/non-stream parity remain hard gates.
+
 Rebuild and audit the server normally. The target-only launcher does not require
 the experimental MTP marker; strict mode will refuse to start without it:
 

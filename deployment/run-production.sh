@@ -18,7 +18,7 @@ are accepted by llama-server. Use --check to validate without starting it.
 
 MTP is disabled by default because long agentic text responses failed the
 target-only equivalence check. LLAMA_MTP_MODE=strict is an experimental opt-in
-that requires the patched Qwen4Exp strict-verification runtime.
+that requires the patched Qwen4Exp state-correctness and strict-verification runtime.
 EOF
 }
 
@@ -127,6 +127,11 @@ if [[ ! -x "$llama_server" ]]; then
     echo "llama-server is missing or not executable: $llama_server" >&2
     exit 66
 fi
+build_dir="$(cd -- "$(dirname -- "$llama_server")/.." && pwd)"
+llama_library="$build_dir/bin/libllama.so"
+[[ -f "$llama_library" ]] || llama_library="$build_dir/lib/libllama.so"
+common_library="$build_dir/bin/libllama-common.so"
+[[ -f "$common_library" ]] || common_library="$build_dir/lib/libllama-common.so"
 for required in "$model" "$mmproj"; do
     if [[ ! -f "$required" ]]; then
         echo "Required model file is missing: $required" >&2
@@ -145,6 +150,29 @@ fi
 if [[ "$mtp_mode" == "strict" ]] &&
         ! grep -aFq 'Qwen/Qwen4Exp strict MTP: boundary-safe multi-row verification' "$llama_server"; then
     echo "llama-server lacks Qwen4Exp text strict verification; rebuild with ./build-rocm10-dual.sh" >&2
+    exit 66
+fi
+if [[ "$mtp_mode" == "strict" && ! -f "$llama_library" ]]; then
+    echo "Strict MTP requires libllama.so beside the selected server build" >&2
+    exit 66
+fi
+if [[ "$mtp_mode" == "strict" && ! -f "$common_library" ]]; then
+    echo "Strict MTP requires libllama-common.so beside the selected server build" >&2
+    exit 66
+fi
+if [[ "$mtp_mode" == "strict" ]] &&
+        ! grep -aFq 'qwen4exp recurrent conv rollback snapshots enabled' "$llama_library"; then
+    echo "libllama.so lacks Qwen4Exp recurrent rollback snapshots; rebuild with ./build-rocm10-dual.sh" >&2
+    exit 66
+fi
+if [[ "$mtp_mode" == "strict" ]] &&
+        ! grep -aFq 'non-consecutive Qwen4Exp PLE history position' "$llama_library"; then
+    echo "libllama.so lacks rollback-aware Qwen4Exp PLE history; rebuild with ./build-rocm10-dual.sh" >&2
+    exit 66
+fi
+if [[ "$mtp_mode" == "strict" ]] &&
+        ! grep -aFq 'MTP verifier state-correctness patch active' "$common_library"; then
+    echo "libllama-common.so lacks the MTP verifier state fix; rebuild with ./build-rocm10-dual.sh" >&2
     exit 66
 fi
 
