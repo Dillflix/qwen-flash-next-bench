@@ -49,6 +49,8 @@ jobs:
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
+          git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-mtp-vision-resync.patch"
+          git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-mtp-vision-resync.patch"
           git -C rocmfpx apply --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
           git -C rocmfpx apply --reverse --check --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
           git -C rocmfpx apply --reverse --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
@@ -60,6 +62,8 @@ jobs:
             -DGGML_HIP=OFF \
             -DGGML_VULKAN=OFF \
             -DLLAMA_CURL=OFF \
-            -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_SERVER=ON \
             -DLLAMA_BUILD_TESTS=OFF
-          cmake --build rocmfpx/build-ci --parallel 2 --target llama-cli
+          cmake --build rocmfpx/build-ci --parallel 2 --target llama-cli llama-server
+          grep -aFq 'MTP multimodal resync: skipping direct image decode' \
+            rocmfpx/build-ci/bin/libllama-server-impl.so

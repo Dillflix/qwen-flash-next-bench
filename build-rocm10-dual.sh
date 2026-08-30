@@ -11,6 +11,7 @@ EXPECTED_REV="${ROCMFPX_REV:-36e9acd40e10a87cd3c3ef8ec734668757dc8520}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 QWEN4EXP_MTP_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp.patch"
 QWEN4EXP_MTP_SCHED_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
+MTP_VISION_RESYNC_PATCH="$SCRIPT_DIR/patches/rocmfpx-mtp-vision-resync.patch"
 HOST_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-host-checkpoints.patch"
 LEGACY_HOST_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-host-checkpoints-v1-broken.patch"
 
@@ -25,6 +26,7 @@ actual_rev="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
     || fail "ROCmFPX is at $actual_rev, expected pinned revision $EXPECTED_REV"
 [[ -f "$QWEN4EXP_MTP_PATCH" ]] || fail "missing qwen4exp MTP patch: $QWEN4EXP_MTP_PATCH"
 [[ -f "$QWEN4EXP_MTP_SCHED_PATCH" ]] || fail "missing qwen4exp MTP scheduling patch: $QWEN4EXP_MTP_SCHED_PATCH"
+[[ -f "$MTP_VISION_RESYNC_PATCH" ]] || fail "missing MTP vision-resync patch: $MTP_VISION_RESYNC_PATCH"
 [[ -f "$HOST_CHECKPOINT_PATCH" ]] || fail "missing host-checkpoint patch: $HOST_CHECKPOINT_PATCH"
 [[ -f "$LEGACY_HOST_CHECKPOINT_PATCH" ]] || fail "missing legacy host-checkpoint repair patch: $LEGACY_HOST_CHECKPOINT_PATCH"
 
@@ -59,6 +61,11 @@ apply_patch_once \
     "qwen4exp MTP hidden-state scheduling patch" \
     "src/models/qwen4exp.cpp" \
     "qwen4exp_mtp_h_pre_norm_scheduled"
+apply_patch_once \
+    "$MTP_VISION_RESYNC_PATCH" \
+    "MTP multimodal-resync patch" \
+    "tools/server/server-context.cpp" \
+    "MTP multimodal resync: skipping direct image decode"
 
 # Commit dc18127 shipped a zero-context patch whose additions were accepted by
 # git-apply at EOF instead of inside the four checkpoint methods. Repair source
@@ -80,6 +87,8 @@ grep -Fq '~LLAMA_STATE_SEQ_FLAGS_ON_DEVICE' "$SOURCE_DIR/common/common.cpp" \
     || fail "host-checkpoint source does not clear the device-storage flag"
 grep -Fq 'forcing checkpoint state to host memory' "$SOURCE_DIR/common/common.cpp" \
     || fail "host-checkpoint source lacks the runtime confirmation marker"
+grep -Fq 'MTP multimodal resync: skipping direct image decode' "$SOURCE_DIR/tools/server/server-context.cpp" \
+    || fail "server source lacks the MTP multimodal-resync marker"
 grep -Rq 'Q4_0_ROCMFP4_FAST' "$SOURCE_DIR/ggml/src/ggml-cuda" \
     || fail "source tree lacks ROCmFP4_FAST dispatch in ggml/src/ggml-cuda"
 grep -q 'rocmfp4_hip.cu' "$SOURCE_DIR/ggml/src/ggml-hip/CMakeLists.txt" \
@@ -168,12 +177,17 @@ LLAMA_LIBRARY="$BUILD_DIR/bin/libllama.so"
 COMMON_LIBRARY="$BUILD_DIR/bin/libllama-common.so"
 [[ -f "$COMMON_LIBRARY" ]] || COMMON_LIBRARY="$BUILD_DIR/lib/libllama-common.so"
 [[ -f "$COMMON_LIBRARY" ]] || fail "build completed without libllama-common.so"
+SERVER_LIBRARY="$BUILD_DIR/bin/libllama-server-impl.so"
+[[ -f "$SERVER_LIBRARY" ]] || SERVER_LIBRARY="$BUILD_DIR/lib/libllama-server-impl.so"
+[[ -f "$SERVER_LIBRARY" ]] || fail "build completed without libllama-server-impl.so"
 grep -aFq 'qwen4exp MTP requires exactly one appended prediction layer' "$LLAMA_LIBRARY" \
     || fail "libllama.so lacks the compiled qwen4exp MTP integration marker"
 grep -aFq 'qwen4exp_mtp_h_pre_norm_scheduled' "$LLAMA_LIBRARY" \
     || fail "libllama.so lacks the compiled qwen4exp MTP hidden-state scheduling marker"
 grep -aFq 'LLAMA_CKPT_FORCE_HOST' "$COMMON_LIBRARY" \
     || fail "libllama-common.so lacks the compiled host-checkpoint marker"
+grep -aFq 'MTP multimodal resync: skipping direct image decode' "$SERVER_LIBRARY" \
+    || fail "libllama-server-impl.so lacks the compiled MTP multimodal-resync marker"
 
 targets="$(strings "$HIP_LIBRARY" | grep -oE 'gfx[0-9a-f]{3,5}[a-z]*' | sort -u | tr '\n' ' ')"
 [[ " $targets " == *' gfx1100 '* ]] || fail "libggml-hip.so lacks a gfx1100 code object"
@@ -186,6 +200,7 @@ echo "  build:  $BUILD_DIR"
 echo "  ROCm:   $ROCM_ROOT"
 echo "  code objects: $targets"
 echo "  qwen4exp MTP: compiled"
+echo "  MTP + vision resync: compiled"
 echo "  host checkpoints: LLAMA_CKPT_FORCE_HOST supported"
 echo
 echo "Next: python3 qwen_rocm.py collect --llama-dir '$SOURCE_DIR' --build-dir '$BUILD_DIR' --rocm '$ROCM_ROOT'"

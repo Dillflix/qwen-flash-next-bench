@@ -41,11 +41,12 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.36.3"
+VERSION = "1.37.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
 HOST_CHECKPOINT_MARKER = "LLAMA_CKPT_FORCE_HOST"
+MTP_VISION_RESYNC_MARKER = "MTP multimodal resync: skipping direct image decode"
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
     "-md",
@@ -1358,6 +1359,7 @@ def extract_vision_log_metrics(text: str) -> dict[str, Any]:
         "image_encode_ms": sum(encoded) if encoded else None,
         "image_decode_ms": sum(decoded) if decoded else None,
         "image_process_ms": processed[-1] if processed else None,
+        "mtp_vision_resync": MTP_VISION_RESYNC_MARKER in text,
     }
 
 
@@ -1546,6 +1548,13 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
         build_root / "lib" / "libllama-common.so",
     ]
     common_library = next((path for path in common_candidates if path.is_file()), common_candidates[0])
+    server_impl_candidates = [
+        build_root / "bin" / "libllama-server-impl.so",
+        build_root / "lib" / "libllama-server-impl.so",
+    ]
+    server_impl_library = next(
+        (path for path in server_impl_candidates if path.is_file()), server_impl_candidates[0]
+    )
     test_binary = build_root / "bin" / "test-backend-ops"
     result: dict[str, Any] = {}
     for name, path in (
@@ -1553,6 +1562,7 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
         ("hip_library", library),
         ("llama_library", llama_library),
         ("common_library", common_library),
+        ("server_impl_library", server_impl_library),
         ("test_backend_ops", test_binary),
     ):
         result[name] = {
@@ -1594,6 +1604,15 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["common_library"]["host_checkpoint_marker"] = False
     else:
         result["common_library"]["host_checkpoint_marker"] = False
+    if server_impl_library.is_file():
+        try:
+            result["server_impl_library"]["mtp_vision_resync_marker"] = (
+                MTP_VISION_RESYNC_MARKER.encode("ascii") in server_impl_library.read_bytes()
+            )
+        except OSError:
+            result["server_impl_library"]["mtp_vision_resync_marker"] = False
+    else:
+        result["server_impl_library"]["mtp_vision_resync_marker"] = False
     return result
 
 
@@ -1670,6 +1689,27 @@ def inspect_host_checkpoint_source(repo: pathlib.Path) -> dict[str, Any]:
     }
 
 
+def inspect_mtp_vision_resync_source(repo: pathlib.Path) -> dict[str, Any]:
+    server_path = repo / "tools" / "server" / "server-context.cpp"
+    speculative_path = repo / "common" / "speculative.cpp"
+    server_text = server_path.read_text(encoding="utf-8", errors="ignore") if server_path.is_file() else ""
+    speculative_text = (
+        speculative_path.read_text(encoding="utf-8", errors="ignore")
+        if speculative_path.is_file() else ""
+    )
+    markers = {
+        MTP_VISION_RESYNC_MARKER: MTP_VISION_RESYNC_MARKER in server_text,
+        "target_conditioned_draft": "target_conditioned_draft" in server_text,
+        "missing_boundary_resync": "resyncing after a non-token batch" in speculative_text,
+    }
+    return {
+        "ready": server_path.is_file() and speculative_path.is_file() and all(markers.values()),
+        "server_file": str(server_path),
+        "speculative_file": str(speculative_path),
+        "markers": markers,
+    }
+
+
 def backend_ops_passed(capture: dict[str, Any]) -> tuple[bool, int, int]:
     if capture.get("returncode") != 0:
         return False, 0, 0
@@ -1697,6 +1737,7 @@ def run_rocm_audit(
     source = inspect_rocmfp4_sources(repo)
     qwen4exp_mtp_source = inspect_qwen4exp_mtp_sources(repo)
     host_checkpoint_source = inspect_host_checkpoint_source(repo)
+    mtp_vision_resync_source = inspect_mtp_vision_resync_source(repo)
     server = pathlib.Path(fingerprint["server"]["path"])
     test_binary = pathlib.Path(fingerprint["test_backend_ops"]["path"])
     gfx_targets = set(fingerprint["hip_library"].get("gfx_targets", []))
@@ -1768,9 +1809,16 @@ def run_rocm_audit(
     ready_for_host_checkpoint_benchmarks = bool(
         ready_for_model_benchmarks and host_checkpoint_source["ready"] and compiled_host_checkpoints
     )
+    compiled_mtp_vision_resync = bool(
+        fingerprint.get("server_impl_library", {}).get("mtp_vision_resync_marker")
+    )
+    ready_for_mtp_vision_benchmarks = bool(
+        ready_for_mtp_benchmarks and mtp_vision_resync_source["ready"] and compiled_mtp_vision_resync
+    )
     reasons: list[str] = []
     mtp_reasons: list[str] = []
     host_checkpoint_reasons: list[str] = []
+    mtp_vision_reasons: list[str] = []
     if not source["static_dispatch_ready"]:
         reasons.append("ROCmFP4 and ROCmFP4_FAST are not both wired into the compiled HIP runtime source tree")
     if not test_binary.is_file():
@@ -1795,16 +1843,30 @@ def run_rocm_audit(
         host_checkpoint_reasons.append(
             "libllama-common.so lacks the compiled LLAMA_CKPT_FORCE_HOST marker; rebuild with build-rocm10-dual.sh"
         )
+    if not mtp_vision_resync_source["ready"]:
+        mtp_vision_reasons.append(
+            "the pinned source tree lacks the MTP multimodal-resync integration"
+        )
+    if not compiled_mtp_vision_resync:
+        mtp_vision_reasons.append(
+            "libllama-server-impl.so lacks the compiled MTP multimodal-resync marker; rebuild with build-rocm10-dual.sh"
+        )
+    if not ready_for_mtp_benchmarks:
+        mtp_vision_reasons.append(
+            "the prerequisite qwen4exp MTP audit gate has not passed"
+        )
     report = {
-        "schema": 5,
+        "schema": 6,
         "ts": utc_now(),
         "harness_version": VERSION,
         "ready_for_model_benchmarks": ready_for_model_benchmarks,
         "ready_for_mtp_benchmarks": ready_for_mtp_benchmarks,
         "ready_for_host_checkpoint_benchmarks": ready_for_host_checkpoint_benchmarks,
+        "ready_for_mtp_vision_benchmarks": ready_for_mtp_vision_benchmarks,
         "source": source,
         "qwen4exp_mtp_source": qwen4exp_mtp_source,
         "host_checkpoint_source": host_checkpoint_source,
+        "mtp_vision_resync_source": mtp_vision_resync_source,
         "build_fingerprint": fingerprint,
         "devices_requested": devices,
         "device_list_log": str(pathlib.Path("rocm-audit-logs") / "devices.txt"),
@@ -1817,6 +1879,7 @@ def run_rocm_audit(
         "reasons": reasons,
         "mtp_reasons": mtp_reasons,
         "host_checkpoint_reasons": host_checkpoint_reasons,
+        "mtp_vision_reasons": mtp_vision_reasons,
     }
     atomic_json(output, report)
     return report
@@ -1824,6 +1887,7 @@ def run_rocm_audit(
 
 def validate_rocm_audit(
     config: dict[str, Any], *, require_mtp: bool = False, require_host_checkpoints: bool = False,
+    require_mtp_vision: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     configured = config.get("variables", {}).get("rocm_audit")
     path = pathlib.Path(str(configured)) if configured else pathlib.Path(__file__).with_name("preflight") / "rocm-audit.json"
@@ -1839,6 +1903,9 @@ def validate_rocm_audit(
     current = rocm_build_fingerprint(config)
     audited = report.get("build_fingerprint", {})
     fingerprint_keys = ["server", "hip_library", "llama_library"]
+    if require_mtp_vision:
+        require_mtp = True
+        fingerprint_keys.append("server_impl_library")
     if require_host_checkpoints:
         fingerprint_keys.append("common_library")
     for key in fingerprint_keys:
@@ -1860,6 +1927,13 @@ def validate_rocm_audit(
     if require_host_checkpoints and not report.get("ready_for_host_checkpoint_benchmarks"):
         reasons = "; ".join(str(item) for item in report.get("host_checkpoint_reasons", []))
         return report, f"ROCm audit has not proven host-resident prompt checkpoints: {reasons}"
+    if require_mtp_vision and int(report.get("schema", 0)) < 6:
+        return report, "ROCm audit predates the MTP multimodal-resync gate; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
+    if require_mtp_vision and not current.get("server_impl_library", {}).get("mtp_vision_resync_marker"):
+        return report, "current libllama-server-impl.so lacks the MTP multimodal-resync fix; rerun `./build-rocm10-dual.sh` and the ROCm audit"
+    if require_mtp_vision and not report.get("ready_for_mtp_vision_benchmarks"):
+        reasons = "; ".join(str(item) for item in report.get("mtp_vision_reasons", []))
+        return report, f"ROCm audit has not proven MTP plus vision support: {reasons}"
     return report, None
 
 
@@ -2106,11 +2180,12 @@ def preflight(
                 )
     if tier.get("startup_only") and (int(tier.get("warmups", 0)) != 0 or concurrency != 1):
         errors.append("startup-only tiers require warmups 0 and concurrency 1")
-    if tier.get("require_rocm_audit") or require_host_checkpoints:
+    if tier.get("require_rocm_audit") or require_host_checkpoints or tier.get("require_rocm_mtp_vision"):
         rocm_audit, audit_error = validate_rocm_audit(
             config,
             require_mtp=bool(tier.get("require_rocm_mtp")),
             require_host_checkpoints=require_host_checkpoints,
+            require_mtp_vision=bool(tier.get("require_rocm_mtp_vision")),
         )
         if audit_error:
             errors.append(audit_error)
@@ -2472,6 +2547,14 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             extra_request,
                         )
                         log_metrics = extract_vision_log_metrics(file_since(server.log_path, log_offset))
+                        if (
+                            tier.get("require_rocm_mtp_vision")
+                            and "-md" in effective_args
+                            and not log_metrics["mtp_vision_resync"]
+                        ):
+                            raise RuntimeError(
+                                "the MTP vision request completed without the runtime multimodal-resync marker"
+                            )
                         answer, _reasoning = response_text_parts(response)
                         return response, wall_ms, {
                             "image": str(case["image"]),
@@ -3473,7 +3556,13 @@ def self_test() -> None:
     vision_log = extract_vision_log_metrics(
         "image/slice encoded in 12.5 ms\nimage decoded (batch 1/1) in 3.5 ms\nimage processed in 16.2 ms\n"
     )
-    assert vision_log == {"image_encode_ms": 12.5, "image_decode_ms": 3.5, "image_process_ms": 16.2}
+    assert vision_log == {
+        "image_encode_ms": 12.5,
+        "image_decode_ms": 3.5,
+        "image_process_ms": 16.2,
+        "mtp_vision_resync": False,
+    }
+    assert extract_vision_log_metrics(MTP_VISION_RESYNC_MARKER)["mtp_vision_resync"] is True
     short = probe_row(
         "self-test", {"name": "test", "backend": "cpu"}, 0, "code", 0, 128,
         {"content": "", "timings": {"predicted_n": 0}}, 1.0, None, {},
@@ -4180,6 +4269,7 @@ def self_test() -> None:
     assert rocm_vision_smoke.get("mode") == "vision"
     assert rocm_vision_smoke.get("require_rocm_audit") is True
     assert rocm_vision_smoke.get("require_rocm_mtp") is True
+    assert rocm_vision_smoke.get("require_rocm_mtp_vision") is True
     rocm_vision_experiments = select_experiments(
         expanded_shipped_config, rocm_vision_smoke, None,
     )
@@ -4205,6 +4295,44 @@ def self_test() -> None:
     assert option_value(rocm_vision_mtp_args, "--spec-draft-n-max") == "3"
     assert option_value(rocm_vision_mtp_args, "--spec-draft-type-k") == "f16"
     assert option_value(rocm_vision_mtp_args, "--spec-draft-type-v") == "f16"
+    mtp_resync_tier = expanded_shipped_config["tiers"]["rocm-vision-mtp-resync-smoke"]
+    assert mtp_resync_tier.get("require_rocm_mtp_vision") is True
+    mtp_resync_experiments = select_experiments(expanded_shipped_config, mtp_resync_tier, None)
+    assert [item["name"] for item in mtp_resync_experiments] == [
+        "vision_bf16_igpu_hip_mtp_n3",
+    ]
+    rocm_vision_full = expanded_shipped_config["tiers"]["rocm-vision"]
+    assert rocm_vision_full.get("require_rocm_mtp_vision") is True
+    assert int(rocm_vision_full["ctx_size"]) == 262144
+    rocm_vision_full_experiments = select_experiments(
+        expanded_shipped_config, rocm_vision_full, None,
+    )
+    assert [item["name"] for item in rocm_vision_full_experiments] == [
+        "vision_bf16_igpu_prod_hip_no_mtp",
+        "vision_bf16_igpu_prod_hip_mtp_n3",
+    ]
+    for item in rocm_vision_full_experiments:
+        full_args = server_command(expanded_shipped_config, rocm_vision_full, item)[1:]
+        assert option_value(full_args, "--ctx-size") == "262144"
+        assert option_value(full_args, "--tensor-split") == "88,12"
+        assert option_value(full_args, "--ubatch-size") == "1536"
+        assert option_value(full_args, "--cache-type-k") == "f16"
+        assert option_value(full_args, "--cache-type-v") == "f16"
+        assert option_value(full_args, "--checkpoint-every-n-tokens") == "32768"
+        assert option_value(full_args, "--mmproj").endswith("-BF16.gguf")
+        assert "--mmproj-offload" in full_args
+        assert item.get("env", {}).get("MTMD_BACKEND_DEVICE") == "ROCm1"
+        assert item.get("env", {}).get(HOST_CHECKPOINT_MARKER) == "1"
+    assert "-md" not in server_command(
+        expanded_shipped_config, rocm_vision_full, rocm_vision_full_experiments[0],
+    )[1:]
+    full_mtp_args = server_command(
+        expanded_shipped_config, rocm_vision_full, rocm_vision_full_experiments[1],
+    )[1:]
+    assert option_value(full_mtp_args, "--spec-draft-device") == "ROCm0"
+    assert option_value(full_mtp_args, "--spec-draft-n-max") == "3"
+    assert option_value(full_mtp_args, "--spec-draft-type-k") == "f16"
+    assert option_value(full_mtp_args, "--spec-draft-type-v") == "f16"
     for tier_name in (
         "rocm-ple-ssd",
         "rocm-ple-storage-screen",
@@ -4215,6 +4343,7 @@ def self_test() -> None:
         "rocm-256k-capacity",
         "rocm-256k-full",
         "rocm-vision-smoke",
+        "rocm-vision-mtp-resync-smoke",
         "rocm-vision",
     ):
         production_tier = expanded_shipped_config["tiers"][tier_name]
@@ -4233,6 +4362,11 @@ def self_test() -> None:
     mtp_sched_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-qwen4exp-mtp-schedule-output.patch"
     assert mtp_sched_patch.is_file()
     assert QWEN4EXP_MTP_SCHED_MARKER in mtp_sched_patch.read_text(encoding="utf-8")
+    mtp_vision_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-mtp-vision-resync.patch"
+    assert mtp_vision_patch.is_file()
+    mtp_vision_patch_text = mtp_vision_patch.read_text(encoding="utf-8")
+    assert MTP_VISION_RESYNC_MARKER in mtp_vision_patch_text
+    assert "common_speculative_need_embd_pre_norm" in mtp_vision_patch_text
     host_checkpoint_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-host-checkpoints.patch"
     assert host_checkpoint_patch.is_file()
     host_checkpoint_patch_text = host_checkpoint_patch.read_text(encoding="utf-8")
@@ -4248,6 +4382,7 @@ def self_test() -> None:
     assert QWEN4EXP_MTP_MARKER in build_script
     assert QWEN4EXP_MTP_SCHED_MARKER in build_script
     assert HOST_CHECKPOINT_MARKER in build_script
+    assert MTP_VISION_RESYNC_MARKER in build_script
     assert "rocmfpx-host-checkpoints-v1-broken.patch" in build_script
     assert "apply --reverse --check --unidiff-zero" in build_script
     print(f"qwen_bench.py {VERSION}: self-test passed")

@@ -1,0 +1,29 @@
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -3137,9 +3137,19 @@ struct server_context_impl {
+                         if (ctx_dft) {
+-                            // TODO: in the future, figure out how to infuse target embeddings to the images
+-                            //       for now, we skip this for simplicity
+-                            //       maybe we simply need to call `common_speculative_process()` on the mtmd batches in the `process_chunk` above?
+-                            res = input_tokens.process_chunk(ctx_dft.get(), mctx, slot.prompt.n_tokens(), slot.prompt.tokens.pos_next(), slot.id, n_tokens_out);
+-                            if (res != 0) {
+-                                GGML_ABORT("failed to process multi-modal data on draft context\n");
++                            // Target-conditioned drafts (MTP/EAGLE-style) cannot consume the raw
++                            // projector embedding batch: it has no token ids and does not carry the
++                            // target hidden rows required by the draft graph. In particular, Qwen4Exp
++                            // MTP aborts while trying to build its token-embedding input. Leave a hole
++                            // in the draft KV for the image positions and resume on the following text
++                            // batch. The MTP implementation detects the missing boundary, seeds one
++                            // neutral row, and target verification safely rejects a poor first draft.
++                            const bool target_conditioned_draft =
++                                spec && common_speculative_need_embd_pre_norm(spec.get());
++                            if (target_conditioned_draft) {
++                                SLT_WRN(slot, "%s", "MTP multimodal resync: skipping direct image decode on target-conditioned draft context\n");
++                            } else {
++                                res = input_tokens.process_chunk(ctx_dft.get(), mctx, slot.prompt.n_tokens(), slot.prompt.tokens.pos_next(), slot.id, n_tokens_out);
++                                if (res != 0) {
++                                    GGML_ABORT("failed to process multi-modal data on draft context\n");
++                                }
+                             }
+                         }

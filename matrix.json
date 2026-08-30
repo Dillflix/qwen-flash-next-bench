@@ -1464,6 +1464,7 @@
       "mode": "vision",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
+      "require_rocm_mtp_vision": true,
       "cache_state": "hot",
       "experiments": [
         "vision_bf16_cpu_hip_no_mtp",
@@ -1491,15 +1492,47 @@
       "startup_timeout_s": 1200,
       "request_timeout_s": 1200
     },
-    "rocm-vision": {
-      "description": "Two-round BF16 ROCm vision validation on the iGPU projector with and without production n=3 MTP on the 7900 XT.",
+    "rocm-vision-mtp-resync-smoke": {
+      "description": "Focused regression test for the Qwen4Exp MTP multimodal resync patch: repeat only the formerly crashing BF16 iGPU-projector plus n=3 MTP cell.",
       "mode": "vision",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
+      "require_rocm_mtp_vision": true,
       "cache_state": "hot",
       "experiments": [
-        "vision_bf16_igpu_hip_no_mtp",
         "vision_bf16_igpu_hip_mtp_n3"
+      ],
+      "vision_cases": [
+        "shapes"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 8192,
+      "n_predict": 64,
+      "request": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "vision_min_anchor_score": 1.0,
+      "warmups": 1,
+      "rounds": 1,
+      "settle_seconds": 2,
+      "telemetry_interval_s": 0.2,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1200
+    },
+    "rocm-vision": {
+      "description": "Two-round BF16 ROCm vision validation at the native 256K allocation using the production 88/12, ubatch-1536 placement, iGPU projector, and an otherwise matched no-MTP control.",
+      "mode": "vision",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "require_rocm_mtp_vision": true,
+      "cache_state": "hot",
+      "experiments": [
+        "vision_bf16_igpu_prod_hip_no_mtp",
+        "vision_bf16_igpu_prod_hip_mtp_n3"
       ],
       "vision_cases": [
         "shapes",
@@ -1509,7 +1542,7 @@
       "depths": [
         0
       ],
-      "ctx_size": 16384,
+      "ctx_size": 262144,
       "n_predict": 128,
       "request": {
         "chat_template_kwargs": {
@@ -3272,6 +3305,47 @@
         "f16",
         "--spec-draft-type-v",
         "f16"
+      ]
+    },
+    {
+      "name": "vision_bf16_igpu_prod_hip_no_mtp",
+      "description": "BF16 projector on the iGPU with the otherwise matched 256K production target topology, 88/12 split, ubatch 1536, and host-resident prompt checkpoints, but no MTP.",
+      "extends": "prod_hip_256k_tail_88_12_no_mtp_ub1536",
+      "baseline": true,
+      "env": {
+        "LLAMA_CKPT_FORCE_HOST": "1",
+        "MTMD_BACKEND_DEVICE": "ROCm1"
+      },
+      "args_append": [
+        "--ctx-checkpoints",
+        "8",
+        "--checkpoint-every-n-tokens",
+        "32768",
+        "--mmproj",
+        "{mmproj_bf16}",
+        "--image-min-tokens",
+        "1024",
+        "--image-max-tokens",
+        "2240",
+        "--mmproj-offload"
+      ]
+    },
+    {
+      "name": "vision_bf16_igpu_prod_hip_mtp_n3",
+      "description": "Production 256K placement with BF16 projector on the iGPU and n=3 Q8_0 MTP on the 7900 XT; target and draft KV remain F16.",
+      "extends": "prod_hip_256k_tail_88_12_ub1536",
+      "baseline": false,
+      "env": {
+        "MTMD_BACKEND_DEVICE": "ROCm1"
+      },
+      "args_append": [
+        "--mmproj",
+        "{mmproj_bf16}",
+        "--image-min-tokens",
+        "1024",
+        "--image-max-tokens",
+        "2240",
+        "--mmproj-offload"
       ]
     }
   ]

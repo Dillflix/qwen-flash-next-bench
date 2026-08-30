@@ -171,29 +171,59 @@ backend-specific failures in llama.cpp, so a successful projector-only run is a
 hard prerequisite; `vision-mtp` is a compatibility gate, not an assumption that
 the combination is safe.
 
-The Vulkan tiers above remain useful historical controls. Production ROCm vision
-has its own bring-up path using the native joined model, BF16 projector, routed
-experts on the iGPU, CPU-mapped PLE, and prompt cache disabled. It tests the CPU
-projector first, then `MTMD_BACKEND_DEVICE=ROCm1` for the iGPU, and finally adds
-the n=3 Q8_0 MTP sidecar on `ROCm0` (the RX 7900 XT):
+The Vulkan tiers above remain useful historical controls. ROCm smoke run
+`20260829-211352-rocm-vision-smoke` proved that the native joined model and BF16
+projector are correct on ROCm. The CPU projector passed with 16.060 s image time,
+66.67 prompt tok/s, and 29.22 decode tok/s. Explicitly placing the same projector
+on the iGPU (`MTMD_BACKEND_DEVICE=ROCm1`) also passed, reducing image time to
+2.368 s while reaching 406.60 prompt tok/s and 32.39 decode tok/s. The iGPU BF16
+projector is therefore the production placement; spending 7900 XT VRAM on it is
+both unnecessary and contrary to the fixed MTP/target placement.
+
+The combined iGPU-projector plus n=3 MTP cell did not run out of memory. It
+finished the target image decode, immediately tried to decode the same raw image
+embedding batch on the Qwen4Exp MTP draft context, and aborted at
+`qwen4exp MTP requires token input`. This is the same unsupported speculative
+multimodal boundary tracked by llama.cpp
+[issue #19712](https://github.com/ggml-org/llama.cpp/issues/19712) and the
+MTP-specific failure in
+[issue #22867](https://github.com/ggml-org/llama.cpp/issues/22867).
+
+The pinned ROCmFPX build now carries a narrow experimental workaround. It skips
+only the invalid raw-image decode on a target-conditioned draft context. The
+target context still decodes the image normally and verifies every output token;
+the existing MTP boundary-resync path seeds the next draft boundary. This should
+preserve correctness, but the first proposal after an image may be rejected and
+acceptance must be measured rather than assumed. Rebuild, re-audit, and repeat
+only the formerly crashing cell:
 
 ```bash
-python3 qwen_bench.py preflight --tier rocm-vision-smoke
-./run-bench.sh --tier rocm-vision-smoke
+./build-rocm10-dual.sh
+python3 qwen_bench.py rocm-audit --run-ops
+python3 qwen_bench.py preflight --tier rocm-vision-mtp-resync-smoke
+./run-bench.sh --tier rocm-vision-mtp-resync-smoke --fail-fast
 ```
 
-Do not use `--fail-fast` for initial bring-up: the three isolated starts identify
-whether a failure belongs to ROCm vision support, iGPU projector offload, or the
-vision-plus-MTP combination. Once all three pass, run the complete fixture set:
+The preflight requires both a source marker and the compiled marker in
+`libllama-server-impl.so`, so the old crashing server cannot accidentally be
+benchmarked. Every MTP vision request must also emit the runtime resync marker or
+the harness fails the cell. If the focused cell passes its 100% anchor gate, run the complete
+fixture set. This final tier allocates the native 262144-token context and uses
+the selected production topology: 88/12 target split, ubatch 1536, CPU-mmap PLE,
+host checkpoints, iGPU BF16 projector, F16 target/draft KV, and n=3 Q8_0 MTP on
+the 7900 XT. Its no-MTP arm is otherwise matched:
 
 ```bash
 python3 qwen_bench.py preflight --tier rocm-vision
-./run-bench.sh --tier rocm-vision
+./run-bench.sh --tier rocm-vision --fail-fast
 ```
 
 Both ROCm tiers explicitly use F16 target KV and F16 draft KV. Q8 draft KV is not
 present. The Q8 projector is also excluded because the earlier Vulkan run failed
-the OCR quality gate; that is independent of the draft-KV decision.
+the OCR quality gate; that is independent of the draft-KV decision. If the
+resync workaround does not pass all three image fixtures, production vision must
+remain target-only/no-MTP rather than treating a server crash as a placement
+problem.
 
 The projector is deliberately not placed on the 7900 XT: its scarce VRAM is reserved
 for MTP and the selected target tensors. CPU versus iGPU projector placement remains
@@ -664,12 +694,15 @@ Revision `36e9acd40e10a87cd3c3ef8ec734668757dc8520` is pinned so a moving fork c
 silently change the experiment. The build script refuses another revision, the
 wrong source family, an incompatible existing CMake cache, or a library that does
 not contain both required code objects. It also applies
-`patches/rocmfpx-qwen4exp-mtp.patch`, its hidden-state scheduling follow-up, and
+`patches/rocmfpx-qwen4exp-mtp.patch`, its hidden-state scheduling follow-up,
+`patches/rocmfpx-mtp-vision-resync.patch`, and
 `patches/rocmfpx-host-checkpoints.patch` idempotently. This also upgrades a source
 tree that already has either earlier MTP patch. Version 1.36.1 also detects and
 removes the malformed zero-context host-checkpoint patch shipped in commit
 `dc18127` before applying its contextual replacement. The first two patches add the missing
-Qwen4Exp MTP sidecar loader/graph integration. The third adds an opt-in
+Qwen4Exp MTP sidecar loader/graph integration. The vision-resync patch prevents a
+target-conditioned draft from decoding tokenless projector embeddings directly;
+it remains experimental until the focused vision tier passes. The final patch adds an opt-in
 `LLAMA_CKPT_FORCE_HOST=1` path that clears the device-storage flag only for prompt
 checkpoint save/restore, retaining those checkpoints in host/unified RAM instead
 of discrete-GPU VRAM. None replaces the ROCmFP4 kernels or changes Vulkan. The
@@ -682,6 +715,7 @@ against `/opt/rocm-10.0.0` with:
 - `gfx1100;gfx1151` in both `CMAKE_HIP_ARCHITECTURES` and `GPU_TARGETS`;
 - `test-backend-ops` and compile-command metadata enabled;
 - a compiled Qwen4Exp MTP marker in `libllama.so`;
+- a compiled MTP multimodal-resync marker in `libllama-server-impl.so`;
 - a compiled host-checkpoint marker in `libllama-common.so`.
 
 Collect the new build evidence, then run the numerical gate:
@@ -697,7 +731,7 @@ python3 qwen_bench.py rocm-audit --run-ops
 
 Both commands create one `.tar.gz` plus a SHA-256 file automatically. The audit
 archive is written even when a gate fails, so failed numerical output is preserved.
-Any rebuild changes the server/HIP/libllama/libllama-common fingerprints, so the audit must be rerun
+Any rebuild changes the server/HIP/libllama/libllama-common/server-implementation fingerprints, so the audit must be rerun
 before model benchmarks.
 
 The audit has two independent functional gates on both GPUs:
