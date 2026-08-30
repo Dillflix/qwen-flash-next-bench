@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.45.8"
+VERSION = "1.45.10"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -4833,6 +4833,8 @@ def self_test() -> None:
     prompt_logit_marker_text = prompt_logit_marker_patch.read_text(encoding="utf-8")
     assert MTP_PROMPT_LOGIT_MASK_MARKER in prompt_logit_marker_text
     assert "slot.need_embd_pre_norm() && slot.n_prompt_tokens_processed == 0" in prompt_logit_marker_text
+    assert 'SLT_DBG(slot, "%s", "Qwen4Exp MTP prompt-logit mask active' in prompt_logit_marker_text
+    assert "LLAMA_LOG_DEBUG" not in prompt_logit_marker_text
     parsed_marker_patch = subprocess.run(
         ["git", "apply", "--numstat", str(prompt_logit_marker_patch)],
         text=True,
@@ -4841,6 +4843,19 @@ def self_test() -> None:
         check=False,
     )
     assert parsed_marker_patch.returncode == 0, parsed_marker_patch.stderr
+    prompt_logit_marker_repair = pathlib.Path(__file__).with_name("patches") / "rocmfpx-mtp-prompt-logit-mask-marker-repair.patch"
+    assert prompt_logit_marker_repair.is_file()
+    prompt_logit_marker_repair_text = prompt_logit_marker_repair.read_text(encoding="utf-8")
+    assert '-                            LLAMA_LOG_DEBUG("Qwen4Exp MTP prompt-logit mask active' in prompt_logit_marker_repair_text
+    assert '+                            SLT_DBG(slot, "%s", "Qwen4Exp MTP prompt-logit mask active' in prompt_logit_marker_repair_text
+    parsed_marker_repair = subprocess.run(
+        ["git", "apply", "--numstat", str(prompt_logit_marker_repair)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert parsed_marker_repair.returncode == 0, parsed_marker_repair.stderr
     host_checkpoint_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-host-checkpoints.patch"
     assert host_checkpoint_patch.is_file()
     host_checkpoint_patch_text = host_checkpoint_patch.read_text(encoding="utf-8")
@@ -4876,6 +4891,8 @@ def self_test() -> None:
     assert "rocmfpx-qwen4exp-target-export-order.patch" in build_script
     assert "rocmfpx-mtp-prompt-logit-mask.patch" in build_script
     assert "rocmfpx-mtp-prompt-logit-mask-marker.patch" in build_script
+    assert "rocmfpx-mtp-prompt-logit-mask-marker-repair.patch" in build_script
+    assert "Repaired invalid LLAMA_LOG_DEBUG prompt-logit marker." in build_script
     assert 'SERVER_BINARY="$BUILD_DIR/bin/llama-server"' in build_script
     assert "libllama-server-impl.so" not in build_script
     assert "rocmfpx-host-checkpoints-v1-broken.patch" in build_script
