@@ -30,7 +30,7 @@ import urllib.parse
 from typing import Any
 
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 DEFAULT_FIXTURE = pathlib.Path(__file__).resolve().parent / "diagnostics" / "mtp-agentic-openwebui.json"
 API_KEY_REDACTION = "[REDACTED_API_KEY]"
 
@@ -1736,9 +1736,10 @@ def classify_run(
             "fresh_slot_pass": not fresh_failures,
             "mtp_exercised": not mtp_not_exercised,
             "greedy_equivalence_pass": (
+                False if not expected_keys else
+                None if greedy_expected == 0 else
                 None if baseline_repeatability_pass is False else
-                greedy_expected > 0
-                and len(greedy_comparisons) == greedy_expected
+                len(greedy_comparisons) == greedy_expected
                 and not greedy_divergences
             ),
             "stream_transport_pass": (
@@ -2577,6 +2578,32 @@ def self_test() -> None:
             print_verdict(quick_report)
         assert "Stream transport: N/A (0/0 matched; 0/0 evaluated)" in captured.getvalue()
         assert "n_max=3 rollback coverage: N/A" in captured.getvalue()
+
+        production_root = root / "production-run"
+        production_root.mkdir()
+        atomic_json(production_root / "manifest.json", {"conditions": production_matrix})
+        production_rows: list[dict[str, Any]] = []
+        for condition in production_matrix:
+            source = next(
+                row for row in fake_rows
+                if row["temperature"] == condition["temperature"]
+                and row["n_max"] == condition["n_max"]
+                and row["stream"] == condition["stream"]
+            )
+            row = copy.deepcopy(source)
+            row.update(condition)
+            row["case_id"] = case_id("production", condition)
+            token_file = pathlib.Path("tokens") / f"{row['case_id']}.json"
+            atomic_json(production_root / token_file, load_trace(root, source))
+            row["token_file"] = str(token_file)
+            production_rows.append(row)
+        production_report = classify_run(production_root, production_rows)
+        assert production_report["comparison_coverage"]["greedy_expected"] == 0
+        assert production_report["acceptance"]["greedy_equivalence_pass"] is None
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            print_verdict(production_report)
+        assert "Greedy equivalence: N/A (0/0 matched; 0/0 evaluated)" in captured.getvalue()
 
         cold_root = root / "cold-start-run"
         cold_root.mkdir()

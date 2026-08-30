@@ -915,7 +915,8 @@ prime is not used by the classifier as evidence of ordinary target cold-start
 repeatability.
 
 The `20260830-185213-mtp-diagnostic-mtp-primed-full-short` run cleared the
-short correctness screen after one real `n_max=3` prime: greedy n=1/2/3 was
+8K checkpoint-diagnostic correctness screen after one real `n_max=3` prime:
+greedy n=1/2/3 was
 exactly target-equivalent, all eight stream/non-stream pairs matched, and the
 n=3 verifier exercised 0/3, 1/3, and 2/3 rollback. Its explicit 256-token cap
 made response-completeness verdicts intentionally inconclusive. Use the
@@ -945,6 +946,17 @@ python3 qwen_bench.py archive "$RUN"
 Do not pass `--max-tokens` in this qualification. The fixture's 4096-token
 allowance permits a normal `stop` or `tool_calls` completion and therefore
 tests the malformed/truncated OpenWebUI failure that the short run could not.
+
+The `20260830-190356-mtp-diagnostic-production-n03` result passed that focused
+request qualification: both fixed-seed repeats matched, all four stream pairs
+matched, every response completed with a valid `tool_calls` finish, and n=3
+again covered all three partial-acceptance rollback distances. It remained an
+8K `LLAMA_MTP_MODE=checkpoint-diagnostic` run. The server startup log explicitly
+reported that `--spec-mtp-strict-qwen` was not enabled. This proves the repaired
+checkpoint verifier and API transport; it does **not** qualify the exact 256K
+strict production service. Run the same profile against
+`LLAMA_MTP_MODE=strict` and `LLAMA_CONTEXT_SIZE=262144` before enabling MTP in
+the systemd environment or adding a startup prime.
 
 The forced-export arm proves graph-path parity only by making the n=0 control
 use the hidden-state-export graph. It is not a production fix: ordinary target
