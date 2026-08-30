@@ -1,0 +1,76 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -3399,6 +3399,14 @@ common_params_context common_params_parser_init(common_params & params, llama_e
+             params.speculative.mtp_strict_qwen = value;
+         }
+     ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_MTP_STRICT_QWEN"));
++    add_opt(common_arg(
++        {"--spec-mtp-strict-qwen4exp-vision"},
++        {"--no-spec-mtp-strict-qwen4exp-vision"},
++        "use checkpoint-backed single-row target verification for exact greedy Qwen4Exp vision MTP output; requires one slot/sequence (default: disabled)",
++        [](common_params & params, bool value) {
++            params.speculative.mtp_strict_qwen4exp_vision = value;
++        }
++    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SPEC_MTP_STRICT_QWEN4EXP_VISION"));
+     add_opt(common_arg(
+         {"--spec-draft-hf", "-hfd", "-hfrd", "--hf-repo-draft"}, "<user>/<model>[:quant]",
+         "Same as --hf-repo, but for the draft model (default: unused)",
+diff --git a/common/common.cpp b/common/common.cpp
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -1581,7 +1581,10 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+ 
+     cparams.n_ctx             = params.n_ctx;
+     cparams.n_seq_max         = params.n_parallel;
+-    cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
++    // Single-row Qwen4Exp verification cannot coexist with the recurrent
++    // rollback splitter's (1 + n_rs_seq)-row keep-tail requirement. Use the
++    // existing full-state checkpoint path for this explicit vision mode.
++    cparams.n_rs_seq          = params.speculative.mtp_strict_qwen4exp_vision ? 0 : params.speculative.need_n_rs_seq();
+     cparams.n_batch           = params.n_batch;
+     cparams.n_ubatch          = params.n_ubatch;
+     cparams.n_threads         = params.cpuparams.n_threads;
+diff --git a/common/common.h b/common/common.h
+--- a/common/common.h
++++ b/common/common.h
+@@ -349,6 +349,7 @@ struct common_params_speculative {
+     std::vector<enum common_speculative_type> types = { COMMON_SPECULATIVE_TYPE_NONE };
+     bool mtp_strict = true;
+     bool mtp_strict_qwen = false;
++    bool mtp_strict_qwen4exp_vision = false;
+ 
+     // used by Simple, MTP, Eagle3, etc. - all methods that require some kind of draft model
+     common_params_speculative_draft draft;
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -840,7 +840,7 @@ struct server_context_impl {
+             strict_qwen_mtp_verification = is_qwen35 && has_mtp && params_base.speculative.mtp_strict_qwen;
+             strict_qwen4exp_vision_mtp_verification =
+                 is_qwen4exp && has_mtp && !params_base.mmproj.path.empty() &&
+-                params_base.speculative.mtp_strict;
++                params_base.speculative.mtp_strict_qwen4exp_vision;
+ 
+             if (params_base.speculative.mtp_strict_qwen && !strict_qwen_mtp_verification) {
+                 SRV_ERR("%s", "--spec-mtp-strict-qwen requires a qwen35 or qwen35moe target with draft-mtp enabled\n");
+@@ -848,6 +848,11 @@ struct server_context_impl {
+                 return false;
+             }
+ 
++            if (params_base.speculative.mtp_strict_qwen4exp_vision && !strict_qwen4exp_vision_mtp_verification) {
++                SRV_ERR("%s", "--spec-mtp-strict-qwen4exp-vision requires a qwen4exp target, mmproj, and draft-mtp\n");
++                return false;
++            }
++
+             if (strict_hy3_mtp_verification) {
+                 if (params_base.n_parallel != 1) {
+                     SRV_ERR("%s", "HY3 strict MTP requires a single server slot; restart with -np 1 or use --no-spec-mtp-strict\n");
+@@ -879,6 +884,7 @@ struct server_context_impl {
+                     return false;
+                 }
+                 SRV_WRN("%s", "Qwen4Exp vision MTP: single-row target verification enabled for exact greedy output\n");
++                SRV_WRN("%s", "Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints\n");
+             } else if (is_qwen4exp && has_mtp && !params_base.mmproj.path.empty()) {
+                 SRV_WRN("%s", "Qwen4Exp vision MTP strict verification is disabled; greedy output may diverge from no-spec decoding\n");
+             }

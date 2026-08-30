@@ -53,6 +53,8 @@ jobs:
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-mtp-vision-resync.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-vision-strict.patch"
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-vision-strict.patch"
+          git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-vision-strict-checkpoint.patch"
+          git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-vision-strict-checkpoint.patch"
           git -C rocmfpx apply --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
           git -C rocmfpx apply --reverse --check --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
           git -C rocmfpx apply --reverse --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
@@ -70,4 +72,6 @@ jobs:
           grep -aFq 'MTP multimodal resync: skipping direct image decode' \
             rocmfpx/build-ci/bin/llama-server
           grep -aFq 'Qwen4Exp vision MTP: single-row target verification enabled' \
+            rocmfpx/build-ci/bin/llama-server
+          grep -aFq 'Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints' \
             rocmfpx/build-ci/bin/llama-server

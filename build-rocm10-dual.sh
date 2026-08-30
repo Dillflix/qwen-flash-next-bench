@@ -13,6 +13,7 @@ QWEN4EXP_MTP_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp.patch"
 QWEN4EXP_MTP_SCHED_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
 MTP_VISION_RESYNC_PATCH="$SCRIPT_DIR/patches/rocmfpx-mtp-vision-resync.patch"
 QWEN4EXP_VISION_STRICT_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-vision-strict.patch"
+QWEN4EXP_VISION_STRICT_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-vision-strict-checkpoint.patch"
 HOST_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-host-checkpoints.patch"
 LEGACY_HOST_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-host-checkpoints-v1-broken.patch"
 
@@ -29,6 +30,7 @@ actual_rev="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
 [[ -f "$QWEN4EXP_MTP_SCHED_PATCH" ]] || fail "missing qwen4exp MTP scheduling patch: $QWEN4EXP_MTP_SCHED_PATCH"
 [[ -f "$MTP_VISION_RESYNC_PATCH" ]] || fail "missing MTP vision-resync patch: $MTP_VISION_RESYNC_PATCH"
 [[ -f "$QWEN4EXP_VISION_STRICT_PATCH" ]] || fail "missing Qwen4Exp vision strict-verification patch: $QWEN4EXP_VISION_STRICT_PATCH"
+[[ -f "$QWEN4EXP_VISION_STRICT_CHECKPOINT_PATCH" ]] || fail "missing Qwen4Exp vision checkpoint-backed strict patch: $QWEN4EXP_VISION_STRICT_CHECKPOINT_PATCH"
 [[ -f "$HOST_CHECKPOINT_PATCH" ]] || fail "missing host-checkpoint patch: $HOST_CHECKPOINT_PATCH"
 [[ -f "$LEGACY_HOST_CHECKPOINT_PATCH" ]] || fail "missing legacy host-checkpoint repair patch: $LEGACY_HOST_CHECKPOINT_PATCH"
 
@@ -73,6 +75,11 @@ apply_patch_once \
     "Qwen4Exp vision strict-verification patch" \
     "tools/server/server-context.cpp" \
     "Qwen4Exp vision MTP: single-row target verification enabled"
+apply_patch_once \
+    "$QWEN4EXP_VISION_STRICT_CHECKPOINT_PATCH" \
+    "Qwen4Exp vision checkpoint-backed strict-verification patch" \
+    "tools/server/server-context.cpp" \
+    "Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints"
 
 # Commit dc18127 shipped a zero-context patch whose additions were accepted by
 # git-apply at EOF instead of inside the four checkpoint methods. Repair source
@@ -98,6 +105,10 @@ grep -Fq 'MTP multimodal resync: skipping direct image decode' "$SOURCE_DIR/tool
     || fail "server source lacks the MTP multimodal-resync marker"
 grep -Fq 'Qwen4Exp vision MTP: single-row target verification enabled' "$SOURCE_DIR/tools/server/server-context.cpp" \
     || fail "server source lacks the Qwen4Exp vision strict-verification marker"
+grep -Fq 'Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints' "$SOURCE_DIR/tools/server/server-context.cpp" \
+    || fail "server source lacks the Qwen4Exp vision checkpoint-backed strict marker"
+grep -Fq 'mtp_strict_qwen4exp_vision ? 0' "$SOURCE_DIR/common/common.cpp" \
+    || fail "common context source does not disable recurrent rollback for strict Qwen4Exp vision MTP"
 grep -Rq 'Q4_0_ROCMFP4_FAST' "$SOURCE_DIR/ggml/src/ggml-cuda" \
     || fail "source tree lacks ROCmFP4_FAST dispatch in ggml/src/ggml-cuda"
 grep -q 'rocmfp4_hip.cu' "$SOURCE_DIR/ggml/src/ggml-hip/CMakeLists.txt" \
@@ -198,6 +209,8 @@ grep -aFq 'MTP multimodal resync: skipping direct image decode' "$SERVER_BINARY"
     || fail "llama-server lacks the compiled MTP multimodal-resync marker"
 grep -aFq 'Qwen4Exp vision MTP: single-row target verification enabled' "$SERVER_BINARY" \
     || fail "llama-server lacks the compiled Qwen4Exp vision strict-verification marker"
+grep -aFq 'Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints' "$SERVER_BINARY" \
+    || fail "llama-server lacks the compiled Qwen4Exp vision checkpoint-backed strict marker"
 
 targets="$(strings "$HIP_LIBRARY" | grep -oE 'gfx[0-9a-f]{3,5}[a-z]*' | sort -u | tr '\n' ' ')"
 [[ " $targets " == *' gfx1100 '* ]] || fail "libggml-hip.so lacks a gfx1100 code object"
@@ -212,6 +225,7 @@ echo "  code objects: $targets"
 echo "  qwen4exp MTP: compiled"
 echo "  MTP + vision resync: compiled"
 echo "  Qwen4Exp vision strict verification: compiled"
+echo "  Qwen4Exp vision strict checkpoints: compiled"
 echo "  host checkpoints: LLAMA_CKPT_FORCE_HOST supported"
 echo
 echo "Next: python3 qwen_rocm.py collect --llama-dir '$SOURCE_DIR' --build-dir '$BUILD_DIR' --rocm '$ROCM_ROOT'"

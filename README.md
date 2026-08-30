@@ -201,10 +201,19 @@ answer (24.39 versus 32.39 decode tok/s).
 Because the requests are greedy, an ungrounded draft should reduce acceptance,
 not change the target answer. The remaining divergence is therefore tested at
 the target verifier. Qwen4Exp is recurrent, but the pinned server's existing
-single-row exact-verification path recognized HY3 only. The second patch enables
-that same serial target verification automatically for Qwen4Exp when both MTP
-and a projector are loaded. Text-only MTP is unchanged; `--no-spec-mtp-strict`
-can still disable the diagnostic path. Rebuild, re-audit, and run the matched A/B:
+single-row exact-verification path recognized HY3 only. The first strict attempt
+correctly selected that path but immediately asserted at
+`n_ubatch > n_keep_tail`: n=3 bounded rollback requires four trailing rows to
+remain in one microbatch, so it cannot also perform one-row verification.
+
+The checkpoint follow-up resolves that incompatibility explicitly. The harness
+passes `--spec-mtp-strict-qwen4exp-vision`, which disables bounded recurrent
+rollback only for this Qwen4Exp vision context and uses the server's full-state
+speculative checkpoints instead. Target verification can then run one row at a
+time. `LLAMA_CKPT_FORCE_HOST=1` keeps both control and MTP checkpoint state in
+host/unified RAM rather than spending 7900 XT VRAM. Text-only MTP and every
+non-vision topology remain unchanged. Rebuild,
+re-audit, and run the matched A/B:
 
 ```bash
 ./build-rocm10-dual.sh
@@ -215,9 +224,9 @@ python3 qwen_bench.py preflight --tier rocm-vision-mtp-strict-ab
 
 The A/B uses two fresh-server rounds of the same image, target model, iGPU BF16
 projector, sampler, and 64-token budget. The target-only arm is the explicit output-hash
-baseline. The MTP arm must both emit the runtime resync marker and enable the
-compiled Qwen4Exp single-row verification marker; 100% anchors and hash agreement
-are the correctness criteria. Compare decode speed only after those pass. If
+baseline. The MTP arm must emit the runtime resync, single-row verification, and
+checkpoint-backed rollback markers; 100% anchors and hash agreement are the
+correctness criteria. Compare decode speed only after those pass. If
 strict verification restores correctness but loses to target-only, production
 vision should automatically omit MTP rather than accept a quality regression.
 
@@ -709,15 +718,17 @@ wrong source family, an incompatible existing CMake cache, or a library that doe
 not contain both required code objects. It also applies
 `patches/rocmfpx-qwen4exp-mtp.patch`, its hidden-state scheduling follow-up,
 `patches/rocmfpx-mtp-vision-resync.patch`,
-`patches/rocmfpx-qwen4exp-vision-strict.patch`, and
+`patches/rocmfpx-qwen4exp-vision-strict.patch`,
+`patches/rocmfpx-qwen4exp-vision-strict-checkpoint.patch`, and
 `patches/rocmfpx-host-checkpoints.patch` idempotently. This also upgrades a source
 tree that already has either earlier MTP patch. Version 1.36.1 also detects and
 removes the malformed zero-context host-checkpoint patch shipped in commit
 `dc18127` before applying its contextual replacement. The first two patches add the missing
 Qwen4Exp MTP sidecar loader/graph integration. The vision-resync patch prevents a
 target-conditioned draft from decoding tokenless projector embeddings directly;
-the strict follow-up serializes greedy target verification only for Qwen4Exp MTP
-with a projector loaded. Both remain experimental until the focused vision A/B
+the strict pair serializes greedy target verification and replaces incompatible
+bounded rollback with full-state checkpoints only when the explicit Qwen4Exp
+vision flag is present. These remain experimental until the focused vision A/B
 passes. The final patch adds an opt-in
 `LLAMA_CKPT_FORCE_HOST=1` path that clears the device-storage flag only for prompt
 checkpoint save/restore, retaining those checkpoints in host/unified RAM instead
@@ -733,6 +744,7 @@ against `/opt/rocm-10.0.0` with:
 - a compiled Qwen4Exp MTP marker in `libllama.so`;
 - a compiled MTP multimodal-resync marker in `llama-server`;
 - a compiled Qwen4Exp vision single-row verification marker in `llama-server`;
+- a compiled Qwen4Exp checkpoint-backed strict-verification marker in `llama-server`;
 - a compiled host-checkpoint marker in `libllama-common.so`.
 
 Collect the new build evidence, then run the numerical gate:

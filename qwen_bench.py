@@ -41,13 +41,14 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.38.0"
+VERSION = "1.38.1"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
 HOST_CHECKPOINT_MARKER = "LLAMA_CKPT_FORCE_HOST"
 MTP_VISION_RESYNC_MARKER = "MTP multimodal resync: skipping direct image decode"
 QWEN4EXP_VISION_STRICT_MARKER = "Qwen4Exp vision MTP: single-row target verification enabled"
+QWEN4EXP_VISION_CHECKPOINT_MARKER = "Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints"
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
     "-md",
@@ -1605,12 +1606,17 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["server"]["qwen4exp_vision_strict_marker"] = (
                 QWEN4EXP_VISION_STRICT_MARKER.encode("ascii") in server.read_bytes()
             )
+            result["server"]["qwen4exp_vision_checkpoint_marker"] = (
+                QWEN4EXP_VISION_CHECKPOINT_MARKER.encode("ascii") in server.read_bytes()
+            )
         except OSError:
             result["server"]["mtp_vision_resync_marker"] = False
             result["server"]["qwen4exp_vision_strict_marker"] = False
+            result["server"]["qwen4exp_vision_checkpoint_marker"] = False
     else:
         result["server"]["mtp_vision_resync_marker"] = False
         result["server"]["qwen4exp_vision_strict_marker"] = False
+        result["server"]["qwen4exp_vision_checkpoint_marker"] = False
     return result
 
 
@@ -1710,15 +1716,27 @@ def inspect_mtp_vision_resync_source(repo: pathlib.Path) -> dict[str, Any]:
 
 def inspect_qwen4exp_vision_strict_source(repo: pathlib.Path) -> dict[str, Any]:
     server_path = repo / "tools" / "server" / "server-context.cpp"
+    common_path = repo / "common" / "common.cpp"
+    common_header_path = repo / "common" / "common.h"
     server_text = server_path.read_text(encoding="utf-8", errors="ignore") if server_path.is_file() else ""
+    common_text = common_path.read_text(encoding="utf-8", errors="ignore") if common_path.is_file() else ""
+    common_header_text = (
+        common_header_path.read_text(encoding="utf-8", errors="ignore")
+        if common_header_path.is_file() else ""
+    )
     markers = {
         QWEN4EXP_VISION_STRICT_MARKER: QWEN4EXP_VISION_STRICT_MARKER in server_text,
+        QWEN4EXP_VISION_CHECKPOINT_MARKER: QWEN4EXP_VISION_CHECKPOINT_MARKER in server_text,
         "strict_qwen4exp_vision_mtp_verification": "strict_qwen4exp_vision_mtp_verification" in server_text,
         "llama_decode_with_ubatch": "llama_decode_with_ubatch(ctx_tgt, batch_view, 1)" in server_text,
+        "explicit_strict_flag": "mtp_strict_qwen4exp_vision" in common_header_text,
+        "rollback_disabled": "mtp_strict_qwen4exp_vision ? 0" in common_text,
     }
     return {
-        "ready": server_path.is_file() and all(markers.values()),
+        "ready": server_path.is_file() and common_path.is_file() and common_header_path.is_file() and all(markers.values()),
         "server_file": str(server_path),
+        "common_file": str(common_path),
+        "common_header_file": str(common_header_path),
         "markers": markers,
     }
 
@@ -1827,7 +1845,8 @@ def run_rocm_audit(
         fingerprint.get("server", {}).get("mtp_vision_resync_marker")
     )
     compiled_qwen4exp_vision_strict = bool(
-        fingerprint.get("server", {}).get("qwen4exp_vision_strict_marker")
+        fingerprint.get("server", {}).get("qwen4exp_vision_strict_marker") and
+        fingerprint.get("server", {}).get("qwen4exp_vision_checkpoint_marker")
     )
     ready_for_mtp_vision_benchmarks = bool(
         ready_for_mtp_benchmarks and
@@ -1876,14 +1895,14 @@ def run_rocm_audit(
         )
     if not compiled_qwen4exp_vision_strict:
         mtp_vision_reasons.append(
-            "llama-server lacks the compiled Qwen4Exp vision strict-verification marker; rebuild with build-rocm10-dual.sh"
+            "llama-server lacks the compiled Qwen4Exp checkpoint-backed vision strict-verification markers; rebuild with build-rocm10-dual.sh"
         )
     if not ready_for_mtp_benchmarks:
         mtp_vision_reasons.append(
             "the prerequisite qwen4exp MTP audit gate has not passed"
         )
     report = {
-        "schema": 7,
+        "schema": 8,
         "ts": utc_now(),
         "harness_version": VERSION,
         "ready_for_model_benchmarks": ready_for_model_benchmarks,
@@ -1954,12 +1973,14 @@ def validate_rocm_audit(
     if require_host_checkpoints and not report.get("ready_for_host_checkpoint_benchmarks"):
         reasons = "; ".join(str(item) for item in report.get("host_checkpoint_reasons", []))
         return report, f"ROCm audit has not proven host-resident prompt checkpoints: {reasons}"
-    if require_mtp_vision and int(report.get("schema", 0)) < 7:
-        return report, "ROCm audit predates the Qwen4Exp vision strict-verification gate; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
+    if require_mtp_vision and int(report.get("schema", 0)) < 8:
+        return report, "ROCm audit predates checkpoint-backed Qwen4Exp vision strict verification; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
     if require_mtp_vision and not current.get("server", {}).get("mtp_vision_resync_marker"):
         return report, "current llama-server lacks the MTP multimodal-resync fix; rerun `./build-rocm10-dual.sh` and the ROCm audit"
     if require_mtp_vision and not current.get("server", {}).get("qwen4exp_vision_strict_marker"):
         return report, "current llama-server lacks Qwen4Exp vision strict verification; rerun `./build-rocm10-dual.sh` and the ROCm audit"
+    if require_mtp_vision and not current.get("server", {}).get("qwen4exp_vision_checkpoint_marker"):
+        return report, "current llama-server lacks checkpoint-backed Qwen4Exp vision verification; rerun `./build-rocm10-dual.sh` and the ROCm audit"
     if require_mtp_vision and not report.get("ready_for_mtp_vision_benchmarks"):
         reasons = "; ".join(str(item) for item in report.get("mtp_vision_reasons", []))
         return report, f"ROCm audit has not proven MTP plus vision support: {reasons}"
@@ -2589,6 +2610,10 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             if QWEN4EXP_VISION_STRICT_MARKER not in full_log:
                                 raise RuntimeError(
                                     "the MTP vision server did not enable Qwen4Exp single-row target verification"
+                                )
+                            if QWEN4EXP_VISION_CHECKPOINT_MARKER not in full_log:
+                                raise RuntimeError(
+                                    "the MTP vision server did not disable recurrent rollback for checkpoint-backed verification"
                                 )
                         answer, _reasoning = response_text_parts(response)
                         return response, wall_ms, {
@@ -4318,6 +4343,7 @@ def self_test() -> None:
         for item in rocm_vision_experiments
     ]
     assert all(item.get("backend") == "rocm" for item in rocm_vision_experiments)
+    assert all(item.get("env", {}).get(HOST_CHECKPOINT_MARKER) == "1" for item in rocm_vision_experiments)
     assert all(option_value(args, "--mmproj").endswith("-BF16.gguf") for args in rocm_vision_args)
     assert "--no-mmproj-offload" in rocm_vision_args[0]
     assert all("--mmproj-offload" in args for args in rocm_vision_args[1:])
@@ -4330,6 +4356,8 @@ def self_test() -> None:
     assert option_value(rocm_vision_mtp_args, "--spec-draft-n-max") == "3"
     assert option_value(rocm_vision_mtp_args, "--spec-draft-type-k") == "f16"
     assert option_value(rocm_vision_mtp_args, "--spec-draft-type-v") == "f16"
+    assert "--spec-mtp-strict-qwen4exp-vision" in rocm_vision_mtp_args
+    assert all("--spec-mtp-strict-qwen4exp-vision" not in args for args in rocm_vision_args[:-1])
     mtp_resync_tier = expanded_shipped_config["tiers"]["rocm-vision-mtp-resync-smoke"]
     assert mtp_resync_tier.get("require_rocm_mtp_vision") is True
     mtp_resync_experiments = select_experiments(expanded_shipped_config, mtp_resync_tier, None)
@@ -4348,6 +4376,12 @@ def self_test() -> None:
     ]
     assert mtp_strict_ab_experiments[0].get("baseline") is True
     assert mtp_strict_ab_experiments[1].get("baseline") is False
+    mtp_strict_ab_args = [
+        server_command(expanded_shipped_config, mtp_strict_ab_tier, item)[1:]
+        for item in mtp_strict_ab_experiments
+    ]
+    assert "--spec-mtp-strict-qwen4exp-vision" not in mtp_strict_ab_args[0]
+    assert "--spec-mtp-strict-qwen4exp-vision" in mtp_strict_ab_args[1]
     rocm_vision_full = expanded_shipped_config["tiers"]["rocm-vision"]
     assert rocm_vision_full.get("require_rocm_mtp_vision") is True
     assert int(rocm_vision_full["ctx_size"]) == 262144
@@ -4373,6 +4407,9 @@ def self_test() -> None:
     assert "-md" not in server_command(
         expanded_shipped_config, rocm_vision_full, rocm_vision_full_experiments[0],
     )[1:]
+    assert "--spec-mtp-strict-qwen4exp-vision" not in server_command(
+        expanded_shipped_config, rocm_vision_full, rocm_vision_full_experiments[0],
+    )[1:]
     full_mtp_args = server_command(
         expanded_shipped_config, rocm_vision_full, rocm_vision_full_experiments[1],
     )[1:]
@@ -4380,6 +4417,7 @@ def self_test() -> None:
     assert option_value(full_mtp_args, "--spec-draft-n-max") == "3"
     assert option_value(full_mtp_args, "--spec-draft-type-k") == "f16"
     assert option_value(full_mtp_args, "--spec-draft-type-v") == "f16"
+    assert "--spec-mtp-strict-qwen4exp-vision" in full_mtp_args
     for tier_name in (
         "rocm-ple-ssd",
         "rocm-ple-storage-screen",
@@ -4420,6 +4458,12 @@ def self_test() -> None:
     assert QWEN4EXP_VISION_STRICT_MARKER in mtp_vision_strict_patch_text
     assert "strict_qwen4exp_vision_mtp_verification" in mtp_vision_strict_patch_text
     assert "llama_decode_with_ubatch(ctx_tgt, batch_view, 1)" in mtp_vision_strict_patch_text
+    mtp_vision_checkpoint_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-qwen4exp-vision-strict-checkpoint.patch"
+    assert mtp_vision_checkpoint_patch.is_file()
+    mtp_vision_checkpoint_patch_text = mtp_vision_checkpoint_patch.read_text(encoding="utf-8")
+    assert QWEN4EXP_VISION_CHECKPOINT_MARKER in mtp_vision_checkpoint_patch_text
+    assert "mtp_strict_qwen4exp_vision ? 0" in mtp_vision_checkpoint_patch_text
+    assert "--spec-mtp-strict-qwen4exp-vision" in mtp_vision_checkpoint_patch_text
     host_checkpoint_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-host-checkpoints.patch"
     assert host_checkpoint_patch.is_file()
     host_checkpoint_patch_text = host_checkpoint_patch.read_text(encoding="utf-8")
@@ -4437,7 +4481,9 @@ def self_test() -> None:
     assert HOST_CHECKPOINT_MARKER in build_script
     assert MTP_VISION_RESYNC_MARKER in build_script
     assert QWEN4EXP_VISION_STRICT_MARKER in build_script
+    assert QWEN4EXP_VISION_CHECKPOINT_MARKER in build_script
     assert "rocmfpx-qwen4exp-vision-strict.patch" in build_script
+    assert "rocmfpx-qwen4exp-vision-strict-checkpoint.patch" in build_script
     assert 'SERVER_BINARY="$BUILD_DIR/bin/llama-server"' in build_script
     assert "libllama-server-impl.so" not in build_script
     assert "rocmfpx-host-checkpoints-v1-broken.patch" in build_script
@@ -4448,13 +4494,15 @@ def self_test() -> None:
         fake_server = fake_bin / "llama-server"
         fake_server.write_bytes(
             b"runtime\x00" + MTP_VISION_RESYNC_MARKER.encode("ascii") + b"\x00" +
-            QWEN4EXP_VISION_STRICT_MARKER.encode("ascii")
+            QWEN4EXP_VISION_STRICT_MARKER.encode("ascii") + b"\x00" +
+            QWEN4EXP_VISION_CHECKPOINT_MARKER.encode("ascii")
         )
         fake_fingerprint = rocm_build_fingerprint({
             "variables": {"hip_server": str(fake_server)},
         })
         assert fake_fingerprint["server"]["mtp_vision_resync_marker"] is True
         assert fake_fingerprint["server"]["qwen4exp_vision_strict_marker"] is True
+        assert fake_fingerprint["server"]["qwen4exp_vision_checkpoint_marker"] is True
         assert "server_impl_library" not in fake_fingerprint
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
