@@ -244,26 +244,32 @@ but did not make the loaded sidecar inert: median decode was 24.93 tok/s versus
 again matched, isolating the cost to decode-time target hidden-state export and
 speculative post-processing that were still enabled by the global sidecar.
 
-The follow-up server patch makes request-level disabling complete. When the
-request's effective `speculative.n_max` is zero it suppresses speculative target
-embeddings, pre-normalized hidden-state output, and post-processing; restores
-backend sampling; and prevents enabled and disabled requests from sharing the
+The first follow-up server patch made request-level disabling complete. When the
+request's effective `speculative.n_max` was zero it suppressed speculative target
+embeddings, pre-normalized hidden-state output, and post-processing; restored
+backend sampling; and prevented enabled and disabled requests from sharing the
 same target batch. MTP state is still cleared safely on slot reset, and text
-requests with n=3 are unchanged. The server emits an explicit bypass marker and
-the audit plus harness require it. Rebuild, re-audit, and rerun the same matched
-A/B:
+requests with n=3 are unchanged. The resulting A/B proved the target-only path,
+but requiring every caller to know this backend detail is not a production API.
+
+Version 1.43 moves the decision into the server scheduler under the production
+`LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL=1` policy. It detects actual media chunks in
+the incoming prompt, forces that request's draft budget to zero before
+sampler/graph setup, and emits an automatic
+bypass marker. Text-only requests retain n=3 MTP. The A/B deliberately sends no
+`speculative.n_max` field, so it fails if client knowledge is still required:
 
 ```bash
 ./build-rocm10-dual.sh
 python3 qwen_bench.py rocm-audit --run-ops
-python3 qwen_bench.py preflight --tier rocm-vision-mtp-request-disable-ab
-./run-bench.sh --tier rocm-vision-mtp-request-disable-ab --fail-fast
+python3 qwen_bench.py preflight --tier rocm-vision-mtp-auto-bypass-ab
+./run-bench.sh --tier rocm-vision-mtp-auto-bypass-ab --fail-fast
 ```
 
 The harness fails the candidate if the response reports any drafted tokens or
-the request log lacks the compiled bypass marker. Production can use one loaded
-server for fast text MTP and exact target-only vision only if this arm matches
-the control hash and recovers target-only speed (allowing only normal run noise).
+the request log lacks both automatic-detection and target-work-bypass markers.
+Production can use one loaded server for fast text MTP and exact target-only
+vision only if this arm matches the control hash and target-only speed.
 
 The patched A/B passed. Across two fresh-server rounds, target-only median decode
 was 32.17 tok/s and the MTP-loaded/request-disabled median was 32.20 tok/s.
@@ -272,19 +278,20 @@ Median prefill was 399.13 versus 397.69 tok/s (-0.36%), and median image time wa
 reported zero drafted tokens and emitted the required bypass marker. The former
 21.8% decode penalty is gone.
 
-The final 262144-token tier therefore keeps the sidecar loaded on the 7900 XT
-for n=3 text MTP and sends `"speculative.n_max": 0` on vision requests. It tests
-all three fixtures against a matched target-only control. The remaining
+The final 262144-token tier keeps the sidecar loaded on the 7900 XT for n=3 text
+MTP while sending ordinary vision requests with no speculative override. It
+tests all three fixtures against a matched target-only control. The remaining
 production topology stays fixed: 88/12 target split, ubatch 1536, CPU-mmap PLE,
-host checkpoints, iGPU BF16 projector, and F16 target/draft KV. No additional
-runtime rebuild is required after the passing patched A/B:
+host checkpoints, iGPU BF16 projector, and F16 target/draft KV. Run it after the
+automatic-bypass A/B passes:
 
 ```bash
 python3 qwen_bench.py preflight --tier rocm-vision
 ./run-bench.sh --tier rocm-vision --fail-fast
 ```
 
-Run `20260830-024815-rocm-vision` qualified the complete production behavior:
+Run `20260830-024815-rocm-vision` qualified the underlying explicit-bypass
+behavior:
 all 12 measured responses passed their anchors, and the MTP-loaded/bypassed arm
 matched the target-only output hash in every cell. Overall it was 1.005x decode,
 0.990x prefill, and 0.998x balanced versus target-only. The bypass marker was
@@ -298,8 +305,9 @@ fixture and only 32 output tokens. Consequently the nominally hot measured
 `invoice` and `chart` requests still read roughly 10.5 and 6.3 GiB from storage;
 even `shapes` read about 1 GiB after its partial warm-up. Version 1.42 changes
 the full vision tier to a full-budget, per-cell warm-up immediately before each
-measurement. Rerunning the tier is storage-hot characterization only: the
-correctness, placement, and MTP-bypass decisions above are already qualified.
+measurement. The next run now has two purposes: storage-hot characterization
+and qualification of the new server-side automatic media routing. Model quality,
+placement, and the zero-draft execution path are already qualified.
 
 Both ROCm tiers explicitly use F16 target KV and F16 draft KV. Q8 draft KV is not
 present. The Q8 projector is also excluded because the earlier Vulkan run failed
@@ -644,7 +652,17 @@ and rejects target splits other than the qualified 88/12 layout. It also pins
 the process to `/opt/rocm-10.0.0` by default so systemd cannot resolve a different
 host ROCm installation.
 
-Install the launcher, configuration, and hardened systemd unit:
+First rebuild and audit the server with automatic media routing. The launcher
+will refuse to start an older binary that lacks the compiled marker:
+
+```bash
+./build-rocm10-dual.sh
+python3 qwen_bench.py rocm-audit --run-ops
+python3 qwen_bench.py preflight --tier rocm-vision-mtp-auto-bypass-ab
+./run-bench.sh --tier rocm-vision-mtp-auto-bypass-ab --fail-fast
+```
+
+Then install the launcher, configuration, and hardened systemd unit:
 
 ```bash
 cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
@@ -680,12 +698,14 @@ sudoedit /etc/qwen-flash-next.keys
 Keep `LLAMA_HOST=127.0.0.1` behind an authenticated TLS reverse proxy or a trusted
 Tailscale path when possible. An API key authenticates requests but does not
 encrypt traffic. If binding directly to another interface, set both
-`LLAMA_HOST` and authentication before starting the unit.
+`LLAMA_HOST` and authentication before starting the unit. Remote clients cannot
+connect while the log says the server is listening on `127.0.0.1`; use the
+host's LAN/Tailscale address or `0.0.0.0` when direct remote access is intended.
 
-Vision calls to this shared text/vision service must include
-`"speculative.n_max": 0`; that invokes the qualified target-only vision path
-while leaving n=3 MTP loaded and available for text requests. Metrics remain
-available at `/metrics`.
+Vision clients send normal OpenAI-compatible multimodal requests. The server
+detects media and selects the target-only vision path automatically; callers do
+not send `speculative.n_max` or need to know that MTP exists. Text requests keep
+n=3 MTP. Metrics remain available at `/metrics`.
 
 ### Historical, unqualified two-user Vulkan work
 

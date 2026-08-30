@@ -1557,8 +1557,8 @@
       "startup_timeout_s": 1200,
       "request_timeout_s": 1200
     },
-    "rocm-vision-mtp-request-disable-ab": {
-      "description": "Matched vision A/B for a production server that keeps n=3 MTP loaded for text but disables drafting on vision requests with speculative.n_max=0.",
+    "rocm-vision-mtp-auto-bypass-ab": {
+      "description": "Matched vision A/B proving that the server automatically disables drafting whenever a request contains media, without any caller-supplied speculative override.",
       "mode": "vision",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
@@ -1566,7 +1566,7 @@
       "cache_state": "hot",
       "experiments": [
         "vision_bf16_igpu_hip_no_mtp_strict_ab",
-        "vision_bf16_igpu_hip_mtp_loaded_request_disabled"
+        "vision_bf16_igpu_hip_mtp_auto_bypass"
       ],
       "vision_cases": [
         "shapes"
@@ -1590,7 +1590,7 @@
       "request_timeout_s": 1200
     },
     "rocm-vision": {
-      "description": "Full BF16 ROCm vision validation at the native 256K allocation: the production server keeps n=3 MTP loaded for text, bypasses it per vision request, and is compared with a matched target-only control.",
+      "description": "Full BF16 ROCm vision validation at the native 256K allocation: the production server keeps n=3 MTP loaded for text and automatically bypasses it when media is detected.",
       "mode": "vision",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
@@ -1598,7 +1598,7 @@
       "cache_state": "hot",
       "experiments": [
         "vision_bf16_igpu_prod_hip_no_mtp",
-        "vision_bf16_igpu_prod_hip_mtp_loaded_request_disabled"
+        "vision_bf16_igpu_prod_hip_mtp_auto_bypass"
       ],
       "vision_cases": [
         "shapes",
@@ -3395,14 +3395,14 @@
       "baseline": false
     },
     {
-      "name": "vision_bf16_igpu_hip_mtp_loaded_request_disabled",
-      "description": "Fast text-MTP server topology with the Q8_0 sidecar retained on the 7900 XT, while this vision request disables drafting explicitly.",
+      "name": "vision_bf16_igpu_hip_mtp_auto_bypass",
+      "description": "Fast text-MTP server topology with the Q8_0 sidecar retained on the 7900 XT; server-side media detection must disable drafting without a request override.",
       "extends": "vision_bf16_igpu_hip_no_mtp",
       "baseline": false,
       "require_zero_draft": true,
       "require_spec_bypass_marker": true,
-      "request": {
-        "speculative.n_max": 0
+      "env": {
+        "LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL": "1"
       },
       "args_append": [
         "-md",
@@ -3466,17 +3466,15 @@
       ]
     },
     {
-      "name": "vision_bf16_igpu_prod_hip_mtp_loaded_request_disabled",
-      "description": "Production 256K server topology with n=3 Q8_0 MTP retained on the 7900 XT for text, while each vision request disables speculative work completely with speculative.n_max=0.",
+      "name": "vision_bf16_igpu_prod_hip_mtp_auto_bypass",
+      "description": "Production 256K topology with n=3 Q8_0 MTP retained on the 7900 XT for text; the server automatically disables speculative work when media is present.",
       "extends": "prod_hip_256k_tail_88_12_ub1536",
       "baseline": false,
       "require_zero_draft": true,
       "require_spec_bypass_marker": true,
       "env": {
-        "MTMD_BACKEND_DEVICE": "ROCm1"
-      },
-      "request": {
-        "speculative.n_max": 0
+        "MTMD_BACKEND_DEVICE": "ROCm1",
+        "LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL": "1"
       },
       "args_append": [
         "--mmproj",

@@ -1,0 +1,35 @@
+diff --git a/tools/server/server-common.h b/tools/server/server-common.h
+--- a/tools/server/server-common.h
++++ b/tools/server/server-common.h
+@@ -209,6 +209,10 @@ public:
+ 
+     bool empty() const { return tokens.empty(); }
+ 
++    bool has_media() const {
++        return !map_idx_to_media.empty();
++    }
++
+     void clear() {
+         map_idx_to_media.clear();
+         tokens.clear();
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -1606,6 +1606,17 @@ private:
+     }
+ 
+     bool launch_slot_with_task(server_slot & slot, server_task && task) {
++        // Multimodal target verification is not compatible with the loaded
++        // speculative backend. Keep this internal: clients should submit a
++        // normal vision request without knowing how the server places MTP.
++        const char * auto_disable_mtmd_spec = std::getenv("LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL");
++        if (auto_disable_mtmd_spec != nullptr && std::string(auto_disable_mtmd_spec) == "1" &&
++                slot.has_speculative_backend() && task.params.speculative.draft.n_max > 0 &&
++                task.tokens.has_media()) {
++            task.params.speculative.draft.n_max = 0;
++            SLT_INF(slot, "%s", "multimodal request detected; speculative decoding disabled automatically\n");
++        }
++
+         // process per-request lora adapters
+         if (!task.params.lora.empty()) {
+             auto task_loras = construct_lora_list(task.params.lora);

@@ -80,6 +80,7 @@ listen_host="${LLAMA_HOST:-127.0.0.1}"
 listen_port="${LLAMA_PORT:-8080}"
 threads="${THREADS:-16}"
 target_split="${TARGET_SPLIT:-88,12}"
+require_auto_vision_bypass="${REQUIRE_AUTO_VISION_BYPASS:-1}"
 
 api_key="${api_key_override:-${LLAMA_API_KEY:-${QWEN_API_KEY:-${API_KEY:-}}}}"
 api_key_file="${api_key_file_override:-${LLAMA_ARG_API_KEY_FILE:-}}"
@@ -108,6 +109,10 @@ if [[ "$target_split" != "88,12" ]]; then
     echo "TARGET_SPLIT=$target_split is not the allocation-qualified production split (88,12)" >&2
     exit 64
 fi
+if [[ "$require_auto_vision_bypass" != "0" && "$require_auto_vision_bypass" != "1" ]]; then
+    echo "REQUIRE_AUTO_VISION_BYPASS must be 0 or 1" >&2
+    exit 64
+fi
 
 if [[ ! -x "$llama_server" ]]; then
     echo "llama-server is missing or not executable: $llama_server" >&2
@@ -119,6 +124,11 @@ for required in "$model" "$mtp" "$mmproj"; do
         exit 66
     fi
 done
+if [[ "$require_auto_vision_bypass" == "1" ]] &&
+        ! grep -aFq 'multimodal request detected; speculative decoding disabled automatically' "$llama_server"; then
+    echo "llama-server lacks automatic multimodal MTP bypass; rebuild with ./build-rocm10-dual.sh" >&2
+    exit 66
+fi
 
 # These placements are part of the qualified topology, not optional tuning.
 export ROCM_PATH="${ROCM_PATH:-/opt/rocm-10.0.0}"
@@ -130,6 +140,7 @@ case "${LD_LIBRARY_PATH:-}" in
 esac
 export LLAMA_CKPT_FORCE_HOST=1
 export MTMD_BACKEND_DEVICE=ROCm1
+export LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL=1
 if [[ -n "$api_key" ]]; then
     export LLAMA_API_KEY="$api_key"
     unset QWEN_API_KEY API_KEY

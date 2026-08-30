@@ -39,16 +39,16 @@ jobs:
           bash -n deployment/run-production.sh
           LLAMA_SERVER=/bin/true \
           MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
-          ROCM_PATH=/usr HIP_PATH=/usr \
+          ROCM_PATH=/usr HIP_PATH=/usr REQUIRE_AUTO_VISION_BYPASS=0 \
           LLAMA_HOST=0.0.0.0 LLAMA_API_KEY=test-key \
             deployment/run-production.sh --check
           LLAMA_SERVER=/bin/true \
           MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
-          ROCM_PATH=/usr HIP_PATH=/usr LLAMA_HOST=0.0.0.0 \
+          ROCM_PATH=/usr HIP_PATH=/usr REQUIRE_AUTO_VISION_BYPASS=0 LLAMA_HOST=0.0.0.0 \
             deployment/run-production.sh --api-key test-key --check
           if LLAMA_SERVER=/bin/true \
              MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
-             ROCM_PATH=/usr HIP_PATH=/usr \
+             ROCM_PATH=/usr HIP_PATH=/usr REQUIRE_AUTO_VISION_BYPASS=0 \
              LLAMA_HOST=0.0.0.0 \
                deployment/run-production.sh --check; then
             echo "non-loopback unauthenticated launch unexpectedly passed" >&2
@@ -75,6 +75,10 @@ jobs:
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-vision-strict.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-vision-strict-checkpoint.patch"
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-vision-strict-checkpoint.patch"
+          git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-request-spec-bypass.patch"
+          git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-request-spec-bypass.patch"
+          git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-auto-mtmd-spec-bypass.patch"
+          git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-auto-mtmd-spec-bypass.patch"
           git -C rocmfpx apply --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
           git -C rocmfpx apply --reverse --check --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
           git -C rocmfpx apply --reverse --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
@@ -94,4 +98,8 @@ jobs:
           grep -aFq 'Qwen4Exp vision MTP: single-row target verification enabled' \
             rocmfpx/build-ci/bin/llama-server
           grep -aFq 'Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints' \
+            rocmfpx/build-ci/bin/llama-server
+          grep -aFq 'speculative decoding disabled for request; target hidden-state export bypassed' \
+            rocmfpx/build-ci/bin/llama-server
+          grep -aFq 'multimodal request detected; speculative decoding disabled automatically' \
             rocmfpx/build-ci/bin/llama-server

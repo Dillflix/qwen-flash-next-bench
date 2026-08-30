@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.42.0"
+VERSION = "1.43.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -50,6 +50,7 @@ MTP_VISION_RESYNC_MARKER = "MTP multimodal resync: skipping direct image decode"
 QWEN4EXP_VISION_STRICT_MARKER = "Qwen4Exp vision MTP: single-row target verification enabled"
 QWEN4EXP_VISION_CHECKPOINT_MARKER = "Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints"
 REQUEST_SPEC_BYPASS_MARKER = "speculative decoding disabled for request; target hidden-state export bypassed"
+AUTO_MTMD_SPEC_BYPASS_MARKER = "multimodal request detected; speculative decoding disabled automatically"
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
     "-md",
@@ -1622,16 +1623,21 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["server"]["request_spec_bypass_marker"] = (
                 REQUEST_SPEC_BYPASS_MARKER.encode("ascii") in server.read_bytes()
             )
+            result["server"]["auto_mtmd_spec_bypass_marker"] = (
+                AUTO_MTMD_SPEC_BYPASS_MARKER.encode("ascii") in server.read_bytes()
+            )
         except OSError:
             result["server"]["mtp_vision_resync_marker"] = False
             result["server"]["qwen4exp_vision_strict_marker"] = False
             result["server"]["qwen4exp_vision_checkpoint_marker"] = False
             result["server"]["request_spec_bypass_marker"] = False
+            result["server"]["auto_mtmd_spec_bypass_marker"] = False
     else:
         result["server"]["mtp_vision_resync_marker"] = False
         result["server"]["qwen4exp_vision_strict_marker"] = False
         result["server"]["qwen4exp_vision_checkpoint_marker"] = False
         result["server"]["request_spec_bypass_marker"] = False
+        result["server"]["auto_mtmd_spec_bypass_marker"] = False
     return result
 
 
@@ -1758,18 +1764,25 @@ def inspect_qwen4exp_vision_strict_source(repo: pathlib.Path) -> dict[str, Any]:
 
 def inspect_request_spec_bypass_source(repo: pathlib.Path) -> dict[str, Any]:
     server_path = repo / "tools" / "server" / "server-context.cpp"
+    common_path = repo / "tools" / "server" / "server-common.h"
     text = server_path.read_text(encoding="utf-8", errors="ignore") if server_path.is_file() else ""
+    common_text = common_path.read_text(encoding="utf-8", errors="ignore") if common_path.is_file() else ""
     markers = {
         REQUEST_SPEC_BYPASS_MARKER: REQUEST_SPEC_BYPASS_MARKER in text,
+        AUTO_MTMD_SPEC_BYPASS_MARKER: AUTO_MTMD_SPEC_BYPASS_MARKER in text,
         "request_n_max_gate": "task->params.speculative.draft.n_max > 0" in text,
         "embedding_gate": "can_speculate() && common_speculative_need_embd(spec)" in text,
         "pre_norm_embedding_gate": "can_speculate() && common_speculative_need_embd_pre_norm(spec)" in text,
         "batch_compatibility_gate": "can_speculate() == other_slot.can_speculate()" in text,
         "post_process_gate": "slot_batched->can_speculate() && !common_speculative_process" in text,
+        "media_detection": "bool has_media() const" in common_text,
+        "automatic_media_gate": "task.tokens.has_media()" in text,
+        "production_policy_gate": "LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL" in text,
     }
     return {
-        "ready": server_path.is_file() and all(markers.values()),
+        "ready": server_path.is_file() and common_path.is_file() and all(markers.values()),
         "server_file": str(server_path),
+        "common_file": str(common_path),
         "markers": markers,
     }
 
@@ -1888,7 +1901,8 @@ def run_rocm_audit(
         qwen4exp_vision_strict_source["ready"] and compiled_qwen4exp_vision_strict
     )
     compiled_request_spec_bypass = bool(
-        fingerprint.get("server", {}).get("request_spec_bypass_marker")
+        fingerprint.get("server", {}).get("request_spec_bypass_marker") and
+        fingerprint.get("server", {}).get("auto_mtmd_spec_bypass_marker")
     )
     ready_for_request_spec_bypass_benchmarks = bool(
         ready_for_mtp_benchmarks and request_spec_bypass_source["ready"] and
@@ -1945,18 +1959,18 @@ def run_rocm_audit(
         )
     if not request_spec_bypass_source["ready"]:
         request_spec_bypass_reasons.append(
-            "the pinned source tree does not fully bypass target hidden-state export and speculative post-processing when request n_max is zero"
+            "the pinned source tree does not automatically identify media and fully bypass speculative target work"
         )
     if not compiled_request_spec_bypass:
         request_spec_bypass_reasons.append(
-            "llama-server lacks the compiled per-request speculative-bypass marker; rebuild with build-rocm10-dual.sh"
+            "llama-server lacks the compiled automatic multimodal speculative-bypass markers; rebuild with build-rocm10-dual.sh"
         )
     if not ready_for_mtp_benchmarks:
         request_spec_bypass_reasons.append(
             "the prerequisite qwen4exp MTP audit gate has not passed"
         )
     report = {
-        "schema": 9,
+        "schema": 10,
         "ts": utc_now(),
         "harness_version": VERSION,
         "ready_for_model_benchmarks": ready_for_model_benchmarks,
@@ -2041,10 +2055,12 @@ def validate_rocm_audit(
     if require_mtp_vision and not report.get("ready_for_mtp_vision_benchmarks"):
         reasons = "; ".join(str(item) for item in report.get("mtp_vision_reasons", []))
         return report, f"ROCm audit has not proven MTP plus vision support: {reasons}"
-    if require_request_spec_bypass and int(report.get("schema", 0)) < 9:
-        return report, "ROCm audit predates the per-request speculative-bypass gate; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
+    if require_request_spec_bypass and int(report.get("schema", 0)) < 10:
+        return report, "ROCm audit predates the automatic multimodal speculative-bypass gate; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
     if require_request_spec_bypass and not current.get("server", {}).get("request_spec_bypass_marker"):
         return report, "current llama-server does not bypass speculative target work when request n_max is zero; rerun `./build-rocm10-dual.sh` and the ROCm audit"
+    if require_request_spec_bypass and not current.get("server", {}).get("auto_mtmd_spec_bypass_marker"):
+        return report, "current llama-server does not automatically disable speculation for multimodal requests; rerun `./build-rocm10-dual.sh` and the ROCm audit"
     if require_request_spec_bypass and not report.get("ready_for_request_spec_bypass_benchmarks"):
         reasons = "; ".join(str(item) for item in report.get("request_spec_bypass_reasons", []))
         return report, f"ROCm audit has not proven the per-request speculative bypass: {reasons}"
@@ -2138,9 +2154,9 @@ def preflight(
         if experiment.get("require_zero_draft"):
             if "-md" not in effective_args:
                 errors.append(f"{experiment['name']}: require_zero_draft requires a loaded draft model")
-            if effective_request.get("speculative.n_max") != 0:
+            if "speculative.n_max" in effective_request:
                 errors.append(
-                    f"{experiment['name']}: require_zero_draft requires request speculative.n_max=0"
+                    f"{experiment['name']}: automatic multimodal bypass tests must not set request speculative.n_max"
                 )
         if experiment.get("require_spec_bypass_marker") and not experiment.get("require_zero_draft"):
             errors.append(
@@ -2700,10 +2716,13 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                         request_log = file_since(server.log_path, log_offset)
                         if (
                             experiment.get("require_spec_bypass_marker")
-                            and REQUEST_SPEC_BYPASS_MARKER not in request_log
+                            and (
+                                AUTO_MTMD_SPEC_BYPASS_MARKER not in request_log or
+                                REQUEST_SPEC_BYPASS_MARKER not in request_log
+                            )
                         ):
                             raise RuntimeError(
-                                "vision request disabled speculation but the server did not confirm the target-work bypass"
+                                "server did not automatically detect the multimodal request and confirm the target-work bypass"
                             )
                         log_metrics = extract_vision_log_metrics(request_log)
                         if (
@@ -4530,7 +4549,7 @@ def self_test() -> None:
     )
     assert "--spec-mtp-strict-qwen4exp-vision" not in mtp_strict_ab_args[0]
     assert "--spec-mtp-strict-qwen4exp-vision" in mtp_strict_ab_args[1]
-    request_disable_tier = expanded_shipped_config["tiers"]["rocm-vision-mtp-request-disable-ab"]
+    request_disable_tier = expanded_shipped_config["tiers"]["rocm-vision-mtp-auto-bypass-ab"]
     assert request_disable_tier.get("require_rocm_mtp") is True
     assert request_disable_tier.get("require_rocm_mtp_vision") is not True
     assert request_disable_tier.get("require_rocm_request_spec_bypass") is True
@@ -4539,7 +4558,7 @@ def self_test() -> None:
     )
     assert [item["name"] for item in request_disable_experiments] == [
         "vision_bf16_igpu_hip_no_mtp_strict_ab",
-        "vision_bf16_igpu_hip_mtp_loaded_request_disabled",
+        "vision_bf16_igpu_hip_mtp_auto_bypass",
     ]
     request_disable_args = [
         server_command(expanded_shipped_config, request_disable_tier, item)[1:]
@@ -4550,9 +4569,12 @@ def self_test() -> None:
     assert all("--spec-mtp-strict-qwen4exp-vision" not in args for args in request_disable_args)
     assert request_disable_experiments[1].get("require_zero_draft") is True
     assert request_disable_experiments[1].get("require_spec_bypass_marker") is True
-    assert merged_request(
+    assert request_disable_experiments[1].get("env", {}).get(
+        "LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL"
+    ) == "1"
+    assert "speculative.n_max" not in merged_request(
         expanded_shipped_config, request_disable_tier, request_disable_experiments[1],
-    ).get("speculative.n_max") == 0
+    )
     rocm_vision_full = expanded_shipped_config["tiers"]["rocm-vision"]
     assert rocm_vision_full.get("require_rocm_mtp_vision") is not True
     assert rocm_vision_full.get("require_rocm_request_spec_bypass") is True
@@ -4564,7 +4586,7 @@ def self_test() -> None:
     )
     assert [item["name"] for item in rocm_vision_full_experiments] == [
         "vision_bf16_igpu_prod_hip_no_mtp",
-        "vision_bf16_igpu_prod_hip_mtp_loaded_request_disabled",
+        "vision_bf16_igpu_prod_hip_mtp_auto_bypass",
     ]
     for item in rocm_vision_full_experiments:
         full_args = server_command(expanded_shipped_config, rocm_vision_full, item)[1:]
@@ -4594,9 +4616,12 @@ def self_test() -> None:
     assert "--spec-mtp-strict-qwen4exp-vision" not in full_mtp_args
     assert rocm_vision_full_experiments[1].get("require_zero_draft") is True
     assert rocm_vision_full_experiments[1].get("require_spec_bypass_marker") is True
-    assert merged_request(
+    assert rocm_vision_full_experiments[1].get("env", {}).get(
+        "LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL"
+    ) == "1"
+    assert "speculative.n_max" not in merged_request(
         expanded_shipped_config, rocm_vision_full, rocm_vision_full_experiments[1],
-    ).get("speculative.n_max") == 0
+    )
     for tier_name in (
         "rocm-ple-ssd",
         "rocm-ple-storage-screen",
@@ -4650,6 +4675,13 @@ def self_test() -> None:
     assert "task->params.speculative.draft.n_max > 0" in request_spec_bypass_patch_text
     assert "can_speculate() == other_slot.can_speculate()" in request_spec_bypass_patch_text
     assert "slot_batched->can_speculate() && !common_speculative_process" in request_spec_bypass_patch_text
+    auto_mtmd_bypass_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-auto-mtmd-spec-bypass.patch"
+    assert auto_mtmd_bypass_patch.is_file()
+    auto_mtmd_bypass_text = auto_mtmd_bypass_patch.read_text(encoding="utf-8")
+    assert AUTO_MTMD_SPEC_BYPASS_MARKER in auto_mtmd_bypass_text
+    assert "bool has_media() const" in auto_mtmd_bypass_text
+    assert "task.tokens.has_media()" in auto_mtmd_bypass_text
+    assert "LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL" in auto_mtmd_bypass_text
     host_checkpoint_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-host-checkpoints.patch"
     assert host_checkpoint_patch.is_file()
     host_checkpoint_patch_text = host_checkpoint_patch.read_text(encoding="utf-8")
@@ -4672,6 +4704,7 @@ def self_test() -> None:
     assert "rocmfpx-qwen4exp-vision-strict.patch" in build_script
     assert "rocmfpx-qwen4exp-vision-strict-checkpoint.patch" in build_script
     assert "rocmfpx-request-spec-bypass.patch" in build_script
+    assert "rocmfpx-auto-mtmd-spec-bypass.patch" in build_script
     assert 'SERVER_BINARY="$BUILD_DIR/bin/llama-server"' in build_script
     assert "libllama-server-impl.so" not in build_script
     assert "rocmfpx-host-checkpoints-v1-broken.patch" in build_script
@@ -4684,7 +4717,8 @@ def self_test() -> None:
             b"runtime\x00" + MTP_VISION_RESYNC_MARKER.encode("ascii") + b"\x00" +
             QWEN4EXP_VISION_STRICT_MARKER.encode("ascii") + b"\x00" +
             QWEN4EXP_VISION_CHECKPOINT_MARKER.encode("ascii") + b"\x00" +
-            REQUEST_SPEC_BYPASS_MARKER.encode("ascii")
+            REQUEST_SPEC_BYPASS_MARKER.encode("ascii") + b"\x00" +
+            AUTO_MTMD_SPEC_BYPASS_MARKER.encode("ascii")
         )
         fake_fingerprint = rocm_build_fingerprint({
             "variables": {"hip_server": str(fake_server)},
@@ -4693,6 +4727,7 @@ def self_test() -> None:
         assert fake_fingerprint["server"]["qwen4exp_vision_strict_marker"] is True
         assert fake_fingerprint["server"]["qwen4exp_vision_checkpoint_marker"] is True
         assert fake_fingerprint["server"]["request_spec_bypass_marker"] is True
+        assert fake_fingerprint["server"]["auto_mtmd_spec_bypass_marker"] is True
         assert "server_impl_library" not in fake_fingerprint
     print(f"qwen_bench.py {VERSION}: self-test passed")
 
