@@ -895,7 +895,7 @@
       "request_timeout_s": 1800
     },
     "rocm-ple-storage-screen": {
-      "description": "Storage-only 64K production A/B: identical CPU PLE placement with mmap/SSD page-cache backing versus no-mmap anonymous unified-RAM residency.",
+      "description": "Storage-only 64K production A/B: identical CPU PLE placement with mmap/SSD page-cache backing versus no-mmap non-file-backed unified-RAM residency.",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
       "cache_state": "hot",
@@ -2725,7 +2725,7 @@
     },
     {
       "name": "prod_hip_256k_tail_88_12_ub1536_ple_ram",
-      "description": "Storage-only control for the preferred 256K topology: PLE remains explicitly on CPU, but no-mmap loads it into anonymous unified RAM instead of leaving it SSD/page-cache backed.",
+      "description": "Storage-only control for the preferred 256K topology: PLE remains explicitly on CPU, but no-mmap makes it resident in non-file-backed unified RAM (reported primarily as RssShmem) instead of leaving it SSD/page-cache backed.",
       "extends": "prod_hip_256k_tail_88_12_ub1536",
       "args_append": [
         "--load-mode",

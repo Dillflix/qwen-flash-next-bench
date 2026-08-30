@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.36.2"
+VERSION = "1.36.3"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -2976,6 +2976,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
         link_speed: list[float] = []
         rss_file: list[float] = []
         rss_anon: list[float] = []
+        rss_shmem: list[float] = []
+        rss_total: list[float] = []
         storage_read: list[float] = []
         major_faults: list[float] = []
         mem_available: list[float] = []
@@ -2999,6 +3001,10 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
                 rss_file.append(float(telemetry["pid_rss_file_max_bytes"]))
             if isinstance(telemetry.get("pid_rss_anon_max_bytes"), (int, float)):
                 rss_anon.append(float(telemetry["pid_rss_anon_max_bytes"]))
+            if isinstance(telemetry.get("pid_rss_shmem_max_bytes"), (int, float)):
+                rss_shmem.append(float(telemetry["pid_rss_shmem_max_bytes"]))
+            if isinstance(telemetry.get("pid_rss_max_bytes"), (int, float)):
+                rss_total.append(float(telemetry["pid_rss_max_bytes"]))
             if isinstance(telemetry.get("pid_read_bytes_delta"), (int, float)):
                 storage_read.append(float(telemetry["pid_read_bytes_delta"]))
             if isinstance(telemetry.get("pid_major_faults_delta"), (int, float)):
@@ -3049,6 +3055,8 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
             "pcie_width_lanes_max": max(link_width, default=None),
             "rss_file_max_gib_median": median_or_none(value / 1024**3 for value in rss_file),
             "rss_anon_max_gib_median": median_or_none(value / 1024**3 for value in rss_anon),
+            "rss_shmem_max_gib_median": median_or_none(value / 1024**3 for value in rss_shmem),
+            "rss_total_max_gib_median": median_or_none(value / 1024**3 for value in rss_total),
             "storage_read_gib_median": median_or_none(value / 1024**3 for value in storage_read),
             "major_faults_median": median_or_none(major_faults),
             "mem_available_min_gib_median": median_or_none(value / 1024**3 for value in mem_available),
@@ -3207,14 +3215,16 @@ def summarize(run_dir: pathlib.Path, config: dict[str, Any] | None = None, exper
     md.extend([
         "\n## Residency and capacity telemetry\n\n",
         "Host available memory includes reclaimable cache. GPU maps are keyed by PCI BDF.\n\n",
-        "| Experiment | Workload | Depth | Host available min GiB | Host cached max GiB | Anon RSS GiB | GPU VRAM max GiB | GPU GTT max GiB |\n",
-        "|---|---:|---:|---:|---:|---:|---|---|\n",
+        "| Experiment | Workload | Depth | Host available min GiB | Host cached max GiB | Process RSS GiB | Anon RSS GiB | File RSS GiB | Shmem RSS GiB | GPU VRAM max GiB | GPU GTT max GiB |\n",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n",
     ])
     for row in ranked:
         md.append(
             f"| {row['experiment']} | {row['workload']} | {row['depth_tokens_requested']} | "
             f"{fmt(row['mem_available_min_gib_median'])} | {fmt(row['host_cached_max_gib_median'])} | "
-            f"{fmt(row['rss_anon_max_gib_median'])} | {row['gpu_vram_max_gib']} | {row['gpu_gtt_max_gib']} |\n"
+            f"{fmt(row['rss_total_max_gib_median'])} | {fmt(row['rss_anon_max_gib_median'])} | "
+            f"{fmt(row['rss_file_max_gib_median'])} | {fmt(row['rss_shmem_max_gib_median'])} | "
+            f"{row['gpu_vram_max_gib']} | {row['gpu_gtt_max_gib']} |\n"
         )
     concurrent_groups = [
         row for row in read_jsonl(run_dir / "concurrency-groups.jsonl")
@@ -3502,6 +3512,7 @@ def self_test() -> None:
             "process": {
                 "rss_file_bytes": 20,
                 "rss_anon_bytes": 30,
+                "rss_shmem_bytes": 15,
                 "read_bytes": 100,
                 "major_faults": 4,
             },
@@ -3514,6 +3525,7 @@ def self_test() -> None:
             "process": {
                 "rss_file_bytes": 25,
                 "rss_anon_bytes": 35,
+                "rss_shmem_bytes": 18,
                 "read_bytes": 140,
                 "major_faults": 7,
             },
@@ -3524,6 +3536,7 @@ def self_test() -> None:
     ])
     assert aggregate["gpus"]["0000:01:00.0"]["vram_used_max_bytes"] == 20
     assert aggregate["pid_rss_file_max_bytes"] == 25
+    assert aggregate["pid_rss_shmem_max_bytes"] == 18
     assert aggregate["pid_read_bytes_delta"] == 40
     assert aggregate["pid_major_faults_delta"] == 3
     assert aggregate["mem_available_min_bytes"] == 90
@@ -3673,6 +3686,7 @@ def self_test() -> None:
         rendered = (summary_root / "summary.md").read_text(encoding="utf-8")
         assert "Declared cache state: `hot`" in rendered
         assert "Residency and capacity telemetry" in rendered
+        assert "Process RSS GiB" in rendered and "Shmem RSS GiB" in rendered
         assert "Vision correctness and image processing" in rendered
         assert "100% | 13.00 | 4.00 | 17.20" in rendered
         assert "DISQUALIFIED | 2/3 (67%)" in rendered

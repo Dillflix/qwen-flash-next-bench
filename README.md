@@ -908,7 +908,8 @@ That older tier is a placement test, not a strict SSD-versus-RAM test. The preci
 production storage A/B keeps the joined PLE explicitly on CPU in both arms and
 changes only the loader mode. The SSD arm uses `--mmap`, so PLE pages occupy the
 reclaimable Linux page cache and may be faulted from the model file. The RAM arm
-uses `--no-mmap`, so the same CPU tensor is read into anonymous unified RAM. MTP,
+uses `--no-mmap`, so the same CPU tensor becomes resident in non-file-backed
+unified RAM (reported primarily as `RssShmem` on this ROCm system). MTP,
 F16 target/draft KV, 88/12 target split, ubatch 1536, host checkpoints, and every
 tensor override remain identical.
 
@@ -918,6 +919,15 @@ Start with the 64K screen; do not begin with two near-full 256K prompts:
 python3 qwen_bench.py preflight --tier rocm-ple-storage-screen
 ./run-bench.sh --tier rocm-ple-storage-screen
 ```
+
+The `20260829-195434-rocm-ple-storage-screen` run made the production tradeoff
+clear. After an excluded 32K warm-up, mmap and no-mmap produced identical output
+hashes and 70.3% MTP acceptance. Mmap delivered 470.69 prefill and 33.07 decode
+tok/s; no-mmap delivered 469.03 and 33.43 tok/s. The remaining hot mmap request
+read only 0.14 GiB from storage, but retained 55.54 GiB minimum host availability.
+No-mmap retained only 3.43 GiB and placed 54.27 GiB in `RssShmem`. In other words,
+resident PLE provides no material hot-path speed benefit while consuming roughly
+52.1 GiB of the memory margin needed by native 256K context.
 
 If the RAM arm loads and serves coherently, prove its native-256K startup allocation:
 
@@ -938,7 +948,7 @@ host-checkpoint `rocm-256k-fit-full` result already exists, select only
 archive with that baseline. This capacity is deliberately not assumed: the first
 successful no-checkpoint 253952-token mmap run retained 52.46 GiB minimum host
 availability, only modestly more than the 50.66 GiB PLE, before accounting for
-host-resident checkpoints and non-PLE anonymous memory.
+host-resident checkpoints and other non-file-backed memory.
 
 ### Native 256K one-slot placement campaign
 
