@@ -30,7 +30,7 @@ import urllib.parse
 from typing import Any
 
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 DEFAULT_FIXTURE = pathlib.Path(__file__).resolve().parent / "diagnostics" / "mtp-agentic-openwebui.json"
 API_KEY_REDACTION = "[REDACTED_API_KEY]"
 
@@ -1481,6 +1481,13 @@ def classify_run(
     repeatability_comparisons = [
         item for item in comparisons if item["kind"] == "fixed_seed_repeatability"
     ]
+    baseline_repeatability_comparisons = [
+        item for item in repeatability_comparisons
+        if item["temperature"] == 0.0 and item["n_max"] == 0
+    ]
+    baseline_repeatability_divergences = [
+        item for item in baseline_repeatability_comparisons if not item["exact_match"]
+    ]
     greedy_expected = sum(
         (0.0, 0, False, repeat) in expected_keys
         and (0.0, n_max, False, repeat) in expected_keys
@@ -1504,6 +1511,19 @@ def classify_run(
             for n_max in (0, 1, 2, 3)
             for repeat in repeats[1:]
         )
+    baseline_repeatability_expected = 0
+    if repeats:
+        first_repeat = repeats[0]
+        baseline_repeatability_expected = sum(
+            (0.0, 0, False, first_repeat) in expected_keys
+            and (0.0, 0, False, repeat) in expected_keys
+            for repeat in repeats[1:]
+        )
+    baseline_repeatability_pass = (
+        len(baseline_repeatability_comparisons) == baseline_repeatability_expected
+        and not baseline_repeatability_divergences
+        if baseline_repeatability_expected > 0 else None
+    )
     n3_coverage_required = any(n_max == 3 for _, n_max, _, _ in expected_keys)
 
     causes: list[str] = []
@@ -1517,7 +1537,21 @@ def classify_run(
         item for item in greedy_comparisons
         if (item.get("first_scored_distribution_divergence") or {}).get("position") == 0
     ]
-    if prompt_boundary_score_drift:
+    if baseline_repeatability_divergences:
+        later_cross_n_matches = [
+            item for item in greedy_comparisons
+            if item.get("repeat") != repeats[0] and item.get("exact_match") is True
+        ] if repeats else []
+        causes.append(
+            "the greedy n=0 baseline is not fixed-seed repeatable, so cross-n MTP "
+            "equivalence is inconclusive; the first measured request is a cold-start "
+            "outlier" + (
+                " while a later n=0/n>0 pair matches exactly"
+                if later_cross_n_matches else ""
+            ) + "; prime the request-identical target graph before measuring and "
+            "investigate startup warm-up/recurrent-state initialization"
+        )
+    if prompt_boundary_score_drift and not baseline_repeatability_divergences:
         details = ", ".join(
             f"n={item['n_max']} {item['first_scored_distribution_divergence']['baseline_logprob']:.6f}"
             f"->{item['first_scored_distribution_divergence']['candidate_logprob']:.6f}"
@@ -1528,7 +1562,7 @@ def classify_run(
             f"checkpoint restore ({details}); prioritize target hidden-state export/graph numerics and "
             "request-state initialization over rollback"
         )
-    if pre_rejection_greedy:
+    if pre_rejection_greedy and not baseline_repeatability_divergences:
         first = pre_rejection_greedy[0]
         pre_rejection = first["pre_rejection_analysis"]
         divergence = first.get("first_divergence") or {}
@@ -1547,13 +1581,13 @@ def classify_run(
             "the primary cause, so inspect accepted-path target state, logical multi-row decode/memory "
             "initialization, verifier logits indexing, and hidden-state handoff"
         )
-    elif greedy_n1:
+    elif greedy_n1 and not baseline_repeatability_divergences:
         causes.append(
             "n=1 diverged under greedy decoding: this rules out a fault that requires two or more draft tokens; "
             "the target still verifies a two-row batch, so inspect one-token rejection rollback, target recurrent/PLE state, "
             "hidden-state handoff, batched verification, and verifier acceptance"
         )
-    elif greedy_multi:
+    elif greedy_multi and not baseline_repeatability_divergences:
         causes.append(
             "n=1 matched but n=2/3 diverged under greedy decoding: investigate multi-row verification, recurrent rollback, and 256-cell attention boundaries"
         )
@@ -1654,6 +1688,8 @@ def classify_run(
             "stream_transport_expected": transport_expected,
             "fixed_seed_repeatability_observed": len(repeatability_comparisons),
             "fixed_seed_repeatability_expected": repeatability_expected,
+            "baseline_repeatability_observed": len(baseline_repeatability_comparisons),
+            "baseline_repeatability_expected": baseline_repeatability_expected,
             "n_max_3_coverage_required": n3_coverage_required,
         },
         "classification": causes,
@@ -1670,6 +1706,7 @@ def classify_run(
             "fresh_slot_pass": not fresh_failures,
             "mtp_exercised": not mtp_not_exercised,
             "greedy_equivalence_pass": (
+                None if baseline_repeatability_pass is False else
                 greedy_expected > 0
                 and len(greedy_comparisons) == greedy_expected
                 and not greedy_divergences
@@ -1683,6 +1720,7 @@ def classify_run(
                 len(repeatability_comparisons) == repeatability_expected and not repeat_divergences
                 if repeatability_expected > 0 else None
             ),
+            "baseline_repeatability_pass": baseline_repeatability_pass,
             "token_distribution_evidence_pass": not token_distribution_failures,
             "response_contract_pass": not response_contract_failures,
             "server_log_capture": server_log_capture,
@@ -1841,10 +1879,23 @@ def print_verdict(report: dict[str, Any]) -> None:
         if item.get("kind") == "stream_vs_nonstream"
     )
     greedy_gate = report["acceptance"]["greedy_equivalence_pass"]
+    greedy_label = (
+        "INCONCLUSIVE"
+        if greedy_gate is None and coverage["greedy_expected"] > 0
+        else "N/A" if greedy_gate is None
+        else "PASS" if greedy_gate else "FAIL"
+    )
     print(
-        f"Greedy equivalence: {'N/A' if greedy_gate is None else 'PASS' if greedy_gate else 'FAIL'} "
+        f"Greedy equivalence: {greedy_label} "
         f"({greedy_matched}/{coverage['greedy_expected']} matched; "
         f"{coverage['greedy_observed']}/{coverage['greedy_expected']} evaluated)"
+    )
+    baseline_gate = report["acceptance"].get("baseline_repeatability_pass")
+    baseline_label = "N/A" if baseline_gate is None else "PASS" if baseline_gate else "FAIL"
+    print(
+        f"Greedy n=0 repeatability: {baseline_label} "
+        f"({coverage.get('baseline_repeatability_observed', 0)}/"
+        f"{coverage.get('baseline_repeatability_expected', 0)} evaluated)"
     )
     transport_gate = report["acceptance"]["stream_transport_pass"]
     print(
@@ -1962,6 +2013,7 @@ def command_run(args: argparse.Namespace) -> int:
         "top_logprobs": args.top_logprobs,
         "repeats": args.repeats,
         "matrix_profile": args.matrix_profile,
+        "prime_requests": args.prime_requests,
         "conditions": conditions,
         "controlled_fields": [
             "temperature", "seed", "stream", "cache_prompt", "id_slot",
@@ -1979,6 +2031,34 @@ def command_run(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
     rows: list[dict[str, Any]] = []
+    prime_rows: list[dict[str, Any]] = []
+    for prime_index in range(1, args.prime_requests + 1):
+        print(
+            f"[prime {prime_index:02d}/{args.prime_requests:02d}] "
+            "request-identical greedy n_max=0",
+            flush=True,
+        )
+        prime_args = copy.copy(args)
+        prime_args.server_label = f"{args.server_label}-prime{prime_index:02d}"
+        prime_condition = {
+            "temperature": 0.0,
+            "n_max": 0,
+            "stream": False,
+            "repeat": 0,
+        }
+        prime_row = run_case(
+            run_dir, args.url, base_request, validation, prime_condition,
+            prime_args, api_key, server_log,
+        )
+        prime_row = redact_secret_value(prime_row, api_key)
+        prime_rows.append(prime_row)
+        if prime_row.get("status") != "ok":
+            atomic_json(run_dir / "priming.json", prime_rows)
+            raise RuntimeError(
+                f"priming request failed: {prime_row.get('error')}"
+            )
+    if prime_rows:
+        atomic_json(run_dir / "priming.json", prime_rows)
     for index, condition in enumerate(conditions, start=1):
         print(
             f"[{index:02d}/{len(conditions):02d}] temp={condition['temperature']:g} "
@@ -2005,6 +2085,7 @@ def command_run(args: argparse.Namespace) -> int:
     )
     optional_gates = (
         "stream_transport_pass", "fixed_seed_repeatability_pass",
+        "baseline_repeatability_pass",
         "n_max_3_partial_acceptance_coverage_pass",
     )
     passed = all(report["acceptance"][key] is True for key in required_gates)
@@ -2435,6 +2516,60 @@ def self_test() -> None:
         assert "Stream transport: N/A (0/0 matched; 0/0 evaluated)" in captured.getvalue()
         assert "n_max=3 rollback coverage: N/A" in captured.getvalue()
 
+        cold_root = root / "cold-start-run"
+        cold_root.mkdir()
+        cold_conditions = condition_matrix(2, "greedy-n01")
+        atomic_json(cold_root / "manifest.json", {"conditions": cold_conditions})
+        cold_rows: list[dict[str, Any]] = []
+        stable_trace = copy.deepcopy(parsed_nonstream["token_trace"])
+        cold_trace = copy.deepcopy(stable_trace)
+        cold_trace[1]["id"] = 12
+        cold_trace[1]["bytes"] = [99]
+        cold_trace[1]["token"] = "c"
+        for condition in cold_conditions:
+            identifier = case_id("cold", condition)
+            trace = (
+                cold_trace
+                if condition["repeat"] == 1 and condition["n_max"] == 0
+                else stable_trace
+            )
+            token_file = pathlib.Path("tokens") / f"{identifier}.json"
+            atomic_json(cold_root / token_file, trace)
+            cold_rows.append({
+                "case_id": identifier,
+                "status": "ok",
+                "temperature": condition["temperature"],
+                "n_max": condition["n_max"],
+                "stream": condition["stream"],
+                "repeat": condition["repeat"],
+                "token_file": str(token_file),
+                "token_count": len(trace),
+                "http_status": 200,
+                "canonical_message_sha256": token_trace_hash(trace),
+                "finish_reason": "stop",
+                "finish_reason_count": 1,
+                "fresh_slot": {"passed": True},
+                "draft_acceptance_events": (
+                    parse_draft_acceptance_events("1.00 I slot accepted 1/1 draft tokens\n")
+                    if condition["n_max"] == 1 else []
+                ),
+                "timings": {"draft_n": condition["n_max"]},
+                "usage": {"completion_tokens": len(trace)},
+                "server_log_file": "synthetic.log",
+                "server_log_bytes": 1,
+            })
+        cold_report = classify_run(cold_root, cold_rows)
+        assert cold_report["acceptance"]["baseline_repeatability_pass"] is False
+        assert cold_report["acceptance"]["greedy_equivalence_pass"] is None
+        assert any(
+            "first measured request is a cold-start outlier" in item
+            for item in cold_report["classification"]
+        )
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            print_verdict(cold_report)
+        assert "Greedy equivalence: INCONCLUSIVE" in captured.getvalue()
+
         boundary_root = root / "pre-rejection-boundary"
         boundary_root.mkdir()
         atomic_json(boundary_root / "manifest.json", {"conditions": quick_conditions})
@@ -2492,7 +2627,7 @@ def self_test() -> None:
         assert truncated_report["acceptance"]["matrix_complete"] is False
         assert truncated_report["comparison_coverage"]["greedy_expected"] == 6
         assert truncated_report["comparison_coverage"]["greedy_observed"] == 3
-        assert truncated_report["acceptance"]["greedy_equivalence_pass"] is False
+        assert truncated_report["acceptance"]["greedy_equivalence_pass"] is None
         assert truncated_report["acceptance"]["fixed_seed_repeatability_pass"] is False
 
         reference_root = root / "reference"
@@ -2562,6 +2697,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--top-logprobs", type=int, default=5)
     run.add_argument("--repeats", type=int, default=1)
     run.add_argument(
+        "--prime-requests", type=int, default=0,
+        help=(
+            "run and archive this many unmeasured request-identical greedy n=0 "
+            "requests before the matrix; each request is followed by the normal "
+            "fresh-slot erase before measurement"
+        ),
+    )
+    run.add_argument(
         "--matrix-profile",
         choices=("full", "greedy-n01"),
         default="full",
@@ -2597,6 +2740,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--require-pass requires at least two fixed-seed repeats")
         if args.repeats < 1:
             raise ValueError("--repeats must be positive")
+        if args.prime_requests < 0:
+            raise ValueError("--prime-requests must be non-negative")
         if args.slot < 0:
             raise ValueError("--slot must be non-negative")
         if args.max_tokens is not None and args.max_tokens < 1:

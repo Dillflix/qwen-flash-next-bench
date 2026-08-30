@@ -868,6 +868,42 @@ diagnostics. None is enabled in production:
 - `LLAMA_MTP_DIAG_TRACE_TARGET_LOGITS=1` logs each target row's raw top-two
   token IDs, logits, and margin before sampling.
 
+Version 1.5 distinguishes MTP divergence from a non-repeatable target baseline.
+If greedy `n_max=0` changes across fixed-seed repeats, cross-`n_max`
+equivalence is reported as `INCONCLUSIVE` instead of attributing the mismatch
+to MTP. The `--prime-requests` option runs archived, request-identical greedy
+requests before the measured matrix. This isolates the Qwen4Exp cold-start
+signature where the first long prompt has different raw target logits from
+every later request despite the server's empty model warm-up.
+
+After the unprimed forced-export arm, run the same matrix with one exact-prompt
+prime:
+
+```bash
+read -rsp "API key: " QWEN_TEST_API_KEY
+echo
+export QWEN_TEST_API_KEY
+
+python3 qwen_mtp_diag.py run \
+  --url http://127.0.0.1:8080 \
+  --server-label export-n01-primed \
+  --server-log /tmp/qwen-mtp-export-server.log \
+  --matrix-profile greedy-n01 \
+  --prime-requests 1 \
+  --repeats 3 \
+  --max-tokens 40
+
+unset QWEN_TEST_API_KEY
+RUN=$(ls -dt results/*-mtp-diagnostic-export-n01-primed | head -1)
+python3 qwen_bench.py archive "$RUN"
+```
+
+The priming response and its request-scoped server log are retained and indexed
+by `priming.json`, but excluded from measured equivalence and repeatability
+counts. A passing primed arm proves whether forced target export restores
+n=0/n=1 parity independently of the startup-only target-state defect; it does
+not excuse that defect for production.
+
 Rebuild and rerun the ROCm audit first because this diagnostic adds code to both
 `libllama.so` and `llama-server`:
 
