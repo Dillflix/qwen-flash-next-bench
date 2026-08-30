@@ -98,6 +98,8 @@ jobs:
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-auto-mtmd-spec-bypass.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-mtp-target-isolation.patch"
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-mtp-target-isolation.patch"
+          git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-mtp-prompt-logit-mask.patch"
+          git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-mtp-prompt-logit-mask.patch"
           git -C rocmfpx apply --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
           git -C rocmfpx apply --reverse --check --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
           git -C rocmfpx apply --reverse --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
@@ -135,4 +137,6 @@ jobs:
           grep -aFq 'Qwen4Exp MTP diagnostic: true outer-call serial target verification enabled' \
             rocmfpx/build-ci/bin/llama-server
           grep -aFq 'MTP target-logit fingerprint' \
+            rocmfpx/build-ci/bin/llama-server
+          grep -aFq 'Qwen4Exp MTP prompt logits remain last-token-only' \
             rocmfpx/build-ci/bin/llama-server

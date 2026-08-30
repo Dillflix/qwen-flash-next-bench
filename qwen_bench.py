@@ -41,11 +41,12 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.45.4"
+VERSION = "1.45.5"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
 QWEN4EXP_TARGET_EXPORT_ORDER_MARKER = "qwen4exp_mtp_h_pre_norm_post_logits"
+MTP_PROMPT_LOGIT_MASK_MARKER = "Qwen4Exp MTP prompt logits remain last-token-only"
 QWEN4EXP_MTP_ROLLBACK_MARKER = "qwen4exp recurrent conv rollback snapshots enabled"
 QWEN4EXP_PLE_ROLLBACK_MARKER = "non-consecutive Qwen4Exp PLE history position"
 MTP_VERIFIER_STATE_MARKER = "MTP verifier state-correctness patch active"
@@ -1671,6 +1672,9 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["server"]["mtp_target_logit_marker"] = (
                 MTP_TARGET_LOGIT_MARKER.encode("ascii") in server_binary
             )
+            result["server"]["mtp_prompt_logit_mask_marker"] = (
+                MTP_PROMPT_LOGIT_MASK_MARKER.encode("ascii") in server_binary
+            )
         except OSError:
             result["server"]["mtp_vision_resync_marker"] = False
             result["server"]["qwen4exp_vision_strict_marker"] = False
@@ -1680,6 +1684,7 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["server"]["auto_mtmd_spec_bypass_marker"] = False
             result["server"]["mtp_target_export_marker"] = False
             result["server"]["mtp_target_logit_marker"] = False
+            result["server"]["mtp_prompt_logit_mask_marker"] = False
     else:
         result["server"]["mtp_vision_resync_marker"] = False
         result["server"]["qwen4exp_vision_strict_marker"] = False
@@ -1689,6 +1694,7 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
         result["server"]["auto_mtmd_spec_bypass_marker"] = False
         result["server"]["mtp_target_export_marker"] = False
         result["server"]["mtp_target_logit_marker"] = False
+        result["server"]["mtp_prompt_logit_mask_marker"] = False
     return result
 
 
@@ -1858,6 +1864,7 @@ def inspect_request_spec_bypass_source(repo: pathlib.Path) -> dict[str, Any]:
         "media_detection": "bool has_media() const" in common_text,
         "automatic_media_gate": "task.tokens.has_media()" in text,
         "production_policy_gate": "LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL" in text,
+        "prompt_logit_mask": MTP_PROMPT_LOGIT_MASK_MARKER in text,
     }
     return {
         "ready": server_path.is_file() and common_path.is_file() and all(markers.values()),
@@ -1958,7 +1965,8 @@ def run_rocm_audit(
         fingerprint.get("llama_library", {}).get("qwen4exp_target_export_order_marker") and
         fingerprint.get("llama_library", {}).get("qwen4exp_mtp_rollback_marker") and
         fingerprint.get("llama_library", {}).get("qwen4exp_ple_rollback_marker") and
-        fingerprint.get("common_library", {}).get("mtp_verifier_state_marker")
+        fingerprint.get("common_library", {}).get("mtp_verifier_state_marker") and
+        fingerprint.get("server", {}).get("mtp_prompt_logit_mask_marker")
     )
     ready_for_model_benchmarks = bool(
         source["static_dispatch_ready"] and dual_arch_ready and functional_pass
@@ -2013,8 +2021,8 @@ def run_rocm_audit(
         mtp_reasons.append("the pinned source tree lacks the complete qwen4exp MTP sidecar integration")
     if not compiled_qwen4exp_mtp:
         mtp_reasons.append(
-            "libllama.so or libllama-common.so lacks the compiled qwen4exp MTP "
-            "integration, rollback, PLE-history, or verifier-state marker; rebuild "
+            "llama-server, libllama.so, or libllama-common.so lacks the compiled qwen4exp MTP "
+            "integration, prompt-logit mask, rollback, PLE-history, or verifier-state marker; rebuild "
             "with build-rocm10-dual.sh"
         )
     if not host_checkpoint_source["ready"]:
@@ -2058,7 +2066,7 @@ def run_rocm_audit(
             "the prerequisite qwen4exp MTP audit gate has not passed"
         )
     report = {
-        "schema": 12,
+        "schema": 13,
         "ts": utc_now(),
         "harness_version": VERSION,
         "ready_for_model_benchmarks": ready_for_model_benchmarks,
@@ -2118,15 +2126,16 @@ def validate_rocm_audit(
         actual = current.get(key, {}).get("sha256")
         if not expected or expected != actual:
             return report, f"ROCm audit is stale because {key} changed; rerun `python3 qwen_bench.py rocm-audit --run-ops`"
-    if require_mtp and int(report.get("schema", 0)) < 11:
-        return report, "ROCm audit predates the Qwen4Exp MTP rollback/state-correctness gate; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
+    if require_mtp and int(report.get("schema", 0)) < 13:
+        return report, "ROCm audit predates the Qwen4Exp MTP prompt-logit and state-correctness gates; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
     if require_mtp and not all((
         current.get("llama_library", {}).get("qwen4exp_mtp_scheduling_marker"),
         current.get("llama_library", {}).get("qwen4exp_mtp_rollback_marker"),
         current.get("llama_library", {}).get("qwen4exp_ple_rollback_marker"),
         current.get("common_library", {}).get("mtp_verifier_state_marker"),
+        current.get("server", {}).get("mtp_prompt_logit_mask_marker"),
     )):
-        return report, "current ROCm runtime lacks the Qwen4Exp MTP scheduling, rollback, PLE-history, or verifier-state fix; rerun `./build-rocm10-dual.sh` and the ROCm audit"
+        return report, "current ROCm runtime lacks the Qwen4Exp MTP scheduling, prompt-logit mask, rollback, PLE-history, or verifier-state fix; rerun `./build-rocm10-dual.sh` and the ROCm audit"
     if require_mtp and not report.get("ready_for_mtp_benchmarks"):
         reasons = "; ".join(str(item) for item in report.get("mtp_reasons", []))
         return report, f"ROCm audit has not proven qwen4exp MTP support: {reasons}"
@@ -4804,6 +4813,12 @@ def self_test() -> None:
     assert export_order_text.index("\n     ggml_build_forward_expand(gf, cur)") < export_order_text.index(
         "+        ggml_build_forward_expand(gf, res->t_h_pre_norm)",
     )
+    prompt_logit_mask_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-mtp-prompt-logit-mask.patch"
+    assert prompt_logit_mask_patch.is_file()
+    prompt_logit_mask_text = prompt_logit_mask_patch.read_text(encoding="utf-8")
+    assert MTP_PROMPT_LOGIT_MASK_MARKER in prompt_logit_mask_text
+    assert "-                            slot.need_embd() || slot.need_embd_pre_norm());" in prompt_logit_mask_text
+    assert "+                            slot.need_embd());" in prompt_logit_mask_text
     host_checkpoint_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-host-checkpoints.patch"
     assert host_checkpoint_patch.is_file()
     host_checkpoint_patch_text = host_checkpoint_patch.read_text(encoding="utf-8")
@@ -4819,6 +4834,7 @@ def self_test() -> None:
     assert QWEN4EXP_MTP_MARKER in build_script
     assert QWEN4EXP_MTP_SCHED_MARKER in build_script
     assert QWEN4EXP_TARGET_EXPORT_ORDER_MARKER in build_script
+    assert MTP_PROMPT_LOGIT_MASK_MARKER in build_script
     assert QWEN4EXP_MTP_ROLLBACK_MARKER in build_script
     assert QWEN4EXP_PLE_ROLLBACK_MARKER in build_script
     assert MTP_VERIFIER_STATE_MARKER in build_script
@@ -4836,6 +4852,7 @@ def self_test() -> None:
     assert "rocmfpx-auto-mtmd-spec-bypass.patch" in build_script
     assert "rocmfpx-mtp-target-isolation.patch" in build_script
     assert "rocmfpx-qwen4exp-target-export-order.patch" in build_script
+    assert "rocmfpx-mtp-prompt-logit-mask.patch" in build_script
     assert 'SERVER_BINARY="$BUILD_DIR/bin/llama-server"' in build_script
     assert "libllama-server-impl.so" not in build_script
     assert "rocmfpx-host-checkpoints-v1-broken.patch" in build_script
@@ -4858,6 +4875,7 @@ def self_test() -> None:
             "slot_batched->can_speculate() && !common_speculative_process",
             "task.tokens.has_media()",
             "LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL",
+            MTP_PROMPT_LOGIT_MASK_MARKER,
         )), encoding="utf-8")
         fake_common_source.write_text("bool has_media() const", encoding="utf-8")
         assert inspect_request_spec_bypass_source(fake_source)["ready"] is True
@@ -4874,6 +4892,7 @@ def self_test() -> None:
             AUTO_MTMD_SPEC_BYPASS_MARKER.encode("ascii") + b"\x00" +
             MTP_TARGET_EXPORT_MARKER.encode("ascii") + b"\x00" +
             MTP_TARGET_LOGIT_MARKER.encode("ascii")
+            + b"\x00" + MTP_PROMPT_LOGIT_MASK_MARKER.encode("ascii")
         )
         (fake_bin / "libllama.so").write_bytes(
             QWEN4EXP_MTP_MARKER.encode("ascii") + b"\x00" +
@@ -4898,6 +4917,7 @@ def self_test() -> None:
         assert fake_fingerprint["server"]["auto_mtmd_spec_bypass_marker"] is True
         assert fake_fingerprint["server"]["mtp_target_export_marker"] is True
         assert fake_fingerprint["server"]["mtp_target_logit_marker"] is True
+        assert fake_fingerprint["server"]["mtp_prompt_logit_mask_marker"] is True
         assert fake_fingerprint["llama_library"]["qwen4exp_mtp_rollback_marker"] is True
         assert fake_fingerprint["llama_library"]["qwen4exp_target_export_order_marker"] is True
         assert fake_fingerprint["llama_library"]["qwen4exp_ple_rollback_marker"] is True

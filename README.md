@@ -918,6 +918,33 @@ with `LLAMA_MTP_DIAG_TRACE_TARGET_LOGITS=1` but **without**
 Exact n=0/n=1 parity in that arm qualifies the output-order candidate; failure
 means the hidden row needs a non-aliasing copy or a separate scheduling fix.
 
+The `20260830-180244-mtp-diagnostic-export-order-n01-primed` result rejected
+the output-order change as sufficient. The explicit n=0 prime and first measured
+n=0 request had the same `2a717ae6184e` token trace and first-token logprob
+`-0.427770`. The first n=1 request changed to trace `bb3db103854a` and logprob
+`-0.273570`; every subsequent n=0 request retained that second trace. This is
+not a cold-start outlier. The first MTP request permanently changed the target
+process's numerical regime.
+
+Request logs expose the cause: n=0 produced 40 target-logit fingerprints for
+one prompt output plus 39 generated positions, while every n=1 arm produced
+2,145 fingerprints: all 2,106 prompt positions plus 39 generated positions.
+The server marked every prompt token as a vocabulary-logit output merely to
+obtain MTP's unmasked pre-norm rows. That unnecessarily enlarged the target
+output graph and graph allocator; later n=0 requests then used the altered
+allocation regime. The `rocmfpx-mtp-prompt-logit-mask.patch` candidate leaves
+prompt logits last-token-only. Unmasked pre-norm extraction already copies all
+token rows through its separately sized buffer, so it does not require
+`batch.logits` on every prompt token.
+
+After rebuilding, repeat the primed `greedy-n01` matrix without forced target
+export. A qualified run must meet all three conditions:
+
+- the prime, every n=0 repeat, and every n=1 repeat have one exact token trace;
+- n=1 request logs contain one prompt target-logit row, not 2,106 rows;
+- the first-token target distribution stays on the ordinary n=0 fingerprint
+  rather than transitioning after the first MTP request.
+
 Rebuild and rerun the ROCm audit first because this diagnostic adds code to both
 `libllama.so` and `llama-server`:
 

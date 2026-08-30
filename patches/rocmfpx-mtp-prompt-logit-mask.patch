@@ -1,0 +1,22 @@
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -3250,13 +3250,15 @@ private:
+                             break;
+                         }
+ 
+-                        // Embedding and MTP pre-norm extraction require output
+-                        // rows, but raw logits are copied only when needed.
++                        // Ordinary embeddings require output rows. MTP pre-norm
++                        // extraction is deliberately unmasked, has its own all-token
++                        // output buffer, and must not force vocabulary logits for every
++                        // prompt token. Qwen4Exp MTP prompt logits remain last-token-only.
+                         common_batch_add(batch,
+                             cur_tok,
+                             slot.prompt.tokens.pos_next(),
+                             { slot.id },
+-                            slot.need_embd() || slot.need_embd_pre_norm());
++                            slot.need_embd());
+                         slot.prompt.tokens.push_back(cur_tok);
+ 
+                         slot.n_prompt_tokens_processed++;

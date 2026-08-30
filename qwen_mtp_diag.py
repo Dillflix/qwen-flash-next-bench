@@ -30,7 +30,7 @@ import urllib.parse
 from typing import Any
 
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 DEFAULT_FIXTURE = pathlib.Path(__file__).resolve().parent / "diagnostics" / "mtp-agentic-openwebui.json"
 API_KEY_REDACTION = "[REDACTED_API_KEY]"
 
@@ -1537,20 +1537,45 @@ def classify_run(
         item for item in greedy_comparisons
         if (item.get("first_scored_distribution_divergence") or {}).get("position") == 0
     ]
+    prime_matches_first_baseline = False
+    priming_path = run_dir / "priming.json"
+    if repeats and priming_path.is_file():
+        loaded_priming = json.loads(priming_path.read_text(encoding="utf-8"))
+        prime_rows = loaded_priming if isinstance(loaded_priming, list) else [loaded_priming]
+        prime_rows = [item for item in prime_rows if isinstance(item, dict)]
+        first_baseline = indexed.get((0.0, 0, False, repeats[0]))
+        if prime_rows and ready(first_baseline):
+            prime_trace = load_trace(run_dir, prime_rows[-1])
+            first_baseline_trace = load_trace(run_dir, first_baseline)
+            prime_matches_first_baseline = bool(
+                prime_trace and first_baseline_trace
+                and first_token_divergence(prime_trace, first_baseline_trace) is None
+            )
     if baseline_repeatability_divergences:
         later_cross_n_matches = [
             item for item in greedy_comparisons
             if item.get("repeat") != repeats[0] and item.get("exact_match") is True
         ] if repeats else []
-        causes.append(
-            "the greedy n=0 baseline is not fixed-seed repeatable, so cross-n MTP "
-            "equivalence is inconclusive; the first measured request is a cold-start "
-            "outlier" + (
-                " while a later n=0/n>0 pair matches exactly"
-                if later_cross_n_matches else ""
-            ) + "; prime the request-identical target graph before measuring and "
-            "investigate startup warm-up/recurrent-state initialization"
-        )
+        if prime_matches_first_baseline:
+            causes.append(
+                "the explicit n=0 prime and first measured n=0 request match exactly, "
+                "but n=0 changes only after the first interleaved MTP request; this is a "
+                "persistent MTP-induced process-state transition, not a cold-start outlier" + (
+                    ", and later n=0/n>0 pairs match in the altered regime"
+                    if later_cross_n_matches else ""
+                ) + "; inspect MTP prompt output masking, graph reserve/allocation, and "
+                "target hidden-state export before rollback"
+            )
+        else:
+            causes.append(
+                "the greedy n=0 baseline is not fixed-seed repeatable, so cross-n MTP "
+                "equivalence is inconclusive; the first measured request is a cold-start "
+                "outlier" + (
+                    " while a later n=0/n>0 pair matches exactly"
+                    if later_cross_n_matches else ""
+                ) + "; prime the request-identical target graph before measuring and "
+                "investigate startup warm-up/recurrent-state initialization"
+            )
     if prompt_boundary_score_drift and not baseline_repeatability_divergences:
         details = ", ".join(
             f"n={item['n_max']} {item['first_scored_distribution_divergence']['baseline_logprob']:.6f}"
@@ -2569,6 +2594,29 @@ def self_test() -> None:
         with contextlib.redirect_stdout(captured):
             print_verdict(cold_report)
         assert "Greedy equivalence: INCONCLUSIVE" in captured.getvalue()
+
+        # The same measured order has a different diagnosis when an explicit
+        # request-identical prime proves that repeat 1 is already stable. In
+        # that case the intervening n=1 request, not startup, causes the n=0
+        # transition observed at repeat 2.
+        first_n0 = next(
+            row for row in cold_rows
+            if row["repeat"] == 1 and row["n_max"] == 0 and not row["stream"]
+        )
+        atomic_json(cold_root / "priming.json", [{
+            **copy.deepcopy(first_n0),
+            "case_id": "cold-prime",
+            "repeat": 0,
+        }])
+        transition_report = classify_run(cold_root, cold_rows)
+        assert any(
+            "persistent MTP-induced process-state transition" in item
+            for item in transition_report["classification"]
+        )
+        assert not any(
+            "first measured request is a cold-start outlier" in item
+            for item in transition_report["classification"]
+        )
 
         boundary_root = root / "pre-rejection-boundary"
         boundary_root.mkdir()

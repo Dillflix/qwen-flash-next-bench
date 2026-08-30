@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 QWEN4EXP_MTP_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp.patch"
 QWEN4EXP_MTP_SCHED_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
 QWEN4EXP_TARGET_EXPORT_ORDER_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-target-export-order.patch"
+MTP_PROMPT_LOGIT_MASK_PATCH="$SCRIPT_DIR/patches/rocmfpx-mtp-prompt-logit-mask.patch"
 QWEN4EXP_MTP_STATE_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp-state-correctness.patch"
 MTP_VISION_RESYNC_PATCH="$SCRIPT_DIR/patches/rocmfpx-mtp-vision-resync.patch"
 QWEN4EXP_VISION_STRICT_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-vision-strict.patch"
@@ -35,6 +36,7 @@ actual_rev="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
 [[ -f "$QWEN4EXP_MTP_PATCH" ]] || fail "missing qwen4exp MTP patch: $QWEN4EXP_MTP_PATCH"
 [[ -f "$QWEN4EXP_MTP_SCHED_PATCH" ]] || fail "missing qwen4exp MTP scheduling patch: $QWEN4EXP_MTP_SCHED_PATCH"
 [[ -f "$QWEN4EXP_TARGET_EXPORT_ORDER_PATCH" ]] || fail "missing qwen4exp target-export ordering patch: $QWEN4EXP_TARGET_EXPORT_ORDER_PATCH"
+[[ -f "$MTP_PROMPT_LOGIT_MASK_PATCH" ]] || fail "missing MTP prompt-logit mask patch: $MTP_PROMPT_LOGIT_MASK_PATCH"
 [[ -f "$QWEN4EXP_MTP_STATE_PATCH" ]] || fail "missing qwen4exp MTP state-correctness patch: $QWEN4EXP_MTP_STATE_PATCH"
 [[ -f "$MTP_VISION_RESYNC_PATCH" ]] || fail "missing MTP vision-resync patch: $MTP_VISION_RESYNC_PATCH"
 [[ -f "$QWEN4EXP_VISION_STRICT_PATCH" ]] || fail "missing Qwen4Exp vision strict-verification patch: $QWEN4EXP_VISION_STRICT_PATCH"
@@ -122,6 +124,11 @@ apply_patch_once \
     "MTP target-isolation diagnostic patch" \
     "tools/server/server-context.cpp" \
     "Qwen4Exp MTP diagnostic: true outer-call serial target verification enabled"
+apply_patch_once \
+    "$MTP_PROMPT_LOGIT_MASK_PATCH" \
+    "MTP prompt-logit mask patch" \
+    "tools/server/server-context.cpp" \
+    "Qwen4Exp MTP prompt logits remain last-token-only"
 
 # Commit dc18127 shipped a zero-context patch whose additions were accepted by
 # git-apply at EOF instead of inside the four checkpoint methods. Repair source
@@ -185,6 +192,8 @@ grep -Fq 'LLAMA_MTP_DIAG_FORCE_TARGET_EXPORT' "$SOURCE_DIR/tools/server/server-c
     || fail "server source cannot isolate target hidden-state export"
 grep -Fq 'MTP target-logit fingerprint' "$SOURCE_DIR/tools/server/server-context.cpp" \
     || fail "server source lacks target-logit fingerprinting"
+grep -Fq 'Qwen4Exp MTP prompt logits remain last-token-only' "$SOURCE_DIR/tools/server/server-context.cpp" \
+    || fail "server source still forces vocabulary logits for every MTP prompt token"
 grep -Fq 'mtp_strict_qwen4exp_vision ? 0' "$SOURCE_DIR/common/common.cpp" \
     || fail "common context source does not disable recurrent rollback for strict Qwen4Exp vision MTP"
 grep -Rq 'Q4_0_ROCMFP4_FAST' "$SOURCE_DIR/ggml/src/ggml-cuda" \
@@ -307,6 +316,8 @@ grep -aFq 'Qwen4Exp MTP diagnostic: true outer-call serial target verification e
     || fail "llama-server lacks the compiled MTP target-isolation diagnostic"
 grep -aFq 'MTP target-logit fingerprint' "$SERVER_BINARY" \
     || fail "llama-server lacks compiled target-logit fingerprinting"
+grep -aFq 'Qwen4Exp MTP prompt logits remain last-token-only' "$SERVER_BINARY" \
+    || fail "llama-server lacks the compiled MTP prompt-logit mask"
 
 targets="$(strings "$HIP_LIBRARY" | grep -oE 'gfx[0-9a-f]{3,5}[a-z]*' | sort -u | tr '\n' ' ')"
 [[ " $targets " == *' gfx1100 '* ]] || fail "libggml-hip.so lacks a gfx1100 code object"
@@ -327,6 +338,7 @@ echo "  Qwen4Exp text strict verification: compiled"
 echo "  per-request speculative bypass: compiled"
 echo "  automatic multimodal speculative bypass: compiled"
 echo "  MTP target-isolation diagnostics: compiled"
+echo "  MTP prompt logits: last-token-only"
 echo "  host checkpoints: LLAMA_CKPT_FORCE_HOST supported"
 echo
 echo "Next: python3 qwen_rocm.py collect --llama-dir '$SOURCE_DIR' --build-dir '$BUILD_DIR' --rocm '$ROCM_ROOT'"
