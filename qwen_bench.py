@@ -41,10 +41,11 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.45.3"
+VERSION = "1.45.4"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
+QWEN4EXP_TARGET_EXPORT_ORDER_MARKER = "qwen4exp_mtp_h_pre_norm_post_logits"
 QWEN4EXP_MTP_ROLLBACK_MARKER = "qwen4exp recurrent conv rollback snapshots enabled"
 QWEN4EXP_PLE_ROLLBACK_MARKER = "non-consecutive Qwen4Exp PLE history position"
 MTP_VERIFIER_STATE_MARKER = "MTP verifier state-correctness patch active"
@@ -1602,6 +1603,9 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["llama_library"]["qwen4exp_mtp_scheduling_marker"] = (
                 QWEN4EXP_MTP_SCHED_MARKER.encode("ascii") in llama_binary
             )
+            result["llama_library"]["qwen4exp_target_export_order_marker"] = (
+                QWEN4EXP_TARGET_EXPORT_ORDER_MARKER.encode("ascii") in llama_binary
+            )
             result["llama_library"]["qwen4exp_mtp_rollback_marker"] = (
                 QWEN4EXP_MTP_ROLLBACK_MARKER.encode("ascii") in llama_binary
             )
@@ -1614,12 +1618,14 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
         except OSError:
             result["llama_library"]["qwen4exp_mtp_marker"] = False
             result["llama_library"]["qwen4exp_mtp_scheduling_marker"] = False
+            result["llama_library"]["qwen4exp_target_export_order_marker"] = False
             result["llama_library"]["qwen4exp_mtp_rollback_marker"] = False
             result["llama_library"]["qwen4exp_ple_rollback_marker"] = False
             result["llama_library"]["mtp_outer_serial_marker"] = False
     else:
         result["llama_library"]["qwen4exp_mtp_marker"] = False
         result["llama_library"]["qwen4exp_mtp_scheduling_marker"] = False
+        result["llama_library"]["qwen4exp_target_export_order_marker"] = False
         result["llama_library"]["qwen4exp_mtp_rollback_marker"] = False
         result["llama_library"]["qwen4exp_ple_rollback_marker"] = False
         result["llama_library"]["mtp_outer_serial_marker"] = False
@@ -1721,6 +1727,7 @@ def inspect_qwen4exp_mtp_sources(repo: pathlib.Path) -> dict[str, Any]:
             "llm_graph_input_embd_h",
             QWEN4EXP_MTP_MARKER,
             QWEN4EXP_MTP_SCHED_MARKER,
+            QWEN4EXP_TARGET_EXPORT_ORDER_MARKER,
             "nextn.eh_proj",
             "t_h_pre_norm",
             QWEN4EXP_MTP_ROLLBACK_MARKER,
@@ -1948,6 +1955,7 @@ def run_rocm_audit(
     compiled_qwen4exp_mtp = bool(
         fingerprint.get("llama_library", {}).get("qwen4exp_mtp_marker") and
         fingerprint.get("llama_library", {}).get("qwen4exp_mtp_scheduling_marker") and
+        fingerprint.get("llama_library", {}).get("qwen4exp_target_export_order_marker") and
         fingerprint.get("llama_library", {}).get("qwen4exp_mtp_rollback_marker") and
         fingerprint.get("llama_library", {}).get("qwen4exp_ple_rollback_marker") and
         fingerprint.get("common_library", {}).get("mtp_verifier_state_marker")
@@ -2050,7 +2058,7 @@ def run_rocm_audit(
             "the prerequisite qwen4exp MTP audit gate has not passed"
         )
     report = {
-        "schema": 11,
+        "schema": 12,
         "ts": utc_now(),
         "harness_version": VERSION,
         "ready_for_model_benchmarks": ready_for_model_benchmarks,
@@ -4789,6 +4797,13 @@ def self_test() -> None:
     assert MTP_TARGET_EXPORT_MARKER in target_isolation_text
     assert MTP_OUTER_SERIAL_MARKER in target_isolation_text
     assert MTP_TARGET_LOGIT_MARKER in target_isolation_text
+    export_order_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-qwen4exp-target-export-order.patch"
+    assert export_order_patch.is_file()
+    export_order_text = export_order_patch.read_text(encoding="utf-8")
+    assert QWEN4EXP_TARGET_EXPORT_ORDER_MARKER in export_order_text
+    assert export_order_text.index("\n     ggml_build_forward_expand(gf, cur)") < export_order_text.index(
+        "+        ggml_build_forward_expand(gf, res->t_h_pre_norm)",
+    )
     host_checkpoint_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-host-checkpoints.patch"
     assert host_checkpoint_patch.is_file()
     host_checkpoint_patch_text = host_checkpoint_patch.read_text(encoding="utf-8")
@@ -4803,6 +4818,7 @@ def self_test() -> None:
     assert "git -C \"$SOURCE_DIR\" apply" in build_script
     assert QWEN4EXP_MTP_MARKER in build_script
     assert QWEN4EXP_MTP_SCHED_MARKER in build_script
+    assert QWEN4EXP_TARGET_EXPORT_ORDER_MARKER in build_script
     assert QWEN4EXP_MTP_ROLLBACK_MARKER in build_script
     assert QWEN4EXP_PLE_ROLLBACK_MARKER in build_script
     assert MTP_VERIFIER_STATE_MARKER in build_script
@@ -4819,6 +4835,7 @@ def self_test() -> None:
     assert "rocmfpx-request-spec-bypass.patch" in build_script
     assert "rocmfpx-auto-mtmd-spec-bypass.patch" in build_script
     assert "rocmfpx-mtp-target-isolation.patch" in build_script
+    assert "rocmfpx-qwen4exp-target-export-order.patch" in build_script
     assert 'SERVER_BINARY="$BUILD_DIR/bin/llama-server"' in build_script
     assert "libllama-server-impl.so" not in build_script
     assert "rocmfpx-host-checkpoints-v1-broken.patch" in build_script
@@ -4861,6 +4878,7 @@ def self_test() -> None:
         (fake_bin / "libllama.so").write_bytes(
             QWEN4EXP_MTP_MARKER.encode("ascii") + b"\x00" +
             QWEN4EXP_MTP_SCHED_MARKER.encode("ascii") + b"\x00" +
+            QWEN4EXP_TARGET_EXPORT_ORDER_MARKER.encode("ascii") + b"\x00" +
             QWEN4EXP_MTP_ROLLBACK_MARKER.encode("ascii") + b"\x00" +
             QWEN4EXP_PLE_ROLLBACK_MARKER.encode("ascii") + b"\x00" +
             MTP_OUTER_SERIAL_MARKER.encode("ascii")
@@ -4881,6 +4899,7 @@ def self_test() -> None:
         assert fake_fingerprint["server"]["mtp_target_export_marker"] is True
         assert fake_fingerprint["server"]["mtp_target_logit_marker"] is True
         assert fake_fingerprint["llama_library"]["qwen4exp_mtp_rollback_marker"] is True
+        assert fake_fingerprint["llama_library"]["qwen4exp_target_export_order_marker"] is True
         assert fake_fingerprint["llama_library"]["qwen4exp_ple_rollback_marker"] is True
         assert fake_fingerprint["llama_library"]["mtp_outer_serial_marker"] is True
         assert fake_fingerprint["common_library"]["mtp_verifier_state_marker"] is True

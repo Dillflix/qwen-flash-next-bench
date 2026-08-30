@@ -11,6 +11,7 @@ EXPECTED_REV="${ROCMFPX_REV:-36e9acd40e10a87cd3c3ef8ec734668757dc8520}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 QWEN4EXP_MTP_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp.patch"
 QWEN4EXP_MTP_SCHED_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
+QWEN4EXP_TARGET_EXPORT_ORDER_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-target-export-order.patch"
 QWEN4EXP_MTP_STATE_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-mtp-state-correctness.patch"
 MTP_VISION_RESYNC_PATCH="$SCRIPT_DIR/patches/rocmfpx-mtp-vision-resync.patch"
 QWEN4EXP_VISION_STRICT_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-vision-strict.patch"
@@ -33,6 +34,7 @@ actual_rev="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
     || fail "ROCmFPX is at $actual_rev, expected pinned revision $EXPECTED_REV"
 [[ -f "$QWEN4EXP_MTP_PATCH" ]] || fail "missing qwen4exp MTP patch: $QWEN4EXP_MTP_PATCH"
 [[ -f "$QWEN4EXP_MTP_SCHED_PATCH" ]] || fail "missing qwen4exp MTP scheduling patch: $QWEN4EXP_MTP_SCHED_PATCH"
+[[ -f "$QWEN4EXP_TARGET_EXPORT_ORDER_PATCH" ]] || fail "missing qwen4exp target-export ordering patch: $QWEN4EXP_TARGET_EXPORT_ORDER_PATCH"
 [[ -f "$QWEN4EXP_MTP_STATE_PATCH" ]] || fail "missing qwen4exp MTP state-correctness patch: $QWEN4EXP_MTP_STATE_PATCH"
 [[ -f "$MTP_VISION_RESYNC_PATCH" ]] || fail "missing MTP vision-resync patch: $MTP_VISION_RESYNC_PATCH"
 [[ -f "$QWEN4EXP_VISION_STRICT_PATCH" ]] || fail "missing Qwen4Exp vision strict-verification patch: $QWEN4EXP_VISION_STRICT_PATCH"
@@ -75,6 +77,11 @@ apply_patch_once \
     "qwen4exp MTP hidden-state scheduling patch" \
     "src/models/qwen4exp.cpp" \
     "qwen4exp_mtp_h_pre_norm_scheduled"
+apply_patch_once \
+    "$QWEN4EXP_TARGET_EXPORT_ORDER_PATCH" \
+    "qwen4exp target-export ordering patch" \
+    "src/models/qwen4exp.cpp" \
+    "qwen4exp_mtp_h_pre_norm_post_logits"
 apply_patch_once \
     "$MTP_VISION_RESYNC_PATCH" \
     "MTP multimodal-resync patch" \
@@ -146,6 +153,8 @@ grep -Fq 'Qwen/Qwen4Exp strict MTP: boundary-safe multi-row verification' "$SOUR
     || fail "server source lacks the Qwen4Exp text strict-verification marker"
 grep -Fq 'qwen4exp recurrent conv rollback snapshots enabled' "$SOURCE_DIR/src/models/qwen4exp.cpp" \
     || fail "qwen4exp source lacks recurrent convolution rollback snapshots"
+grep -Fq 'qwen4exp_mtp_h_pre_norm_post_logits' "$SOURCE_DIR/src/models/qwen4exp.cpp" \
+    || fail "qwen4exp source does not schedule target logits before hidden export"
 grep -Fq 'non-consecutive Qwen4Exp PLE history position' "$SOURCE_DIR/src/models/qwen4exp.cpp" \
     || fail "qwen4exp source lacks rollback-aware PLE token history"
 grep -Fq 'Qwen4Exp PLE requires an n-gram size of at least two' "$SOURCE_DIR/src/models/qwen4exp.cpp" \

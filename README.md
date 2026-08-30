@@ -904,6 +904,20 @@ counts. A passing primed arm proves whether forced target export restores
 n=0/n=1 parity independently of the startup-only target-state defect; it does
 not excuse that defect for production.
 
+The forced-export arm proves graph-path parity only by making the n=0 control
+use the hidden-state-export graph. It is not a production fix: ordinary target
+decoding must remain the reference. The next candidate changes only Qwen4Exp's
+target graph construction order. Target logits are registered as the primary
+graph output before the pre-norm hidden row is appended for MTP. This tests
+whether registering the hidden view first changed ROCm fusion, allocation, or
+in-place scheduling and therefore changed target logits.
+
+After rebuilding and passing `rocm-audit --run-ops`, start the diagnostic server
+with `LLAMA_MTP_DIAG_TRACE_TARGET_LOGITS=1` but **without**
+`LLAMA_MTP_DIAG_FORCE_TARGET_EXPORT`. Run the same primed `greedy-n01` profile.
+Exact n=0/n=1 parity in that arm qualifies the output-order candidate; failure
+means the hidden row needs a non-aliasing copy or a separate scheduling fix.
+
 Rebuild and rerun the ROCm audit first because this diagnostic adds code to both
 `libllama.so` and `llama-server`:
 

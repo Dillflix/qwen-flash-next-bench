@@ -80,6 +80,8 @@ jobs:
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-mtp-schedule-output.patch"
+          git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-target-export-order.patch"
+          git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-target-export-order.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-mtp-vision-resync.patch"
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-mtp-vision-resync.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-qwen4exp-vision-strict.patch"
