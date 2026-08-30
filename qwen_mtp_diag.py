@@ -28,7 +28,7 @@ import urllib.parse
 from typing import Any
 
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 DEFAULT_FIXTURE = pathlib.Path(__file__).resolve().parent / "diagnostics" / "mtp-agentic-openwebui.json"
 API_KEY_REDACTION = "[REDACTED_API_KEY]"
 
@@ -342,6 +342,28 @@ def validate_response_contract(
     max_tool_calls = rules.get("max_tool_calls")
     if isinstance(max_tool_calls, int) and len(tool_calls) > max_tool_calls:
         failures.append(f"response made {len(tool_calls)} tool calls; maximum is {max_tool_calls}")
+    if rules.get("require_nonempty_content_on_stop") is True and finish_reason == "stop":
+        if not content.strip():
+            failures.append("stop response has no non-whitespace content")
+    if rules.get("require_valid_tool_calls_on_tool_finish") is True and finish_reason == "tool_calls":
+        if not tool_calls:
+            failures.append("tool_calls finish has no tool call")
+        for index, call in enumerate(tool_calls):
+            function = call.get("function") if isinstance(call, dict) else None
+            name = function.get("name") if isinstance(function, dict) else None
+            arguments = function.get("arguments") if isinstance(function, dict) else None
+            if not isinstance(name, str) or not name.strip():
+                failures.append(f"tool call {index} has no function name")
+            if not isinstance(arguments, str):
+                failures.append(f"tool call {index} arguments are not a JSON string")
+                continue
+            try:
+                parsed_arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                failures.append(f"tool call {index} arguments are not valid JSON")
+                continue
+            if not isinstance(parsed_arguments, dict):
+                failures.append(f"tool call {index} arguments are not a JSON object")
     return {
         "passed": not failures,
         "failures": failures,
@@ -479,12 +501,20 @@ def first_token_divergence(
 ) -> dict[str, Any] | None:
     common = min(len(baseline), len(candidate))
     for index in range(common):
-        left = baseline[index].get("id")
-        right = candidate[index].get("id")
-        if left != right:
+        left_id = baseline[index].get("id")
+        right_id = candidate[index].get("id")
+        left_bytes = baseline[index].get("bytes")
+        right_bytes = candidate[index].get("bytes")
+        if left_id != right_id or left_bytes != right_bytes:
             return {
                 "kind": "token_mismatch",
                 "position": index,
+                "identity_fields_differ": [
+                    field for field, differs in (
+                        ("id", left_id != right_id),
+                        ("bytes", left_bytes != right_bytes),
+                    ) if differs
+                ],
                 "baseline": baseline[index],
                 "candidate": candidate[index],
                 "prefix_ids": [item.get("id") for item in baseline[max(0, index - 16):index]],
@@ -501,8 +531,30 @@ def first_token_divergence(
     return None
 
 
-def token_evidence_error(trace: list[dict[str, Any]]) -> str | None:
-    """Return the first missing/malformed exact-token evidence field."""
+def token_identity_error(trace: list[dict[str, Any]]) -> str | None:
+    """Return the first field error that prevents exact token comparison."""
+    def valid_bytes(value: Any) -> bool:
+        return isinstance(value, list) and all(
+            isinstance(item, int) and not isinstance(item, bool) and 0 <= item <= 255
+            for item in value
+        )
+
+    for position, token in enumerate(trace):
+        if not isinstance(token.get("id"), int) or isinstance(token.get("id"), bool):
+            return f"token {position} has no integer id"
+        if not valid_bytes(token.get("bytes")):
+            return f"token {position} has no valid byte sequence"
+    return None
+
+
+def token_distribution_error(trace: list[dict[str, Any]]) -> str | None:
+    """Return the first missing score/top-candidate field.
+
+    llama-server currently emits exact IDs and bytes for accepted MTP draft
+    tokens while leaving their top-logprob arrays empty.  That is incomplete
+    distribution evidence, but it must never hide an observable token-sequence
+    divergence by turning the whole response into an incomparable request.
+    """
     def valid_bytes(value: Any) -> bool:
         return isinstance(value, list) and all(
             isinstance(item, int) and not isinstance(item, bool) and 0 <= item <= 255
@@ -521,10 +573,6 @@ def token_evidence_error(trace: list[dict[str, Any]]) -> str | None:
         return False
 
     for position, token in enumerate(trace):
-        if not isinstance(token.get("id"), int) or isinstance(token.get("id"), bool):
-            return f"token {position} has no integer id"
-        if not valid_bytes(token.get("bytes")):
-            return f"token {position} has no valid byte sequence"
         if not valid_score(token):
             return f"token {position} has no finite logprob/prob"
         top = token.get("top")
@@ -540,6 +588,50 @@ def token_evidence_error(trace: list[dict[str, Any]]) -> str | None:
             if not valid_score(candidate):
                 return f"token {position} top candidate {candidate_index} has no finite logprob/prob"
     return None
+
+
+def token_evidence_summary(trace: list[dict[str, Any]]) -> dict[str, Any]:
+    identity_error = token_identity_error(trace)
+    distribution_error = token_distribution_error(trace)
+    return {
+        "identity_complete": identity_error is None,
+        "identity_error": identity_error,
+        "distribution_complete": distribution_error is None,
+        "distribution_error": distribution_error,
+        "tokens_missing_top_candidates": sum(
+            1 for token in trace if not isinstance(token.get("top"), list) or not token["top"]
+        ),
+    }
+
+
+def legacy_distribution_only_error(row: dict[str, Any]) -> bool:
+    """Recognize v1.2 rows rejected only for empty accepted-draft top lists."""
+    error = row.get("error")
+    token_count = row.get("token_count")
+    completion_tokens = (
+        row.get("usage", {}).get("completion_tokens")
+        if isinstance(row.get("usage"), dict) else None
+    )
+    canonical_hash = row.get("canonical_message_sha256")
+    return (
+        row.get("status") == "error"
+        and isinstance(error, str)
+        and "non-stream token evidence is incomplete" in error
+        and "has no top-candidate evidence" in error
+        and row.get("http_status") == 200
+        and isinstance(token_count, int)
+        and token_count > 0
+        and isinstance(completion_tokens, (int, float))
+        and int(completion_tokens) == token_count
+        and row.get("finish_reason_count") == 1
+        and isinstance(canonical_hash, str)
+        and len(canonical_hash) == 64
+        and row.get("fresh_slot", {}).get("passed") is True
+    )
+
+
+def row_transport_complete(row: dict[str, Any]) -> bool:
+    return row.get("status") == "ok" or legacy_distribution_only_error(row)
 
 
 def timing_cache_n(timings: dict[str, Any]) -> int | None:
@@ -607,7 +699,7 @@ def n3_partial_acceptance_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]
     total_trace_events = 0
 
     for row in rows:
-        if row.get("status") != "ok" or int(row.get("n_max", -1)) != 3:
+        if not row_transport_complete(row) or int(row.get("n_max", -1)) != 3:
             continue
         case_id = str(row.get("case_id", "unknown"))
         n3_case_ids.add(case_id)
@@ -837,8 +929,11 @@ def run_case(
         if not condition["stream"] and not parsed["token_trace"]:
             raise RuntimeError("non-stream response omitted exact token logprobs")
         if not condition["stream"]:
-            if evidence_error := token_evidence_error(parsed["token_trace"]):
-                raise RuntimeError(f"non-stream token evidence is incomplete: {evidence_error}")
+            row["token_evidence"] = token_evidence_summary(parsed["token_trace"])
+            if identity_error := row["token_evidence"]["identity_error"]:
+                raise RuntimeError(
+                    f"non-stream token identity evidence is incomplete: {identity_error}"
+                )
             completion_tokens = parsed["usage"].get("completion_tokens")
             if (
                 isinstance(completion_tokens, (int, float))
@@ -848,6 +943,14 @@ def run_case(
                     "token trace length does not match usage.completion_tokens: "
                     f"{len(parsed['token_trace'])} != {int(completion_tokens)}"
                 )
+        else:
+            row["token_evidence"] = {
+                "identity_complete": None,
+                "identity_error": None,
+                "distribution_complete": None,
+                "distribution_error": None,
+                "tokens_missing_top_candidates": None,
+            }
         if parsed["finish_reason_count"] != 1:
             raise RuntimeError(
                 f"expected exactly one finish reason, got {parsed['finish_reason_count']}"
@@ -894,14 +997,86 @@ def classify_run(
 ) -> dict[str, Any]:
     indexed = row_map(rows)
     comparisons: list[dict[str, Any]] = []
-    request_errors = [row["case_id"] for row in rows if row.get("status") != "ok"]
+    observed_repeats = sorted({int(row["repeat"]) for row in rows})
+    manifest_conditions: list[dict[str, Any]] = []
+    manifest_path = run_dir / "manifest.json"
+    if manifest_path.is_file():
+        manifest_value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw_conditions = manifest_value.get("conditions") if isinstance(manifest_value, dict) else None
+        if isinstance(raw_conditions, list):
+            manifest_conditions = [item for item in raw_conditions if isinstance(item, dict)]
+    if manifest_conditions:
+        expected_keys = {
+            (
+                float(item["temperature"]), int(item["n_max"]),
+                bool(item["stream"]), int(item["repeat"]),
+            )
+            for item in manifest_conditions
+        }
+        repeats = sorted({item[3] for item in expected_keys})
+    else:
+        repeats = observed_repeats
+        expected_keys = {
+            (temperature, n_max, stream, repeat)
+            for temperature in (0.0, 1.0)
+            for n_max in (0, 1, 2, 3)
+            for stream in (False, True)
+            for repeat in repeats
+        }
+    actual_keys = [
+        (float(row["temperature"]), int(row["n_max"]), bool(row["stream"]), int(row["repeat"]))
+        for row in rows
+    ]
+    actual_key_set = set(actual_keys)
+    duplicate_cells = sorted({key for key in actual_keys if actual_keys.count(key) > 1})
+    missing_cells = sorted(expected_keys - actual_key_set)
+    unexpected_cells = sorted(actual_key_set - expected_keys)
+    legacy_distribution_rows = [
+        row["case_id"] for row in rows if legacy_distribution_only_error(row)
+    ]
+    request_errors = [
+        row["case_id"] for row in rows if not row_transport_complete(row)
+    ]
+    token_identity_failures: list[dict[str, Any]] = []
+    token_distribution_failures: list[dict[str, Any]] = []
+    comparison_ready: set[str] = set()
+    for row in rows:
+        if not row_transport_complete(row):
+            continue
+        if not bool(row.get("stream")):
+            trace = load_trace(run_dir, row)
+            if not trace:
+                token_identity_failures.append({
+                    "case_id": row["case_id"],
+                    "error": "non-stream token trace is missing or empty",
+                })
+                continue
+            evidence = token_evidence_summary(trace)
+            if evidence["identity_error"] is not None:
+                token_identity_failures.append({
+                    "case_id": row["case_id"],
+                    "error": evidence["identity_error"],
+                })
+                continue
+            if evidence["distribution_error"] is not None:
+                token_distribution_failures.append({
+                    "case_id": row["case_id"],
+                    "error": evidence["distribution_error"],
+                    "tokens_missing_top_candidates": evidence["tokens_missing_top_candidates"],
+                    "token_count": len(trace),
+                })
+        comparison_ready.add(row["case_id"])
+
+    def ready(row: dict[str, Any] | None) -> bool:
+        return row is not None and row.get("case_id") in comparison_ready
+
     response_contract_failures = [
         {
             "case_id": row["case_id"],
             "failures": row.get("response_contract", {}).get("failures", []),
         }
         for row in rows
-        if row.get("status") == "ok" and row.get("response_contract", {}).get("passed") is False
+        if ready(row) and row.get("response_contract", {}).get("passed") is False
     ]
     greedy_divergences: list[dict[str, Any]] = []
     stochastic_cross_n: list[dict[str, Any]] = []
@@ -910,7 +1085,7 @@ def classify_run(
     mtp_not_exercised: list[str] = []
     fresh_failures = [
         row["case_id"] for row in rows
-        if row.get("status") == "ok" and not row.get("fresh_slot", {}).get("passed")
+        if ready(row) and not row.get("fresh_slot", {}).get("passed")
     ]
     server_log_capture = bool(rows) and all(
         isinstance(row.get("server_log_file"), str)
@@ -919,17 +1094,23 @@ def classify_run(
         for row in rows
     )
     rollback_coverage = n3_partial_acceptance_coverage(rows)
-    repeats = sorted({int(row["repeat"]) for row in rows})
+
+    for row in rows:
+        if not ready(row) or int(row.get("n_max", 0)) <= 0:
+            continue
+        draft_n = row.get("timings", {}).get("draft_n")
+        if not isinstance(draft_n, (int, float)) or draft_n <= 0:
+            mtp_not_exercised.append(row["case_id"])
 
     for temperature in (0.0, 1.0):
         for repeat in repeats:
             baseline = indexed.get((temperature, 0, False, repeat))
-            if not baseline or baseline.get("status") != "ok":
+            if not ready(baseline):
                 continue
             baseline_trace = load_trace(run_dir, baseline)
             for n_max in (1, 2, 3):
                 candidate = indexed.get((temperature, n_max, False, repeat))
-                if not candidate or candidate.get("status") != "ok":
+                if not ready(candidate):
                     continue
                 divergence = first_token_divergence(
                     baseline_trace, load_trace(run_dir, candidate),
@@ -947,16 +1128,12 @@ def classify_run(
                 comparisons.append(comparison)
                 if divergence is not None:
                     (greedy_divergences if temperature == 0.0 else stochastic_cross_n).append(comparison)
-                draft_n = candidate.get("timings", {}).get("draft_n")
-                if not isinstance(draft_n, (int, float)) or draft_n <= 0:
-                    mtp_not_exercised.append(candidate["case_id"])
-
             for n_max in (0, 1, 2, 3):
                 nonstream = indexed.get((temperature, n_max, False, repeat))
                 streamed = indexed.get((temperature, n_max, True, repeat))
                 if not nonstream or not streamed:
                     continue
-                if nonstream.get("status") != "ok" or streamed.get("status") != "ok":
+                if not ready(nonstream) or not ready(streamed):
                     continue
                 exact = (
                     nonstream.get("canonical_message_sha256") == streamed.get("canonical_message_sha256")
@@ -984,12 +1161,12 @@ def classify_run(
         for temperature in (0.0, 1.0):
             for n_max in (0, 1, 2, 3):
                 baseline = indexed.get((temperature, n_max, False, first_repeat))
-                if not baseline or baseline.get("status") != "ok":
+                if not ready(baseline):
                     continue
                 baseline_trace = load_trace(run_dir, baseline)
                 for repeat in repeats[1:]:
                     candidate = indexed.get((temperature, n_max, False, repeat))
-                    if not candidate or candidate.get("status") != "ok":
+                    if not ready(candidate):
                         continue
                     divergence = first_token_divergence(
                         baseline_trace, load_trace(run_dir, candidate),
@@ -1022,7 +1199,7 @@ def classify_run(
                 if left is None:
                     reference_failures.append({**cell, "reason": "reference n=0 non-stream cell is missing"})
                     continue
-                if left.get("status") != "ok":
+                if not row_transport_complete(left):
                     reference_failures.append({
                         **cell,
                         "reference_case": left.get("case_id"),
@@ -1032,7 +1209,7 @@ def classify_run(
                 if right is None:
                     reference_failures.append({**cell, "reason": "candidate n=0 non-stream cell is missing"})
                     continue
-                if right.get("status") != "ok":
+                if not ready(right):
                     reference_failures.append({
                         **cell,
                         "candidate_case": right.get("case_id"),
@@ -1073,11 +1250,11 @@ def classify_run(
                         "reason": "reference token trace is missing or empty",
                     })
                     continue
-                if evidence_error := token_evidence_error(left_trace):
+                if evidence_error := token_identity_error(left_trace):
                     reference_failures.append({
                         **cell,
                         "reference_case": left.get("case_id"),
-                        "reason": f"reference token evidence is incomplete: {evidence_error}",
+                        "reason": f"reference token identity evidence is incomplete: {evidence_error}",
                     })
                     continue
                 if not right_trace:
@@ -1096,12 +1273,28 @@ def classify_run(
                     "first_divergence": divergence,
                 })
 
+    greedy_comparisons = [
+        item for item in comparisons
+        if item["kind"] == "nmax_vs_n0" and item["temperature"] == 0.0
+    ]
+    transport_comparisons = [
+        item for item in comparisons if item["kind"] == "stream_vs_nonstream"
+    ]
+    repeatability_comparisons = [
+        item for item in comparisons if item["kind"] == "fixed_seed_repeatability"
+    ]
+    greedy_expected = 3 * len(repeats)
+    transport_expected = 8 * len(repeats)
+    repeatability_expected = 8 * max(0, len(repeats) - 1)
+
     causes: list[str] = []
     greedy_n1 = [item for item in greedy_divergences if item["n_max"] == 1]
     greedy_multi = [item for item in greedy_divergences if item["n_max"] in {2, 3}]
     if greedy_n1:
         causes.append(
-            "n=1 diverged under greedy decoding: investigate single-row target/draft state, hidden-state handoff, or sampler acceptance before multi-row rollback"
+            "n=1 diverged under greedy decoding: this rules out a fault that requires two or more draft tokens; "
+            "the target still verifies a two-row batch, so inspect one-token rejection rollback, target recurrent/PLE state, "
+            "hidden-state handoff, batched verification, and verifier acceptance"
         )
     elif greedy_multi:
         causes.append(
@@ -1127,6 +1320,28 @@ def classify_run(
         )
     if mtp_not_exercised:
         causes.append("one or more n>0 arms generated no draft tokens, so they cannot qualify an MTP fix")
+    if len(greedy_comparisons) != greedy_expected:
+        causes.append(
+            "greedy comparison coverage is incomplete: "
+            f"observed {len(greedy_comparisons)}/{greedy_expected} required n>0 versus n=0 pairs"
+        )
+    if len(transport_comparisons) != transport_expected:
+        causes.append(
+            "stream/non-stream comparison coverage is incomplete: "
+            f"observed {len(transport_comparisons)}/{transport_expected} required pairs"
+        )
+    if len(repeatability_comparisons) != repeatability_expected:
+        causes.append(
+            "fixed-seed repeatability coverage is incomplete: "
+            f"observed {len(repeatability_comparisons)}/{repeatability_expected} required pairs"
+        )
+    if len(repeats) < 2:
+        causes.append("fixed-seed repeatability was not tested; run at least two repeats")
+    if token_distribution_failures:
+        causes.append(
+            "llama-server omitted full score/top-candidate evidence for accepted MTP tokens; "
+            "exact token IDs remain comparable and this warning must not suppress divergences"
+        )
     if response_contract_failures:
         causes.append(
             "one or more responses violated the fixture's completion contract; inspect whether failures are MTP-only or also affect n=0"
@@ -1148,6 +1363,12 @@ def classify_run(
         "schema": 1,
         "created_at": utc_now(),
         "request_errors": request_errors,
+        "legacy_distribution_rows_recovered": legacy_distribution_rows,
+        "token_identity_failures": token_identity_failures,
+        "token_distribution_failures": token_distribution_failures,
+        "missing_cells": [list(item) for item in missing_cells],
+        "unexpected_cells": [list(item) for item in unexpected_cells],
+        "duplicate_cells": [list(item) for item in duplicate_cells],
         "response_contract_failures": response_contract_failures,
         "fresh_slot_failures": fresh_failures,
         "mtp_not_exercised": sorted(set(mtp_not_exercised)),
@@ -1160,14 +1381,42 @@ def classify_run(
         "reference_n0_expected_comparisons": reference_expected,
         "n_max_3_partial_acceptance_coverage": rollback_coverage,
         "comparisons": comparisons,
+        "comparison_coverage": {
+            "greedy_observed": len(greedy_comparisons),
+            "greedy_expected": greedy_expected,
+            "stream_transport_observed": len(transport_comparisons),
+            "stream_transport_expected": transport_expected,
+            "fixed_seed_repeatability_observed": len(repeatability_comparisons),
+            "fixed_seed_repeatability_expected": repeatability_expected,
+        },
         "classification": causes,
         "acceptance": {
-            "matrix_complete": len(rows) == 16 * len(repeats) and not request_errors,
+            "matrix_complete": (
+                bool(expected_keys)
+                and len(rows) == len(expected_keys)
+                and not missing_cells
+                and not unexpected_cells
+                and not duplicate_cells
+                and not request_errors
+                and not token_identity_failures
+            ),
             "fresh_slot_pass": not fresh_failures,
             "mtp_exercised": not mtp_not_exercised,
-            "greedy_equivalence_pass": not greedy_divergences,
-            "stream_transport_pass": not transport_divergences,
-            "fixed_seed_repeatability_pass": not repeat_divergences,
+            "greedy_equivalence_pass": (
+                greedy_expected > 0
+                and len(greedy_comparisons) == greedy_expected
+                and not greedy_divergences
+            ),
+            "stream_transport_pass": (
+                transport_expected > 0
+                and len(transport_comparisons) == transport_expected
+                and not transport_divergences
+            ),
+            "fixed_seed_repeatability_pass": (
+                len(repeatability_comparisons) == repeatability_expected and not repeat_divergences
+                if len(repeats) >= 2 else None
+            ),
+            "token_distribution_evidence_pass": not token_distribution_failures,
             "response_contract_pass": not response_contract_failures,
             "server_log_capture": server_log_capture,
             "n_max_3_partial_acceptance_coverage_pass": rollback_coverage["passed"],
@@ -1189,7 +1438,12 @@ def fmt(value: Any) -> str:
     return str(value)
 
 
-def write_summary(run_dir: pathlib.Path, rows: list[dict[str, Any]], report: dict[str, Any]) -> None:
+def write_summary(
+    run_dir: pathlib.Path,
+    rows: list[dict[str, Any]],
+    report: dict[str, Any],
+    filename: str = "summary.md",
+) -> None:
     comparisons = {
         (item["temperature"], item["n_max"], item["repeat"]): item
         for item in report["comparisons"] if item["kind"] == "nmax_vs_n0"
@@ -1251,8 +1505,11 @@ def write_summary(run_dir: pathlib.Path, rows: list[dict[str, Any]], report: dic
                 parity = "" if stream_cmp is None else ("PASS" if stream_cmp["exact_canonical_match"] else "FAIL")
                 contract = row.get("response_contract", {}).get("passed")
                 contract_text = "" if contract is None else ("PASS" if contract else "FAIL")
+                row_status = row.get("status", "missing")
+                if row and legacy_distribution_only_error(row):
+                    row_status = "recovered-v1.2"
                 lines.append(
-                    f"| {temperature:g} | {n_max} | {repeat} | {row.get('status', 'missing')} | "
+                    f"| {temperature:g} | {n_max} | {repeat} | {row_status} | "
                     f"{contract_text} | {row.get('token_count', '')} | {fmt(timing.get('draft_n_accepted'))}/{fmt(timing.get('draft_n'))} | "
                     f"{difference} | {parity} |\n"
                 )
@@ -1260,7 +1517,58 @@ def write_summary(run_dir: pathlib.Path, rows: list[dict[str, Any]], report: dic
         "\nNon-stream token traces come directly from llama-server's OpenAI logprobs and contain generated token IDs and bytes. "
         "With tools present, llama-server rejects logprobs plus streaming; streamed arms therefore gate the canonical reconstruction of reasoning, content, tool calls, and finish reason against their paired non-stream response.\n",
     ])
-    (run_dir / "summary.md").write_text("".join(lines), encoding="utf-8")
+    (run_dir / filename).write_text("".join(lines), encoding="utf-8")
+
+
+def print_verdict(report: dict[str, Any]) -> None:
+    coverage = report["comparison_coverage"]
+    print(
+        f"Greedy equivalence: {'PASS' if report['acceptance']['greedy_equivalence_pass'] else 'FAIL'} "
+        f"({coverage['greedy_observed']}/{coverage['greedy_expected']} pairs)"
+    )
+    print(
+        f"Stream transport: {'PASS' if report['acceptance']['stream_transport_pass'] else 'FAIL'} "
+        f"({coverage['stream_transport_observed']}/{coverage['stream_transport_expected']} pairs)"
+    )
+    rollback = report["n_max_3_partial_acceptance_coverage"]
+    observed = ", ".join(
+        f"{accepted}/3" for accepted in rollback["observed_partial_accepted_lengths"]
+    ) or "none"
+    missing = ", ".join(
+        f"{accepted}/3" for accepted in rollback["missing_partial_accepted_lengths"]
+    ) or "none"
+    print(
+        f"n_max=3 rollback coverage: {'PASS' if rollback['passed'] else 'FAIL'} "
+        f"(observed: {observed}; missing: {missing})"
+    )
+    for divergence in report["greedy_divergences"]:
+        first = divergence.get("first_divergence") or {}
+        baseline = first.get("baseline") if isinstance(first.get("baseline"), dict) else {}
+        candidate = first.get("candidate") if isinstance(first.get("candidate"), dict) else {}
+        print(
+            f"- greedy n_max={divergence['n_max']} first divergence at token "
+            f"{first.get('position')}: {baseline.get('id')} {baseline.get('token')!r} -> "
+            f"{candidate.get('id')} {candidate.get('token')!r}"
+        )
+    for item in report["classification"]:
+        print(f"- {item}")
+
+
+def command_reclassify(args: argparse.Namespace) -> int:
+    run_dir = pathlib.Path(args.run_dir).resolve()
+    results_path = run_dir / "results.jsonl"
+    if not results_path.is_file():
+        raise ValueError(f"run has no results.jsonl: {run_dir}")
+    rows = read_jsonl(results_path)
+    reference_dir = pathlib.Path(args.reference_run).resolve() if args.reference_run else None
+    report = classify_run(run_dir, rows, reference_dir)
+    report["reclassified_at"] = utc_now()
+    report["reclassified_by_harness_version"] = VERSION
+    atomic_json(run_dir / "comparisons-reclassified.json", report)
+    write_summary(run_dir, rows, report, "summary-reclassified.md")
+    print(f"Reclassified: {run_dir}")
+    print_verdict(report)
+    return 0
 
 
 def command_run(args: argparse.Namespace) -> int:
@@ -1365,21 +1673,7 @@ def command_run(args: argparse.Namespace) -> int:
     atomic_json(run_dir / "comparisons.json", report)
     write_summary(run_dir, rows, report)
     print(f"Results: {run_dir}")
-    print(f"Greedy equivalence: {'PASS' if report['acceptance']['greedy_equivalence_pass'] else 'FAIL'}")
-    print(f"Stream transport: {'PASS' if report['acceptance']['stream_transport_pass'] else 'FAIL'}")
-    coverage = report["n_max_3_partial_acceptance_coverage"]
-    observed = ", ".join(
-        f"{accepted}/3" for accepted in coverage["observed_partial_accepted_lengths"]
-    ) or "none"
-    missing = ", ".join(
-        f"{accepted}/3" for accepted in coverage["missing_partial_accepted_lengths"]
-    ) or "none"
-    print(
-        f"n_max=3 rollback coverage: {'PASS' if coverage['passed'] else 'FAIL'} "
-        f"(observed: {observed}; missing: {missing})"
-    )
-    for item in report["classification"]:
-        print(f"- {item}")
+    print_verdict(report)
     passed = all(
         report["acceptance"][key]
         for key in (
@@ -1410,7 +1704,10 @@ def self_test() -> None:
     fixture_name, _description, fixture_request, fixture_validation, fixture_sha = load_fixture(DEFAULT_FIXTURE)
     assert fixture_name == "openwebui-agentic-ideation-synthetic"
     assert fixture_request["chat_template_kwargs"]["enable_thinking"] is True
-    assert fixture_validation["required_content_substrings"] == ["benchmark"]
+    assert fixture_validation["required_content_substrings"] == []
+    assert fixture_validation["allowed_finish_reasons"] == ["stop", "tool_calls"]
+    assert fixture_validation["require_nonempty_content_on_stop"] is True
+    assert fixture_validation["require_valid_tool_calls_on_tool_finish"] is True
     assert len(fixture_sha) == 64
 
     matrix = condition_matrix(1)
@@ -1486,6 +1783,40 @@ def self_test() -> None:
         },
     )
     assert contract["passed"] is False and len(contract["failures"]) == 4
+    first_turn_rules = {
+        "min_content_chars": 0,
+        "min_reasoning_chars": 5,
+        "allowed_finish_reasons": ["stop", "tool_calls"],
+        "max_tool_calls": 2,
+        "require_nonempty_content_on_stop": True,
+        "require_valid_tool_calls_on_tool_finish": True,
+    }
+    valid_tool_turn = validate_response_contract(
+        reconstructed["message"], "tool_calls", first_turn_rules,
+    )
+    assert valid_tool_turn["passed"] is True
+    empty_stop = validate_response_contract(
+        {"content": "", "reasoning_content": "enough", "tool_calls": []},
+        "stop", first_turn_rules,
+    )
+    assert empty_stop["passed"] is False
+    malformed_tool = copy.deepcopy(reconstructed["message"])
+    malformed_tool["tool_calls"][0]["function"]["arguments"] = "not-json"
+    invalid_tool_turn = validate_response_contract(
+        malformed_tool, "tool_calls", first_turn_rules,
+    )
+    assert invalid_tool_turn["passed"] is False
+    no_tool_turn = validate_response_contract(
+        {"content": "", "reasoning_content": "enough", "tool_calls": []},
+        "tool_calls", first_turn_rules,
+    )
+    assert no_tool_turn["passed"] is False
+    unnamed_tool = copy.deepcopy(reconstructed["message"])
+    unnamed_tool["tool_calls"][0]["function"]["name"] = ""
+    assert validate_response_contract(unnamed_tool, "tool_calls", first_turn_rules)["passed"] is False
+    non_object_tool = copy.deepcopy(reconstructed["message"])
+    non_object_tool["tool_calls"][0]["function"]["arguments"] = "[]"
+    assert validate_response_contract(non_object_tool, "tool_calls", first_turn_rules)["passed"] is False
 
     nonstream_value = {
         "choices": [{
@@ -1503,10 +1834,15 @@ def self_test() -> None:
     }
     parsed_nonstream = parse_nonstream(canonical_json_bytes(nonstream_value))
     assert [item["id"] for item in parsed_nonstream["token_trace"]] == [10, 11]
-    assert token_evidence_error(parsed_nonstream["token_trace"]) is None
+    assert token_identity_error(parsed_nonstream["token_trace"]) is None
+    assert token_distribution_error(parsed_nonstream["token_trace"]) is None
     incomplete_evidence = copy.deepcopy(parsed_nonstream["token_trace"])
     del incomplete_evidence[1]["bytes"]
-    assert "byte sequence" in str(token_evidence_error(incomplete_evidence))
+    assert "byte sequence" in str(token_identity_error(incomplete_evidence))
+    incomplete_distribution = copy.deepcopy(parsed_nonstream["token_trace"])
+    incomplete_distribution[1]["top"] = []
+    assert token_identity_error(incomplete_distribution) is None
+    assert "top-candidate" in str(token_distribution_error(incomplete_distribution))
     assert parsed_nonstream["message"]["reasoning_content"] == "r"
     assert parsed_nonstream["message"]["content"] == "a"
     assert first_token_divergence(
@@ -1516,6 +1852,10 @@ def self_test() -> None:
     changed[1]["id"] = 12
     divergence = first_token_divergence(parsed_nonstream["token_trace"], changed)
     assert divergence and divergence["kind"] == "token_mismatch" and divergence["position"] == 1
+    changed_bytes = copy.deepcopy(parsed_nonstream["token_trace"])
+    changed_bytes[1]["bytes"] = [98]
+    byte_divergence = first_token_divergence(parsed_nonstream["token_trace"], changed_bytes)
+    assert byte_divergence and byte_divergence["identity_fields_differ"] == ["bytes"]
     shorter = first_token_divergence(parsed_nonstream["token_trace"], changed[:1])
     assert shorter and shorter["kind"] == "candidate_ended" and shorter["position"] == 1
 
@@ -1539,13 +1879,23 @@ def self_test() -> None:
         for condition in matrix:
             identifier = case_id("fake", condition)
             trace = copy.deepcopy(parsed_nonstream["token_trace"])
+            legacy_distribution_error = (
+                condition["temperature"] == 0.0
+                and condition["n_max"] == 1
+                and condition["stream"] is False
+            )
             if condition["temperature"] == 0.0 and condition["n_max"] == 1:
                 trace[1]["id"] = 12
+            if legacy_distribution_error:
+                trace[1]["top"] = []
             token_file = pathlib.Path("tokens") / f"{identifier}.json"
             atomic_json(root / token_file, trace)
             fake_rows.append({
                 "case_id": identifier,
-                "status": "ok",
+                "status": "error" if legacy_distribution_error else "ok",
+                **({
+                    "error": "RuntimeError('non-stream token evidence is incomplete: token 1 has no top-candidate evidence')",
+                } if legacy_distribution_error else {}),
                 "temperature": condition["temperature"],
                 "n_max": condition["n_max"],
                 "stream": condition["stream"],
@@ -1557,21 +1907,54 @@ def self_test() -> None:
                     "repeat": condition["repeat"],
                 })),
                 "token_file": str(token_file),
-                "canonical_message_sha256": "same",
+                "token_count": len(trace),
+                "http_status": 200,
+                "canonical_message_sha256": ("d" if legacy_distribution_error else "a") * 64,
                 "finish_reason": "stop",
+                "finish_reason_count": 1,
                 "fresh_slot": {"passed": True},
                 "draft_acceptance_events": trace_events if condition["n_max"] == 3 else [],
                 "timings": {
                     "draft_n": 0 if condition["n_max"] == 0 else condition["n_max"],
                     "draft_n_accepted": 0 if condition["n_max"] == 0 else condition["n_max"],
                 },
+                "usage": {"completion_tokens": len(trace)},
             })
         fake_report = classify_run(root, fake_rows)
         assert fake_report["acceptance"]["matrix_complete"] is True
         assert fake_report["acceptance"]["n_max_3_partial_acceptance_coverage_pass"] is True
         assert fake_report["acceptance"]["greedy_equivalence_pass"] is False
+        assert fake_report["acceptance"]["stream_transport_pass"] is False
+        assert fake_report["acceptance"]["fixed_seed_repeatability_pass"] is None
+        assert fake_report["acceptance"]["token_distribution_evidence_pass"] is False
+        assert len(fake_report["legacy_distribution_rows_recovered"]) == 1
+        assert len(fake_report["token_distribution_failures"]) == 1
         assert fake_report["greedy_divergences"][0]["n_max"] == 1
-        assert any("single-row" in item for item in fake_report["classification"])
+        assert any(
+            item.startswith("n=1 diverged under greedy decoding")
+            for item in fake_report["classification"]
+        )
+
+        empty_root = root / "empty-run"
+        empty_root.mkdir()
+        empty_report = classify_run(empty_root, [])
+        assert empty_report["acceptance"]["matrix_complete"] is False
+        assert empty_report["acceptance"]["greedy_equivalence_pass"] is False
+        assert empty_report["acceptance"]["stream_transport_pass"] is False
+
+        truncated_root = root / "truncated-run"
+        truncated_root.mkdir()
+        two_repeat_conditions = condition_matrix(2)
+        atomic_json(truncated_root / "manifest.json", {"conditions": two_repeat_conditions})
+        for row in fake_rows:
+            source_token = root / row["token_file"]
+            atomic_json(truncated_root / row["token_file"], json.loads(source_token.read_text()))
+        truncated_report = classify_run(truncated_root, fake_rows)
+        assert truncated_report["acceptance"]["matrix_complete"] is False
+        assert truncated_report["comparison_coverage"]["greedy_expected"] == 6
+        assert truncated_report["comparison_coverage"]["greedy_observed"] == 3
+        assert truncated_report["acceptance"]["greedy_equivalence_pass"] is False
+        assert truncated_report["acceptance"]["fixed_seed_repeatability_pass"] is False
 
         reference_root = root / "reference"
         reference_root.mkdir()
@@ -1641,6 +2024,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--repeats", type=int, default=1)
     run.add_argument("--timeout", type=float, default=1800.0)
     run.add_argument("--require-pass", action="store_true")
+    reclassify = sub.add_parser(
+        "reclassify", help="rebuild verdicts for an existing diagnostic without model requests",
+    )
+    reclassify.add_argument("run_dir")
+    reclassify.add_argument("--reference-run")
     sub.add_parser("self-test", help="run offline parser and comparison tests")
     return parser
 
@@ -1652,6 +2040,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "self-test":
             self_test()
             return 0
+        if args.command == "reclassify":
+            return command_reclassify(args)
         if args.require_pass and not args.reference_run:
             raise ValueError(
                 "--require-pass requires --reference-run from a request-identical target-only server"

@@ -1,13 +1,15 @@
 {
   "schema": 1,
   "name": "openwebui-agentic-ideation-synthetic",
-  "description": "Sanitized long-schema reproduction of the OpenWebUI benchmark-ideation failure. Replace request with the exact captured OpenWebUI POST body for final qualification.",
+  "description": "Sanitized first-turn, long-schema reproduction of the OpenWebUI benchmark-ideation failure. A valid assistant turn may either answer or request tools. Replace this with the exact captured multi-turn OpenWebUI exchange for final qualification.",
   "validation": {
-    "min_content_chars": 400,
+    "min_content_chars": 0,
     "min_reasoning_chars": 20,
-    "required_content_substrings": ["benchmark"],
-    "allowed_finish_reasons": ["stop"],
-    "max_tool_calls": 0
+    "required_content_substrings": [],
+    "allowed_finish_reasons": ["stop", "tool_calls"],
+    "max_tool_calls": 6,
+    "require_nonempty_content_on_stop": true,
+    "require_valid_tool_calls_on_tool_finish": true
   },
   "request": {
     "model": "Qwen/Qwen3.8-Flash-Next-think",

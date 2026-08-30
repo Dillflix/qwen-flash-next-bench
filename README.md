@@ -700,19 +700,23 @@ matrix:
 Before every request it erases slot 0 and requires the server to report zero
 cached prompt tokens. It saves the exact request, raw JSON or SSE body, parsed
 SSE events, canonical reasoning/content/tool calls, exact generated token IDs,
-byte sequences, finite logprobs, and top-candidate evidence for non-stream
-requests, HTTP headers, and a request-scoped server-log slice. A non-stream cell
-missing any of that token evidence fails rather than silently weakening the
-comparison.
+byte sequences, available logprobs/top candidates for non-stream requests, HTTP
+headers, and a request-scoped server-log slice. Exact IDs and bytes are the hard
+identity gate. Missing score/top-candidate detail is reported separately and
+cannot make an otherwise comparable row disappear: current llama-server leaves
+those arrays empty for tokens emitted by its speculative loop (`TODO: set
+result.probs`). This distinction prevents an incomplete-probability warning from
+turning a real MTP token divergence into a vacuous PASS.
 The API key is never written to the result directory. Exact key occurrences
 are redacted from caller-supplied server logs, response bodies/headers, parsed
 artifacts, manifests, and result rows before those artifacts are saved or
 hashed.
-The fixture also defines a deliberately modest completion contract (nontrivial
-reasoning and final-answer lengths, a `benchmark` anchor, normal stop, and no
-tool call for this creative task), so a reproducibly garbled temperature-1
-answer cannot pass merely because stochastic cross-window tokens are allowed to
-differ.
+The checked-in fixture validates a *first* agentic turn: nontrivial reasoning is
+required, while either a normal answer or a syntactically valid tool request is
+allowed. A first-turn `tool_calls` finish is not itself a failure when tools were
+offered. Final qualification must additionally replay the actual tool results
+and validate the completed multi-turn answer; the synthetic fixture cannot
+substitute for that captured exchange.
 
 The checked-in fixture is a sanitized synthetic reproduction with the exact
 user prompt and substantial agentic tool schemas. For final qualification,
@@ -756,6 +760,29 @@ python3 qwen_mtp_diag.py run \
 unset QWEN_TEST_API_KEY
 ```
 
+During source debugging, cap the same matrix at 256 generated tokens. The known
+n=1/2/3 greedy divergences all occur before token 142, so this catches the fault
+without allowing broken arms to run to the fixture's 4096-token ceiling:
+
+```bash
+python3 qwen_mtp_diag.py run \
+  --url http://127.0.0.1:8080 \
+  --server-label strict-short \
+  --server-log /tmp/qwen-mtp-strict-server.log \
+  --max-tokens 256
+```
+
+Version 1.2 incorrectly marked MTP non-stream rows as errors when only their
+top-candidate arrays were absent, then reported equivalence from an empty set of
+comparisons. Reclassify such an existing run without any model requests:
+
+```bash
+python3 qwen_mtp_diag.py reclassify results/REPLACE-mtp-diagnostic-run
+```
+
+This writes `comparisons-reclassified.json` and `summary-reclassified.md` while
+preserving the original evidence and report.
+
 For final qualification, first run the same three-repeat matrix against a
 target-only server and retain its result directory. Then run the strict
 candidate with that target directory as the no-sidecar reference:
@@ -786,9 +813,12 @@ nonzero drafted tokens; the report gives the exact first mismatching token ID,
 byte sequence, logprob, and preceding prefix. A
 loaded-sidecar n=0 mismatch against the target-only reference implicates the
 request bypass or hidden-state export.
-An n=1 greedy mismatch implicates single-row state/acceptance; n=1 matching with
-n=2/3 failures instead points at multi-row verification, recurrent rollback, or
-the 256-cell attention boundary. In addition, `--require-pass` requires the
+An n=1 greedy mismatch rules out a fault that requires two or more draft
+tokens, but its target verifier still evaluates a two-row batch. It therefore
+implicates one-token rollback, recurrent/PLE state, hidden-state handoff, or
+batched target verification. An n=1 match with n=2/3 failures narrows the fault
+to the deeper draft/rollback paths or the 256-cell attention boundary. In
+addition, `--require-pass` requires the
 n=3 arms collectively to contain 0/3, 1/3, and 2/3 partial-acceptance events in
 their `LLAMA_TRACE` slices. Those events exercise rollback distances three, two,
 and one respectively; merely drafting tokens or observing full 3/3 acceptance
