@@ -237,20 +237,33 @@ arm's per-draft rollback checkpoint is still forced into host/unified memory.
 The completed strict A/B restored 100% vision anchors, but proved the strict
 checkpoint path unsuitable for production: 13.99 tok/s median decode versus
 32.52 tok/s for target-only, a 57% regression. Prefill and image processing were
-effectively unchanged. The next A/B tests the server's per-request control
-instead. The candidate keeps the Q8_0 MTP sidecar loaded on the 7900 XT for text
-requests, retains the fast bounded-rollback target context, and sends
-`"speculative.n_max": 0` only on vision requests. No rebuild or new audit is
-required:
+effectively unchanged. A first per-request-disable A/B then showed that
+`"speculative.n_max": 0` suppressed all draft tokens and preserved 100% anchors,
+but did not make the loaded sidecar inert: median decode was 24.93 tok/s versus
+31.90 tok/s for target-only, a 21.8% regression. Prefill and image processing
+again matched, isolating the cost to decode-time target hidden-state export and
+speculative post-processing that were still enabled by the global sidecar.
+
+The follow-up server patch makes request-level disabling complete. When the
+request's effective `speculative.n_max` is zero it suppresses speculative target
+embeddings, pre-normalized hidden-state output, and post-processing; restores
+backend sampling; and prevents enabled and disabled requests from sharing the
+same target batch. MTP state is still cleared safely on slot reset, and text
+requests with n=3 are unchanged. The server emits an explicit bypass marker and
+the audit plus harness require it. Rebuild, re-audit, and rerun the same matched
+A/B:
 
 ```bash
+./build-rocm10-dual.sh
+python3 qwen_bench.py rocm-audit --run-ops
 python3 qwen_bench.py preflight --tier rocm-vision-mtp-request-disable-ab
 ./run-bench.sh --tier rocm-vision-mtp-request-disable-ab --fail-fast
 ```
 
-The harness fails the candidate if the response reports any drafted tokens.
-Production can use one loaded server for fast text MTP and exact target-only
-vision only if this arm matches the control hash and recovers target-only speed.
+The harness fails the candidate if the response reports any drafted tokens or
+the request log lacks the compiled bypass marker. Production can use one loaded
+server for fast text MTP and exact target-only vision only if this arm matches
+the control hash and recovers target-only speed (allowing only normal run noise).
 
 Do not run the complete fixture set until the per-request-disable A/B passes.
 That result determines whether the final 262144-token tier should keep the MTP

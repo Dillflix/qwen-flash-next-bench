@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.39.0"
+VERSION = "1.40.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -49,6 +49,7 @@ HOST_CHECKPOINT_MARKER = "LLAMA_CKPT_FORCE_HOST"
 MTP_VISION_RESYNC_MARKER = "MTP multimodal resync: skipping direct image decode"
 QWEN4EXP_VISION_STRICT_MARKER = "Qwen4Exp vision MTP: single-row target verification enabled"
 QWEN4EXP_VISION_CHECKPOINT_MARKER = "Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints"
+REQUEST_SPEC_BYPASS_MARKER = "speculative decoding disabled for request; target hidden-state export bypassed"
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
     "-md",
@@ -1618,14 +1619,19 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["server"]["qwen4exp_vision_checkpoint_marker"] = (
                 QWEN4EXP_VISION_CHECKPOINT_MARKER.encode("ascii") in server.read_bytes()
             )
+            result["server"]["request_spec_bypass_marker"] = (
+                REQUEST_SPEC_BYPASS_MARKER.encode("ascii") in server.read_bytes()
+            )
         except OSError:
             result["server"]["mtp_vision_resync_marker"] = False
             result["server"]["qwen4exp_vision_strict_marker"] = False
             result["server"]["qwen4exp_vision_checkpoint_marker"] = False
+            result["server"]["request_spec_bypass_marker"] = False
     else:
         result["server"]["mtp_vision_resync_marker"] = False
         result["server"]["qwen4exp_vision_strict_marker"] = False
         result["server"]["qwen4exp_vision_checkpoint_marker"] = False
+        result["server"]["request_spec_bypass_marker"] = False
     return result
 
 
@@ -1750,6 +1756,24 @@ def inspect_qwen4exp_vision_strict_source(repo: pathlib.Path) -> dict[str, Any]:
     }
 
 
+def inspect_request_spec_bypass_source(repo: pathlib.Path) -> dict[str, Any]:
+    server_path = repo / "tools" / "server" / "server-context.cpp"
+    text = server_path.read_text(encoding="utf-8", errors="ignore") if server_path.is_file() else ""
+    markers = {
+        REQUEST_SPEC_BYPASS_MARKER: REQUEST_SPEC_BYPASS_MARKER in text,
+        "request_n_max_gate": "task->params.speculative.draft.n_max > 0" in text,
+        "embedding_gate": "can_speculate() && common_speculative_need_embd(spec)" in text,
+        "pre_norm_embedding_gate": "can_speculate() && common_speculative_need_embd_pre_norm(spec)" in text,
+        "batch_compatibility_gate": "can_speculate() == other_slot.can_speculate()" in text,
+        "post_process_gate": "slot_batched->can_speculate() && !common_speculative_process" in text,
+    }
+    return {
+        "ready": server_path.is_file() and all(markers.values()),
+        "server_file": str(server_path),
+        "markers": markers,
+    }
+
+
 def backend_ops_passed(capture: dict[str, Any]) -> tuple[bool, int, int]:
     if capture.get("returncode") != 0:
         return False, 0, 0
@@ -1779,6 +1803,7 @@ def run_rocm_audit(
     host_checkpoint_source = inspect_host_checkpoint_source(repo)
     mtp_vision_resync_source = inspect_mtp_vision_resync_source(repo)
     qwen4exp_vision_strict_source = inspect_qwen4exp_vision_strict_source(repo)
+    request_spec_bypass_source = inspect_request_spec_bypass_source(repo)
     server = pathlib.Path(fingerprint["server"]["path"])
     test_binary = pathlib.Path(fingerprint["test_backend_ops"]["path"])
     gfx_targets = set(fingerprint["hip_library"].get("gfx_targets", []))
@@ -1862,10 +1887,18 @@ def run_rocm_audit(
         mtp_vision_resync_source["ready"] and compiled_mtp_vision_resync and
         qwen4exp_vision_strict_source["ready"] and compiled_qwen4exp_vision_strict
     )
+    compiled_request_spec_bypass = bool(
+        fingerprint.get("server", {}).get("request_spec_bypass_marker")
+    )
+    ready_for_request_spec_bypass_benchmarks = bool(
+        ready_for_mtp_benchmarks and request_spec_bypass_source["ready"] and
+        compiled_request_spec_bypass
+    )
     reasons: list[str] = []
     mtp_reasons: list[str] = []
     host_checkpoint_reasons: list[str] = []
     mtp_vision_reasons: list[str] = []
+    request_spec_bypass_reasons: list[str] = []
     if not source["static_dispatch_ready"]:
         reasons.append("ROCmFP4 and ROCmFP4_FAST are not both wired into the compiled HIP runtime source tree")
     if not test_binary.is_file():
@@ -1910,19 +1943,33 @@ def run_rocm_audit(
         mtp_vision_reasons.append(
             "the prerequisite qwen4exp MTP audit gate has not passed"
         )
+    if not request_spec_bypass_source["ready"]:
+        request_spec_bypass_reasons.append(
+            "the pinned source tree does not fully bypass target hidden-state export and speculative post-processing when request n_max is zero"
+        )
+    if not compiled_request_spec_bypass:
+        request_spec_bypass_reasons.append(
+            "llama-server lacks the compiled per-request speculative-bypass marker; rebuild with build-rocm10-dual.sh"
+        )
+    if not ready_for_mtp_benchmarks:
+        request_spec_bypass_reasons.append(
+            "the prerequisite qwen4exp MTP audit gate has not passed"
+        )
     report = {
-        "schema": 8,
+        "schema": 9,
         "ts": utc_now(),
         "harness_version": VERSION,
         "ready_for_model_benchmarks": ready_for_model_benchmarks,
         "ready_for_mtp_benchmarks": ready_for_mtp_benchmarks,
         "ready_for_host_checkpoint_benchmarks": ready_for_host_checkpoint_benchmarks,
         "ready_for_mtp_vision_benchmarks": ready_for_mtp_vision_benchmarks,
+        "ready_for_request_spec_bypass_benchmarks": ready_for_request_spec_bypass_benchmarks,
         "source": source,
         "qwen4exp_mtp_source": qwen4exp_mtp_source,
         "host_checkpoint_source": host_checkpoint_source,
         "mtp_vision_resync_source": mtp_vision_resync_source,
         "qwen4exp_vision_strict_source": qwen4exp_vision_strict_source,
+        "request_spec_bypass_source": request_spec_bypass_source,
         "build_fingerprint": fingerprint,
         "devices_requested": devices,
         "device_list_log": str(pathlib.Path("rocm-audit-logs") / "devices.txt"),
@@ -1936,6 +1983,7 @@ def run_rocm_audit(
         "mtp_reasons": mtp_reasons,
         "host_checkpoint_reasons": host_checkpoint_reasons,
         "mtp_vision_reasons": mtp_vision_reasons,
+        "request_spec_bypass_reasons": request_spec_bypass_reasons,
     }
     atomic_json(output, report)
     return report
@@ -1943,7 +1991,7 @@ def run_rocm_audit(
 
 def validate_rocm_audit(
     config: dict[str, Any], *, require_mtp: bool = False, require_host_checkpoints: bool = False,
-    require_mtp_vision: bool = False,
+    require_mtp_vision: bool = False, require_request_spec_bypass: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     configured = config.get("variables", {}).get("rocm_audit")
     path = pathlib.Path(str(configured)) if configured else pathlib.Path(__file__).with_name("preflight") / "rocm-audit.json"
@@ -1959,7 +2007,7 @@ def validate_rocm_audit(
     current = rocm_build_fingerprint(config)
     audited = report.get("build_fingerprint", {})
     fingerprint_keys = ["server", "hip_library", "llama_library"]
-    if require_mtp_vision:
+    if require_mtp_vision or require_request_spec_bypass:
         require_mtp = True
     if require_host_checkpoints:
         fingerprint_keys.append("common_library")
@@ -1993,6 +2041,13 @@ def validate_rocm_audit(
     if require_mtp_vision and not report.get("ready_for_mtp_vision_benchmarks"):
         reasons = "; ".join(str(item) for item in report.get("mtp_vision_reasons", []))
         return report, f"ROCm audit has not proven MTP plus vision support: {reasons}"
+    if require_request_spec_bypass and int(report.get("schema", 0)) < 9:
+        return report, "ROCm audit predates the per-request speculative-bypass gate; rebuild and rerun `python3 qwen_bench.py rocm-audit --run-ops`"
+    if require_request_spec_bypass and not current.get("server", {}).get("request_spec_bypass_marker"):
+        return report, "current llama-server does not bypass speculative target work when request n_max is zero; rerun `./build-rocm10-dual.sh` and the ROCm audit"
+    if require_request_spec_bypass and not report.get("ready_for_request_spec_bypass_benchmarks"):
+        reasons = "; ".join(str(item) for item in report.get("request_spec_bypass_reasons", []))
+        return report, f"ROCm audit has not proven the per-request speculative bypass: {reasons}"
     return report, None
 
 
@@ -2087,6 +2142,10 @@ def preflight(
                 errors.append(
                     f"{experiment['name']}: require_zero_draft requires request speculative.n_max=0"
                 )
+        if experiment.get("require_spec_bypass_marker") and not experiment.get("require_zero_draft"):
+            errors.append(
+                f"{experiment['name']}: require_spec_bypass_marker requires require_zero_draft"
+            )
         if HOST_CHECKPOINT_MARKER in experiment.get("env", {}):
             if option_value(effective_args, "--checkpoint-every-n-tokens") is None:
                 errors.append(
@@ -2247,12 +2306,16 @@ def preflight(
                 )
     if tier.get("startup_only") and (int(tier.get("warmups", 0)) != 0 or concurrency != 1):
         errors.append("startup-only tiers require warmups 0 and concurrency 1")
-    if tier.get("require_rocm_audit") or require_host_checkpoints or tier.get("require_rocm_mtp_vision"):
+    if (
+        tier.get("require_rocm_audit") or require_host_checkpoints or
+        tier.get("require_rocm_mtp_vision") or tier.get("require_rocm_request_spec_bypass")
+    ):
         rocm_audit, audit_error = validate_rocm_audit(
             config,
             require_mtp=bool(tier.get("require_rocm_mtp")),
             require_host_checkpoints=require_host_checkpoints,
             require_mtp_vision=bool(tier.get("require_rocm_mtp_vision")),
+            require_request_spec_bypass=bool(tier.get("require_rocm_request_spec_bypass")),
         )
         if audit_error:
             errors.append(audit_error)
@@ -2624,7 +2687,15 @@ def execute_run(args: argparse.Namespace) -> pathlib.Path:
                             raise RuntimeError(
                                 f"vision request required speculation disabled, but server drafted {int(draft_n)} tokens"
                             )
-                        log_metrics = extract_vision_log_metrics(file_since(server.log_path, log_offset))
+                        request_log = file_since(server.log_path, log_offset)
+                        if (
+                            experiment.get("require_spec_bypass_marker")
+                            and REQUEST_SPEC_BYPASS_MARKER not in request_log
+                        ):
+                            raise RuntimeError(
+                                "vision request disabled speculation but the server did not confirm the target-work bypass"
+                            )
+                        log_metrics = extract_vision_log_metrics(request_log)
                         if (
                             tier.get("require_rocm_mtp_vision")
                             and "-md" in effective_args
@@ -4417,6 +4488,7 @@ def self_test() -> None:
     request_disable_tier = expanded_shipped_config["tiers"]["rocm-vision-mtp-request-disable-ab"]
     assert request_disable_tier.get("require_rocm_mtp") is True
     assert request_disable_tier.get("require_rocm_mtp_vision") is not True
+    assert request_disable_tier.get("require_rocm_request_spec_bypass") is True
     request_disable_experiments = select_experiments(
         expanded_shipped_config, request_disable_tier, None,
     )
@@ -4432,6 +4504,7 @@ def self_test() -> None:
     assert "-md" in request_disable_args[1]
     assert all("--spec-mtp-strict-qwen4exp-vision" not in args for args in request_disable_args)
     assert request_disable_experiments[1].get("require_zero_draft") is True
+    assert request_disable_experiments[1].get("require_spec_bypass_marker") is True
     assert merged_request(
         expanded_shipped_config, request_disable_tier, request_disable_experiments[1],
     ).get("speculative.n_max") == 0
@@ -4517,6 +4590,13 @@ def self_test() -> None:
     assert QWEN4EXP_VISION_CHECKPOINT_MARKER in mtp_vision_checkpoint_patch_text
     assert "mtp_strict_qwen4exp_vision ? 0" in mtp_vision_checkpoint_patch_text
     assert "--spec-mtp-strict-qwen4exp-vision" in mtp_vision_checkpoint_patch_text
+    request_spec_bypass_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-request-spec-bypass.patch"
+    assert request_spec_bypass_patch.is_file()
+    request_spec_bypass_patch_text = request_spec_bypass_patch.read_text(encoding="utf-8")
+    assert REQUEST_SPEC_BYPASS_MARKER in request_spec_bypass_patch_text
+    assert "task->params.speculative.draft.n_max > 0" in request_spec_bypass_patch_text
+    assert "can_speculate() == other_slot.can_speculate()" in request_spec_bypass_patch_text
+    assert "slot_batched->can_speculate() && !common_speculative_process" in request_spec_bypass_patch_text
     host_checkpoint_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-host-checkpoints.patch"
     assert host_checkpoint_patch.is_file()
     host_checkpoint_patch_text = host_checkpoint_patch.read_text(encoding="utf-8")
@@ -4535,8 +4615,10 @@ def self_test() -> None:
     assert MTP_VISION_RESYNC_MARKER in build_script
     assert QWEN4EXP_VISION_STRICT_MARKER in build_script
     assert QWEN4EXP_VISION_CHECKPOINT_MARKER in build_script
+    assert REQUEST_SPEC_BYPASS_MARKER in build_script
     assert "rocmfpx-qwen4exp-vision-strict.patch" in build_script
     assert "rocmfpx-qwen4exp-vision-strict-checkpoint.patch" in build_script
+    assert "rocmfpx-request-spec-bypass.patch" in build_script
     assert 'SERVER_BINARY="$BUILD_DIR/bin/llama-server"' in build_script
     assert "libllama-server-impl.so" not in build_script
     assert "rocmfpx-host-checkpoints-v1-broken.patch" in build_script
@@ -4548,7 +4630,8 @@ def self_test() -> None:
         fake_server.write_bytes(
             b"runtime\x00" + MTP_VISION_RESYNC_MARKER.encode("ascii") + b"\x00" +
             QWEN4EXP_VISION_STRICT_MARKER.encode("ascii") + b"\x00" +
-            QWEN4EXP_VISION_CHECKPOINT_MARKER.encode("ascii")
+            QWEN4EXP_VISION_CHECKPOINT_MARKER.encode("ascii") + b"\x00" +
+            REQUEST_SPEC_BYPASS_MARKER.encode("ascii")
         )
         fake_fingerprint = rocm_build_fingerprint({
             "variables": {"hip_server": str(fake_server)},
@@ -4556,6 +4639,7 @@ def self_test() -> None:
         assert fake_fingerprint["server"]["mtp_vision_resync_marker"] is True
         assert fake_fingerprint["server"]["qwen4exp_vision_strict_marker"] is True
         assert fake_fingerprint["server"]["qwen4exp_vision_checkpoint_marker"] is True
+        assert fake_fingerprint["server"]["request_spec_bypass_marker"] is True
         assert "server_impl_library" not in fake_fingerprint
     print(f"qwen_bench.py {VERSION}: self-test passed")
 

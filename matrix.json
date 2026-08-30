@@ -1560,6 +1560,7 @@
       "mode": "vision",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
+      "require_rocm_request_spec_bypass": true,
       "cache_state": "hot",
       "experiments": [
         "vision_bf16_igpu_hip_no_mtp_strict_ab",
@@ -3395,6 +3396,7 @@
       "extends": "vision_bf16_igpu_hip_no_mtp",
       "baseline": false,
       "require_zero_draft": true,
+      "require_spec_bypass_marker": true,
       "request": {
         "speculative.n_max": 0
       },
