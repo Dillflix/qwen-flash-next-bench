@@ -18,6 +18,7 @@ QWEN4EXP_VISION_STRICT_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-vi
 QWEN4EXP_TEXT_STRICT_PATCH="$SCRIPT_DIR/patches/rocmfpx-qwen4exp-text-strict.patch"
 REQUEST_SPEC_BYPASS_PATCH="$SCRIPT_DIR/patches/rocmfpx-request-spec-bypass.patch"
 AUTO_MTMD_SPEC_BYPASS_PATCH="$SCRIPT_DIR/patches/rocmfpx-auto-mtmd-spec-bypass.patch"
+MTP_TARGET_ISOLATION_PATCH="$SCRIPT_DIR/patches/rocmfpx-mtp-target-isolation.patch"
 HOST_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-host-checkpoints.patch"
 LEGACY_HOST_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-host-checkpoints-v1-broken.patch"
 
@@ -39,6 +40,7 @@ actual_rev="$(git -C "$SOURCE_DIR" rev-parse HEAD)"
 [[ -f "$QWEN4EXP_TEXT_STRICT_PATCH" ]] || fail "missing Qwen4Exp text strict-verification patch: $QWEN4EXP_TEXT_STRICT_PATCH"
 [[ -f "$REQUEST_SPEC_BYPASS_PATCH" ]] || fail "missing per-request speculative-bypass patch: $REQUEST_SPEC_BYPASS_PATCH"
 [[ -f "$AUTO_MTMD_SPEC_BYPASS_PATCH" ]] || fail "missing automatic multimodal speculative-bypass patch: $AUTO_MTMD_SPEC_BYPASS_PATCH"
+[[ -f "$MTP_TARGET_ISOLATION_PATCH" ]] || fail "missing MTP target-isolation diagnostic patch: $MTP_TARGET_ISOLATION_PATCH"
 [[ -f "$HOST_CHECKPOINT_PATCH" ]] || fail "missing host-checkpoint patch: $HOST_CHECKPOINT_PATCH"
 [[ -f "$LEGACY_HOST_CHECKPOINT_PATCH" ]] || fail "missing legacy host-checkpoint repair patch: $LEGACY_HOST_CHECKPOINT_PATCH"
 
@@ -108,6 +110,11 @@ apply_patch_once \
     "automatic multimodal speculative-bypass patch" \
     "tools/server/server-context.cpp" \
     "multimodal request detected; speculative decoding disabled automatically"
+apply_patch_once \
+    "$MTP_TARGET_ISOLATION_PATCH" \
+    "MTP target-isolation diagnostic patch" \
+    "tools/server/server-context.cpp" \
+    "Qwen4Exp MTP diagnostic: true outer-call serial target verification enabled"
 
 # Commit dc18127 shipped a zero-context patch whose additions were accepted by
 # git-apply at EOF instead of inside the four checkpoint methods. Repair source
@@ -163,6 +170,12 @@ grep -Fq 'bool has_media() const' "$SOURCE_DIR/tools/server/server-common.h" \
     || fail "server token source cannot identify actual media chunks"
 grep -Fq 'LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL' "$SOURCE_DIR/tools/server/server-context.cpp" \
     || fail "automatic multimodal bypass is not gated by the production server policy"
+grep -Fq 'decode_outer_serial_preserve_outputs' "$SOURCE_DIR/src/llama-context.cpp" \
+    || fail "llama context source lacks true outer-call serial verification"
+grep -Fq 'LLAMA_MTP_DIAG_FORCE_TARGET_EXPORT' "$SOURCE_DIR/tools/server/server-context.cpp" \
+    || fail "server source cannot isolate target hidden-state export"
+grep -Fq 'MTP target-logit fingerprint' "$SOURCE_DIR/tools/server/server-context.cpp" \
+    || fail "server source lacks target-logit fingerprinting"
 grep -Fq 'mtp_strict_qwen4exp_vision ? 0' "$SOURCE_DIR/common/common.cpp" \
     || fail "common context source does not disable recurrent rollback for strict Qwen4Exp vision MTP"
 grep -Rq 'Q4_0_ROCMFP4_FAST' "$SOURCE_DIR/ggml/src/ggml-cuda" \
@@ -263,6 +276,8 @@ grep -aFq 'qwen4exp recurrent conv rollback snapshots enabled' "$LLAMA_LIBRARY" 
     || fail "libllama.so lacks compiled Qwen4Exp recurrent rollback snapshots"
 grep -aFq 'non-consecutive Qwen4Exp PLE history position' "$LLAMA_LIBRARY" \
     || fail "libllama.so lacks compiled rollback-aware Qwen4Exp PLE history"
+grep -aFq 'preserved %zu true outer-decode verifier rows' "$LLAMA_LIBRARY" \
+    || fail "libllama.so lacks compiled true outer-call serial verification"
 grep -aFq 'LLAMA_CKPT_FORCE_HOST' "$COMMON_LIBRARY" \
     || fail "libllama-common.so lacks the compiled host-checkpoint marker"
 grep -aFq 'MTP verifier state-correctness patch active' "$COMMON_LIBRARY" \
@@ -279,6 +294,10 @@ grep -aFq 'speculative decoding disabled for request; target hidden-state export
     || fail "llama-server lacks the compiled per-request speculative-bypass marker"
 grep -aFq 'multimodal request detected; speculative decoding disabled automatically' "$SERVER_BINARY" \
     || fail "llama-server lacks the compiled automatic multimodal-bypass marker"
+grep -aFq 'Qwen4Exp MTP diagnostic: true outer-call serial target verification enabled' "$SERVER_BINARY" \
+    || fail "llama-server lacks the compiled MTP target-isolation diagnostic"
+grep -aFq 'MTP target-logit fingerprint' "$SERVER_BINARY" \
+    || fail "llama-server lacks compiled target-logit fingerprinting"
 
 targets="$(strings "$HIP_LIBRARY" | grep -oE 'gfx[0-9a-f]{3,5}[a-z]*' | sort -u | tr '\n' ' ')"
 [[ " $targets " == *' gfx1100 '* ]] || fail "libggml-hip.so lacks a gfx1100 code object"
@@ -298,6 +317,7 @@ echo "  Qwen4Exp vision strict checkpoints: compiled"
 echo "  Qwen4Exp text strict verification: compiled"
 echo "  per-request speculative bypass: compiled"
 echo "  automatic multimodal speculative bypass: compiled"
+echo "  MTP target-isolation diagnostics: compiled"
 echo "  host checkpoints: LLAMA_CKPT_FORCE_HOST supported"
 echo
 echo "Next: python3 qwen_rocm.py collect --llama-dir '$SOURCE_DIR' --build-dir '$BUILD_DIR' --rocm '$ROCM_ROOT'"

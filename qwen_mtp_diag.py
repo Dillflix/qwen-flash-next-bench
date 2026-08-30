@@ -2,8 +2,8 @@
 """Token-level OpenAI chat diagnostic for Qwen MTP equivalence.
 
 This runner is intentionally separate from the throughput harness.  It sends a
-fixed OpenAI chat request through all 16 combinations of temperature, streaming,
-and per-request MTP window while preserving raw HTTP evidence.  Non-streamed
+fixed OpenAI chat request through either the full 16-cell matrix or a focused
+isolation profile while preserving raw HTTP evidence.  Non-streamed
 requests ask llama-server for token logprobs, whose entries include the exact
 generated token IDs and bytes needed to locate the first greedy divergence.
 """
@@ -11,10 +11,12 @@ generated token IDs and bytes needed to locate the first greedy divergence.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import datetime as dt
 import hashlib
 import http.client
+import io
 import json
 import math
 import os
@@ -28,7 +30,7 @@ import urllib.parse
 from typing import Any
 
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 DEFAULT_FIXTURE = pathlib.Path(__file__).resolve().parent / "diagnostics" / "mtp-agentic-openwebui.json"
 API_KEY_REDACTION = "[REDACTED_API_KEY]"
 
@@ -531,6 +533,57 @@ def first_token_divergence(
     return None
 
 
+def first_scored_distribution_divergence(
+    baseline: list[dict[str, Any]],
+    candidate: list[dict[str, Any]],
+    tolerance: float = 1e-6,
+) -> dict[str, Any] | None:
+    """Find score drift where both traces retained comparable evidence."""
+    def selected_top_score(item: dict[str, Any]) -> tuple[str, float] | None:
+        top = item.get("top")
+        if not isinstance(top, list) or not top:
+            return None
+        for top_candidate in top:
+            if (
+                isinstance(top_candidate, dict)
+                and top_candidate.get("id") == item.get("id")
+                and top_candidate.get("bytes") == item.get("bytes")
+            ):
+                for field in ("logprob", "prob"):
+                    score = top_candidate.get(field)
+                    if (
+                        isinstance(score, (int, float))
+                        and not isinstance(score, bool)
+                        and math.isfinite(float(score))
+                    ):
+                        return field, float(score)
+        return None
+
+    for index, (left, right) in enumerate(zip(baseline, candidate)):
+        if left.get("id") != right.get("id") or left.get("bytes") != right.get("bytes"):
+            break
+        left_evidence = selected_top_score(left)
+        right_evidence = selected_top_score(right)
+        if left_evidence is None or right_evidence is None or left_evidence[0] != right_evidence[0]:
+            continue
+        score_field = left_evidence[0]
+        left_score = left_evidence[1]
+        right_score = right_evidence[1]
+        delta = abs(left_score - right_score)
+        if delta > tolerance:
+            return {
+                "position": index,
+                "token_id": left.get("id"),
+                "token": left.get("token"),
+                "baseline_logprob": left_score,
+                "candidate_logprob": right_score,
+                "score_field": score_field,
+                "absolute_delta": delta,
+                "tolerance": tolerance,
+            }
+    return None
+
+
 def token_identity_error(trace: list[dict[str, Any]]) -> str | None:
     """Return the first field error that prevents exact token comparison."""
     def valid_bytes(value: Any) -> bool:
@@ -689,6 +742,102 @@ def parse_draft_acceptance_events(log_text: str) -> list[dict[str, Any]]:
     return events
 
 
+def outputs_before_first_rejection(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Conservatively bound generated output before any rejected draft.
+
+    A fully accepted speculative step emits every accepted draft token plus one
+    additional target token.  Counting only those complete steps deliberately
+    excludes the initial ordinary token and therefore remains a lower bound.
+    If a zero-based divergence position is below this bound, that divergence
+    necessarily predates both bounded rollback and checkpoint restore.
+    """
+    full_events = 0
+    minimum_outputs = 0
+    first_rejection_event: int | None = None
+    first_rejection_restores_checkpoint = False
+    evidence_gap = False
+
+    for event_index, event in enumerate(events):
+        if not isinstance(event, dict) or event.get("valid") is not True:
+            evidence_gap = True
+            break
+        if event.get("partial") is True:
+            first_rejection_event = event_index
+            first_rejection_restores_checkpoint = event.get("restore_checkpoint") is True
+            break
+        accepted = event.get("accepted")
+        draft_total = event.get("draft_total")
+        if (
+            isinstance(accepted, int)
+            and isinstance(draft_total, int)
+            and draft_total > 0
+            and accepted == draft_total
+        ):
+            full_events += 1
+            minimum_outputs += draft_total + 1
+        else:
+            evidence_gap = True
+            break
+
+    all_captured_events_fully_accepted = bool(events) and (
+        not evidence_gap
+        and first_rejection_event is None
+        and full_events == len(events)
+    )
+
+    return {
+        "first_rejection_event_index": first_rejection_event,
+        "first_rejection_restores_checkpoint": first_rejection_restores_checkpoint,
+        "full_acceptance_events_before_first_rejection": full_events,
+        "minimum_outputs_before_first_rejection": minimum_outputs,
+        "first_rejection_observed": first_rejection_event is not None,
+        "all_captured_events_fully_accepted": all_captured_events_fully_accepted,
+        "evidence_gap_before_first_rejection": evidence_gap,
+    }
+
+
+def debug_cap_contract_truncation(
+    rows: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Identify response-contract failures caused solely by a debug token cap."""
+    max_tokens = manifest.get("max_tokens_override")
+    expected_failure = "finish reason 'length' is not one of ['stop', 'tool_calls']"
+    affected = {item.get("case_id") for item in failures}
+    complete_rows = [row for row in rows if row_transport_complete(row)]
+    solely_length = bool(failures) and all(
+        item.get("failures") == [expected_failure] for item in failures
+    )
+    all_complete_rows_affected = bool(complete_rows) and affected == {
+        row.get("case_id") for row in complete_rows
+    }
+
+    def generated_count(row: dict[str, Any]) -> Any:
+        token_count = row.get("token_count")
+        if isinstance(token_count, int) and token_count > 0:
+            return token_count
+        usage = row.get("usage")
+        return usage.get("completion_tokens") if isinstance(usage, dict) else None
+
+    all_hit_cap = (
+        isinstance(max_tokens, int)
+        and max_tokens > 0
+        and all(generated_count(row) == max_tokens for row in complete_rows)
+    )
+    detected = solely_length and all_complete_rows_affected and all_hit_cap
+    return {
+        "detected": detected,
+        "max_tokens_override": max_tokens,
+        "affected_cases": len(failures) if detected else 0,
+        "note": (
+            "Every complete arm reached the explicit diagnostic token cap; "
+            "response completeness was not assessed."
+            if detected else None
+        ),
+    }
+
+
 def n3_partial_acceptance_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize whether n_max=3 exercised every bounded rollback distance."""
     required_accepted = (0, 1, 2)
@@ -739,7 +888,18 @@ def n3_partial_acceptance_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
-def condition_matrix(repeats: int) -> list[dict[str, Any]]:
+def condition_matrix(repeats: int, profile: str = "full") -> list[dict[str, Any]]:
+    if profile == "full":
+        temperatures = (0.0, 1.0)
+        n_max_values = (0, 1, 2, 3)
+        stream_values = (False, True)
+    elif profile == "greedy-n01":
+        temperatures = (0.0,)
+        n_max_values = (0, 1)
+        stream_values = (False,)
+    else:
+        raise ValueError(f"unknown diagnostic matrix profile: {profile}")
+
     return [
         {
             "temperature": temperature,
@@ -748,9 +908,9 @@ def condition_matrix(repeats: int) -> list[dict[str, Any]]:
             "repeat": repeat,
         }
         for repeat in range(1, repeats + 1)
-        for temperature in (0.0, 1.0)
-        for n_max in (0, 1, 2, 3)
-        for stream in (False, True)
+        for temperature in temperatures
+        for n_max in n_max_values
+        for stream in stream_values
     ]
 
 
@@ -999,9 +1159,11 @@ def classify_run(
     comparisons: list[dict[str, Any]] = []
     observed_repeats = sorted({int(row["repeat"]) for row in rows})
     manifest_conditions: list[dict[str, Any]] = []
+    manifest_value: dict[str, Any] = {}
     manifest_path = run_dir / "manifest.json"
     if manifest_path.is_file():
-        manifest_value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        loaded_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_value = loaded_manifest if isinstance(loaded_manifest, dict) else {}
         raw_conditions = manifest_value.get("conditions") if isinstance(manifest_value, dict) else None
         if isinstance(raw_conditions, list):
             manifest_conditions = [item for item in raw_conditions if isinstance(item, dict)]
@@ -1078,6 +1240,9 @@ def classify_run(
         for row in rows
         if ready(row) and row.get("response_contract", {}).get("passed") is False
     ]
+    debug_cap_truncation = debug_cap_contract_truncation(
+        rows, response_contract_failures, manifest_value,
+    )
     greedy_divergences: list[dict[str, Any]] = []
     stochastic_cross_n: list[dict[str, Any]] = []
     transport_divergences: list[dict[str, Any]] = []
@@ -1115,6 +1280,9 @@ def classify_run(
                 divergence = first_token_divergence(
                     baseline_trace, load_trace(run_dir, candidate),
                 )
+                distribution_divergence = first_scored_distribution_divergence(
+                    baseline_trace, load_trace(run_dir, candidate),
+                )
                 comparison = {
                     "kind": "nmax_vs_n0",
                     "temperature": temperature,
@@ -1124,7 +1292,33 @@ def classify_run(
                     "candidate_case": candidate["case_id"],
                     "exact_match": divergence is None,
                     "first_divergence": divergence,
+                    "first_scored_distribution_divergence": distribution_divergence,
                 }
+                if divergence is not None:
+                    pre_rejection = outputs_before_first_rejection(
+                        candidate.get("draft_acceptance_events", []),
+                    )
+                    position = divergence.get("position")
+                    evidence_covers_divergence = bool(
+                        isinstance(position, int)
+                        and position < pre_rejection["minimum_outputs_before_first_rejection"]
+                    )
+                    pre_rejection["divergence_before_first_rejection"] = bool(
+                        evidence_covers_divergence
+                        and (
+                            pre_rejection["first_rejection_observed"]
+                            or pre_rejection["all_captured_events_fully_accepted"]
+                        )
+                    )
+                    pre_rejection["proof_kind"] = (
+                        "before_observed_rejection"
+                        if pre_rejection["divergence_before_first_rejection"]
+                        and pre_rejection["first_rejection_observed"]
+                        else "captured_without_rejection"
+                        if pre_rejection["divergence_before_first_rejection"]
+                        else None
+                    )
+                    comparison["pre_rejection_analysis"] = pre_rejection
                 comparisons.append(comparison)
                 if divergence is not None:
                     (greedy_divergences if temperature == 0.0 else stochastic_cross_n).append(comparison)
@@ -1190,88 +1384,92 @@ def classify_run(
     if reference_dir is not None:
         reference_rows = read_jsonl(reference_dir / "results.jsonl")
         reference = row_map(reference_rows)
-        for temperature in (0.0, 1.0):
-            for repeat in repeats:
-                reference_expected += 1
-                left = reference.get((temperature, 0, False, repeat))
-                right = indexed.get((temperature, 0, False, repeat))
-                cell = {"temperature": temperature, "repeat": repeat}
-                if left is None:
-                    reference_failures.append({**cell, "reason": "reference n=0 non-stream cell is missing"})
-                    continue
-                if not row_transport_complete(left):
-                    reference_failures.append({
-                        **cell,
-                        "reference_case": left.get("case_id"),
-                        "reason": f"reference cell status is {left.get('status')!r}",
-                    })
-                    continue
-                if right is None:
-                    reference_failures.append({**cell, "reason": "candidate n=0 non-stream cell is missing"})
-                    continue
-                if not ready(right):
-                    reference_failures.append({
-                        **cell,
-                        "candidate_case": right.get("case_id"),
-                        "reason": f"candidate cell status is {right.get('status')!r}",
-                    })
-                    continue
-                left_request_sha = left.get("request_sha256")
-                right_request_sha = right.get("request_sha256")
-                if (
-                    not isinstance(left_request_sha, str)
-                    or not isinstance(right_request_sha, str)
-                    or len(left_request_sha) != 64
-                    or len(right_request_sha) != 64
-                ):
-                    reference_failures.append({
-                        **cell,
-                        "reference_case": left.get("case_id"),
-                        "candidate_case": right.get("case_id"),
-                        "reason": "reference or candidate request SHA-256 is missing",
-                    })
-                    continue
-                if left_request_sha != right_request_sha:
-                    reference_failures.append({
-                        **cell,
-                        "reference_case": left.get("case_id"),
-                        "candidate_case": right.get("case_id"),
-                        "reference_request_sha256": left_request_sha,
-                        "candidate_request_sha256": right_request_sha,
-                        "reason": "reference and candidate request bodies differ",
-                    })
-                    continue
-                left_trace = load_trace(reference_dir, left)
-                right_trace = load_trace(run_dir, right)
-                if not left_trace:
-                    reference_failures.append({
-                        **cell,
-                        "reference_case": left.get("case_id"),
-                        "reason": "reference token trace is missing or empty",
-                    })
-                    continue
-                if evidence_error := token_identity_error(left_trace):
-                    reference_failures.append({
-                        **cell,
-                        "reference_case": left.get("case_id"),
-                        "reason": f"reference token identity evidence is incomplete: {evidence_error}",
-                    })
-                    continue
-                if not right_trace:
-                    reference_failures.append({
-                        **cell,
-                        "candidate_case": right.get("case_id"),
-                        "reason": "candidate token trace is missing or empty",
-                    })
-                    continue
-                divergence = first_token_divergence(left_trace, right_trace)
-                reference_comparisons.append({
+        reference_cells = sorted({
+            (temperature, repeat)
+            for temperature, n_max, stream, repeat in expected_keys
+            if n_max == 0 and stream is False
+        })
+        for temperature, repeat in reference_cells:
+            reference_expected += 1
+            left = reference.get((temperature, 0, False, repeat))
+            right = indexed.get((temperature, 0, False, repeat))
+            cell = {"temperature": temperature, "repeat": repeat}
+            if left is None:
+                reference_failures.append({**cell, "reason": "reference n=0 non-stream cell is missing"})
+                continue
+            if not row_transport_complete(left):
+                reference_failures.append({
                     **cell,
-                    "reference_case": left["case_id"],
-                    "candidate_case": right["case_id"],
-                    "exact_match": divergence is None,
-                    "first_divergence": divergence,
+                    "reference_case": left.get("case_id"),
+                    "reason": f"reference cell status is {left.get('status')!r}",
                 })
+                continue
+            if right is None:
+                reference_failures.append({**cell, "reason": "candidate n=0 non-stream cell is missing"})
+                continue
+            if not ready(right):
+                reference_failures.append({
+                    **cell,
+                    "candidate_case": right.get("case_id"),
+                    "reason": f"candidate cell status is {right.get('status')!r}",
+                })
+                continue
+            left_request_sha = left.get("request_sha256")
+            right_request_sha = right.get("request_sha256")
+            if (
+                not isinstance(left_request_sha, str)
+                or not isinstance(right_request_sha, str)
+                or len(left_request_sha) != 64
+                or len(right_request_sha) != 64
+            ):
+                reference_failures.append({
+                    **cell,
+                    "reference_case": left.get("case_id"),
+                    "candidate_case": right.get("case_id"),
+                    "reason": "reference or candidate request SHA-256 is missing",
+                })
+                continue
+            if left_request_sha != right_request_sha:
+                reference_failures.append({
+                    **cell,
+                    "reference_case": left.get("case_id"),
+                    "candidate_case": right.get("case_id"),
+                    "reference_request_sha256": left_request_sha,
+                    "candidate_request_sha256": right_request_sha,
+                    "reason": "reference and candidate request bodies differ",
+                })
+                continue
+            left_trace = load_trace(reference_dir, left)
+            right_trace = load_trace(run_dir, right)
+            if not left_trace:
+                reference_failures.append({
+                    **cell,
+                    "reference_case": left.get("case_id"),
+                    "reason": "reference token trace is missing or empty",
+                })
+                continue
+            if evidence_error := token_identity_error(left_trace):
+                reference_failures.append({
+                    **cell,
+                    "reference_case": left.get("case_id"),
+                    "reason": f"reference token identity evidence is incomplete: {evidence_error}",
+                })
+                continue
+            if not right_trace:
+                reference_failures.append({
+                    **cell,
+                    "candidate_case": right.get("case_id"),
+                    "reason": "candidate token trace is missing or empty",
+                })
+                continue
+            divergence = first_token_divergence(left_trace, right_trace)
+            reference_comparisons.append({
+                **cell,
+                "reference_case": left["case_id"],
+                "candidate_case": right["case_id"],
+                "exact_match": divergence is None,
+                "first_divergence": divergence,
+            })
 
     greedy_comparisons = [
         item for item in comparisons
@@ -1283,14 +1481,73 @@ def classify_run(
     repeatability_comparisons = [
         item for item in comparisons if item["kind"] == "fixed_seed_repeatability"
     ]
-    greedy_expected = 3 * len(repeats)
-    transport_expected = 8 * len(repeats)
-    repeatability_expected = 8 * max(0, len(repeats) - 1)
+    greedy_expected = sum(
+        (0.0, 0, False, repeat) in expected_keys
+        and (0.0, n_max, False, repeat) in expected_keys
+        for repeat in repeats
+        for n_max in (1, 2, 3)
+    )
+    transport_expected = sum(
+        (temperature, n_max, False, repeat) in expected_keys
+        and (temperature, n_max, True, repeat) in expected_keys
+        for temperature in (0.0, 1.0)
+        for n_max in (0, 1, 2, 3)
+        for repeat in repeats
+    )
+    repeatability_expected = 0
+    if repeats:
+        first_repeat = repeats[0]
+        repeatability_expected = sum(
+            (temperature, n_max, False, first_repeat) in expected_keys
+            and (temperature, n_max, False, repeat) in expected_keys
+            for temperature in (0.0, 1.0)
+            for n_max in (0, 1, 2, 3)
+            for repeat in repeats[1:]
+        )
+    n3_coverage_required = any(n_max == 3 for _, n_max, _, _ in expected_keys)
 
     causes: list[str] = []
     greedy_n1 = [item for item in greedy_divergences if item["n_max"] == 1]
     greedy_multi = [item for item in greedy_divergences if item["n_max"] in {2, 3}]
-    if greedy_n1:
+    pre_rejection_greedy = [
+        item for item in greedy_divergences
+        if item.get("pre_rejection_analysis", {}).get("divergence_before_first_rejection") is True
+    ]
+    prompt_boundary_score_drift = [
+        item for item in greedy_comparisons
+        if (item.get("first_scored_distribution_divergence") or {}).get("position") == 0
+    ]
+    if prompt_boundary_score_drift:
+        details = ", ".join(
+            f"n={item['n_max']} {item['first_scored_distribution_divergence']['baseline_logprob']:.6f}"
+            f"->{item['first_scored_distribution_divergence']['candidate_logprob']:.6f}"
+            for item in prompt_boundary_score_drift
+        )
+        causes.append(
+            "target score drift is already visible on output token 0, before draft verification or "
+            f"checkpoint restore ({details}); prioritize target hidden-state export/graph numerics and "
+            "request-state initialization over rollback"
+        )
+    if pre_rejection_greedy:
+        first = pre_rejection_greedy[0]
+        pre_rejection = first["pre_rejection_analysis"]
+        divergence = first.get("first_divergence") or {}
+        timing_clause = (
+            "occurred before the first rejected draft"
+            if pre_rejection.get("proof_kind") == "before_observed_rejection"
+            else "occurred while every captured speculative step was fully accepted; "
+                 "no rejected draft occurred in the captured request"
+        )
+        causes.append(
+            f"n={first['n_max']} greedy divergence at token {divergence.get('position')} {timing_clause}: "
+            f"{pre_rejection['full_acceptance_events_before_first_rejection']} "
+            "full-acceptance events emitted at least "
+            f"{pre_rejection['minimum_outputs_before_first_rejection']} tokens first; rejection rollback, "
+            "checkpoint restore, PLE rewind, speculative-state restore, and sampler restore cannot be "
+            "the primary cause, so inspect accepted-path target state, logical multi-row decode/memory "
+            "initialization, verifier logits indexing, and hidden-state handoff"
+        )
+    elif greedy_n1:
         causes.append(
             "n=1 diverged under greedy decoding: this rules out a fault that requires two or more draft tokens; "
             "the target still verifies a two-row batch, so inspect one-token rejection rollback, target recurrent/PLE state, "
@@ -1325,30 +1582,36 @@ def classify_run(
             "greedy comparison coverage is incomplete: "
             f"observed {len(greedy_comparisons)}/{greedy_expected} required n>0 versus n=0 pairs"
         )
-    if len(transport_comparisons) != transport_expected:
+    if transport_expected > 0 and len(transport_comparisons) != transport_expected:
         causes.append(
             "stream/non-stream comparison coverage is incomplete: "
             f"observed {len(transport_comparisons)}/{transport_expected} required pairs"
         )
-    if len(repeatability_comparisons) != repeatability_expected:
+    if repeatability_expected > 0 and len(repeatability_comparisons) != repeatability_expected:
         causes.append(
             "fixed-seed repeatability coverage is incomplete: "
             f"observed {len(repeatability_comparisons)}/{repeatability_expected} required pairs"
         )
-    if len(repeats) < 2:
+    if repeatability_expected == 0 and len(repeats) < 2:
         causes.append("fixed-seed repeatability was not tested; run at least two repeats")
     if token_distribution_failures:
         causes.append(
             "llama-server omitted full score/top-candidate evidence for accepted MTP tokens; "
             "exact token IDs remain comparable and this warning must not suppress divergences"
         )
-    if response_contract_failures:
+    if debug_cap_truncation["detected"]:
+        causes.append(
+            f"all response-contract failures are expected diagnostic truncations at the explicit "
+            f"{debug_cap_truncation['max_tokens_override']}-token cap; token divergence remains valid, "
+            "but this short run cannot qualify response completeness"
+        )
+    elif response_contract_failures:
         causes.append(
             "one or more responses violated the fixture's completion contract; inspect whether failures are MTP-only or also affect n=0"
         )
     if not server_log_capture:
         causes.append("request-scoped server logs were not captured; rerun with --server-log for a complete diagnostic")
-    elif not rollback_coverage["passed"]:
+    elif n3_coverage_required and not rollback_coverage["passed"]:
         missing = ", ".join(
             f"{accepted}/3" for accepted in rollback_coverage["missing_partial_accepted_lengths"]
         )
@@ -1370,9 +1633,12 @@ def classify_run(
         "unexpected_cells": [list(item) for item in unexpected_cells],
         "duplicate_cells": [list(item) for item in duplicate_cells],
         "response_contract_failures": response_contract_failures,
+        "debug_cap_contract_truncation": debug_cap_truncation,
         "fresh_slot_failures": fresh_failures,
         "mtp_not_exercised": sorted(set(mtp_not_exercised)),
         "greedy_divergences": greedy_divergences,
+        "pre_rejection_greedy_divergences": pre_rejection_greedy,
+        "prompt_boundary_score_drift": prompt_boundary_score_drift,
         "stochastic_cross_n_differences": stochastic_cross_n,
         "transport_divergences": transport_divergences,
         "repeatability_divergences": repeat_divergences,
@@ -1388,6 +1654,7 @@ def classify_run(
             "stream_transport_expected": transport_expected,
             "fixed_seed_repeatability_observed": len(repeatability_comparisons),
             "fixed_seed_repeatability_expected": repeatability_expected,
+            "n_max_3_coverage_required": n3_coverage_required,
         },
         "classification": causes,
         "acceptance": {
@@ -1411,15 +1678,17 @@ def classify_run(
                 transport_expected > 0
                 and len(transport_comparisons) == transport_expected
                 and not transport_divergences
-            ),
+            ) if transport_expected > 0 else None,
             "fixed_seed_repeatability_pass": (
                 len(repeatability_comparisons) == repeatability_expected and not repeat_divergences
-                if len(repeats) >= 2 else None
+                if repeatability_expected > 0 else None
             ),
             "token_distribution_evidence_pass": not token_distribution_failures,
             "response_contract_pass": not response_contract_failures,
             "server_log_capture": server_log_capture,
-            "n_max_3_partial_acceptance_coverage_pass": rollback_coverage["passed"],
+            "n_max_3_partial_acceptance_coverage_pass": (
+                rollback_coverage["passed"] if n3_coverage_required else None
+            ),
             "reference_n0_pass": (
                 not reference_failures
                 and len(reference_comparisons) == reference_expected
@@ -1458,61 +1727,100 @@ def write_summary(
         "## Acceptance\n\n",
     ]
     for key, value in report["acceptance"].items():
-        lines.append(f"- `{key}`: `{value}`\n")
+        rendered = "N/A" if value is None else str(value)
+        lines.append(f"- `{key}`: `{rendered}`\n")
     coverage = report["n_max_3_partial_acceptance_coverage"]
-    lines.extend([
-        "\n## n_max=3 partial-acceptance coverage\n\n",
-        "`--require-pass` requires at least one canonical LLAMA_TRACE event for each partial "
-        "acceptance length 0/3, 1/3, and 2/3. These exercise rollback distances 3, 2, and 1.\n\n",
-        "| Accepted/drafted | Rollback distance | Events | Cases | Coverage |\n",
-        "| ----------------: | ----------------: | -----: | :---- | :------- |\n",
-    ])
-    for accepted in coverage["required_partial_accepted_lengths"]:
-        key = str(accepted)
-        count = coverage["event_counts_by_accepted_length"][key]
-        case_ids = coverage["case_ids_by_accepted_length"][key]
+    n3_required = report["comparison_coverage"].get("n_max_3_coverage_required") is True
+    lines.append("\n## n_max=3 partial-acceptance coverage\n\n")
+    if n3_required:
+        lines.extend([
+            "`--require-pass` requires at least one canonical LLAMA_TRACE event for each partial "
+            "acceptance length 0/3, 1/3, and 2/3. These exercise rollback distances 3, 2, and 1.\n\n",
+            "| Accepted/drafted | Rollback distance | Events | Cases | Coverage |\n",
+            "| ----------------: | ----------------: | -----: | :---- | :------- |\n",
+        ])
+        for accepted in coverage["required_partial_accepted_lengths"]:
+            key = str(accepted)
+            count = coverage["event_counts_by_accepted_length"][key]
+            case_ids = coverage["case_ids_by_accepted_length"][key]
+            lines.append(
+                f"| {accepted}/3 | {3 - accepted} | {count} | "
+                f"{', '.join(f'`{case_id}`' for case_id in case_ids) or 'none'} | "
+                f"{'PASS' if count else 'MISSING'} |\n"
+            )
         lines.append(
-            f"| {accepted}/3 | {3 - accepted} | {count} | "
-            f"{', '.join(f'`{case_id}`' for case_id in case_ids) or 'none'} | "
-            f"{'PASS' if count else 'MISSING'} |\n"
+            f"\nOverall rollback coverage: **{'PASS' if coverage['passed'] else 'FAIL'}**. "
+            f"Parsed {coverage['valid_n_max_3_trace_events']} valid trace events across "
+            f"{coverage['n_max_3_cases_with_trace_events']}/"
+            f"{coverage['successful_n_max_3_cases']} successful n_max=3 cases.\n"
         )
+    else:
+        lines.append("Not applicable to this reduced matrix profile.\n")
+    lines.append("\n## Divergence timing relative to rejection\n\n")
+    pre_rejection = report.get("pre_rejection_greedy_divergences", [])
+    if pre_rejection:
+        for item in pre_rejection:
+            divergence = item.get("first_divergence") or {}
+            timing = item.get("pre_rejection_analysis") or {}
+            timing_text = (
+                "before the first rejected draft"
+                if timing.get("proof_kind") == "before_observed_rejection"
+                else "with no rejected draft in the captured request"
+            )
+            lines.append(
+                f"- `n_max={item.get('n_max')}` diverged at zero-based output token "
+                f"{divergence.get('position')}, {timing_text}. "
+                f"{timing.get('full_acceptance_events_before_first_rejection')} full-acceptance "
+                f"events emitted at least {timing.get('minimum_outputs_before_first_rejection')} "
+                "tokens first.\n"
+            )
+    else:
+        lines.append("- No greedy divergence was proven to predate the first rejected draft.\n")
     lines.extend([
-        f"\nOverall rollback coverage: **{'PASS' if coverage['passed'] else 'FAIL'}**. "
-        f"Parsed {coverage['valid_n_max_3_trace_events']} valid trace events across "
-        f"{coverage['n_max_3_cases_with_trace_events']}/"
-        f"{coverage['successful_n_max_3_cases']} successful n_max=3 cases.\n",
         "\n## Classification\n\n",
     ])
     for item in report["classification"]:
         lines.append(f"- {item}\n")
     lines.extend([
         "\n## Condition matrix\n\n",
-        "| Temp | n_max | Repeat | Non-stream | Contract | Tokens | Draft accepted/generated | First difference vs n=0 | Stream parity |\n",
-        "| ---: | ----: | -----: | :--------- | :------- | -----: | :----------------------- | :---------------------- | :------------ |\n",
+        "| Temp | n_max | Repeat | Non-stream | Contract | Tokens | Draft accepted/generated | First difference vs n=0 | Before rejection | Stream parity |\n",
+        "| ---: | ----: | -----: | :--------- | :------- | -----: | :----------------------- | :---------------------- | :------------- | :------------ |\n",
     ])
-    repeats = sorted({int(row["repeat"]) for row in rows})
-    for repeat in repeats:
-        for temperature in (0.0, 1.0):
-            for n_max in (0, 1, 2, 3):
-                row = indexed.get((temperature, n_max, False, repeat), {})
-                cmp = comparisons.get((temperature, n_max, repeat))
-                stream_cmp = transport.get((temperature, n_max, repeat))
-                timing = row.get("timings", {})
-                difference = "baseline"
-                if cmp:
-                    div = cmp.get("first_divergence")
-                    difference = "none" if div is None else f"{div['kind']} @ {div['position']}"
-                parity = "" if stream_cmp is None else ("PASS" if stream_cmp["exact_canonical_match"] else "FAIL")
-                contract = row.get("response_contract", {}).get("passed")
-                contract_text = "" if contract is None else ("PASS" if contract else "FAIL")
-                row_status = row.get("status", "missing")
-                if row and legacy_distribution_only_error(row):
-                    row_status = "recovered-v1.2"
-                lines.append(
-                    f"| {temperature:g} | {n_max} | {repeat} | {row_status} | "
-                    f"{contract_text} | {row.get('token_count', '')} | {fmt(timing.get('draft_n_accepted'))}/{fmt(timing.get('draft_n'))} | "
-                    f"{difference} | {parity} |\n"
+    condition_cells = {
+        (int(row["repeat"]), float(row["temperature"]), int(row["n_max"]))
+        for row in rows if not bool(row.get("stream"))
+    }
+    condition_cells.update(
+        (int(repeat), float(temperature), int(n_max))
+        for temperature, n_max, stream, repeat in report.get("missing_cells", [])
+        if not bool(stream)
+    )
+    for repeat, temperature, n_max in sorted(condition_cells):
+        row = indexed.get((temperature, n_max, False, repeat), {})
+        cmp = comparisons.get((temperature, n_max, repeat))
+        stream_cmp = transport.get((temperature, n_max, repeat))
+        timing = row.get("timings", {})
+        difference = "baseline"
+        before_rejection = ""
+        if cmp:
+            div = cmp.get("first_divergence")
+            difference = "none" if div is None else f"{div['kind']} @ {div['position']}"
+            if div is not None:
+                before_rejection = (
+                    "YES" if cmp.get("pre_rejection_analysis", {}).get("divergence_before_first_rejection")
+                    else "not proven"
                 )
+        parity = "" if stream_cmp is None else ("PASS" if stream_cmp["exact_canonical_match"] else "FAIL")
+        contract = row.get("response_contract", {}).get("passed")
+        contract_text = "" if contract is None else ("PASS" if contract else "FAIL")
+        row_status = row.get("status", "missing")
+        if row and legacy_distribution_only_error(row):
+            row_status = "recovered-v1.2"
+        lines.append(
+            f"| {temperature:g} | {n_max} | {repeat} | {row_status} | "
+            f"{contract_text} | {row.get('token_count', '')} | {fmt(timing.get('draft_n_accepted'))}/{fmt(timing.get('draft_n'))} | "
+            f"{difference} | {before_rejection} | {parity} |\n"
+        )
     lines.extend([
         "\nNon-stream token traces come directly from llama-server's OpenAI logprobs and contain generated token IDs and bytes. "
         "With tools present, llama-server rejects logprobs plus streaming; streamed arms therefore gate the canonical reconstruction of reasoning, content, tool calls, and finish reason against their paired non-stream response.\n",
@@ -1522,13 +1830,27 @@ def write_summary(
 
 def print_verdict(report: dict[str, Any]) -> None:
     coverage = report["comparison_coverage"]
-    print(
-        f"Greedy equivalence: {'PASS' if report['acceptance']['greedy_equivalence_pass'] else 'FAIL'} "
-        f"({coverage['greedy_observed']}/{coverage['greedy_expected']} pairs)"
+    greedy_matched = sum(
+        item.get("exact_match") is True
+        for item in report.get("comparisons", [])
+        if item.get("kind") == "nmax_vs_n0" and item.get("temperature") == 0.0
     )
+    transport_matched = sum(
+        item.get("exact_canonical_match") is True
+        for item in report.get("comparisons", [])
+        if item.get("kind") == "stream_vs_nonstream"
+    )
+    greedy_gate = report["acceptance"]["greedy_equivalence_pass"]
     print(
-        f"Stream transport: {'PASS' if report['acceptance']['stream_transport_pass'] else 'FAIL'} "
-        f"({coverage['stream_transport_observed']}/{coverage['stream_transport_expected']} pairs)"
+        f"Greedy equivalence: {'N/A' if greedy_gate is None else 'PASS' if greedy_gate else 'FAIL'} "
+        f"({greedy_matched}/{coverage['greedy_expected']} matched; "
+        f"{coverage['greedy_observed']}/{coverage['greedy_expected']} evaluated)"
+    )
+    transport_gate = report["acceptance"]["stream_transport_pass"]
+    print(
+        f"Stream transport: {'N/A' if transport_gate is None else 'PASS' if transport_gate else 'FAIL'} "
+        f"({transport_matched}/{coverage['stream_transport_expected']} matched; "
+        f"{coverage['stream_transport_observed']}/{coverage['stream_transport_expected']} evaluated)"
     )
     rollback = report["n_max_3_partial_acceptance_coverage"]
     observed = ", ".join(
@@ -1537,8 +1859,10 @@ def print_verdict(report: dict[str, Any]) -> None:
     missing = ", ".join(
         f"{accepted}/3" for accepted in rollback["missing_partial_accepted_lengths"]
     ) or "none"
+    rollback_gate = report["acceptance"]["n_max_3_partial_acceptance_coverage_pass"]
     print(
-        f"n_max=3 rollback coverage: {'PASS' if rollback['passed'] else 'FAIL'} "
+        f"n_max=3 rollback coverage: "
+        f"{'N/A' if rollback_gate is None else 'PASS' if rollback_gate else 'FAIL'} "
         f"(observed: {observed}; missing: {missing})"
     )
     for divergence in report["greedy_divergences"]:
@@ -1609,7 +1933,7 @@ def command_run(args: argparse.Namespace) -> int:
     output_root.mkdir(parents=True, exist_ok=True)
     run_dir = output_root / f"{stamp()}-mtp-diagnostic-{safe_name(args.server_label)}"
     run_dir.mkdir()
-    conditions = condition_matrix(args.repeats)
+    conditions = condition_matrix(args.repeats, args.matrix_profile)
     startup_log = (
         redact_secret_bytes(server_log.read_bytes(), api_key)
         if server_log is not None else b""
@@ -1637,6 +1961,7 @@ def command_run(args: argparse.Namespace) -> int:
         "max_tokens_override": args.max_tokens,
         "top_logprobs": args.top_logprobs,
         "repeats": args.repeats,
+        "matrix_profile": args.matrix_profile,
         "conditions": conditions,
         "controlled_fields": [
             "temperature", "seed", "stream", "cache_prompt", "id_slot",
@@ -1674,14 +1999,17 @@ def command_run(args: argparse.Namespace) -> int:
     write_summary(run_dir, rows, report)
     print(f"Results: {run_dir}")
     print_verdict(report)
-    passed = all(
-        report["acceptance"][key]
-        for key in (
-            "matrix_complete", "fresh_slot_pass", "mtp_exercised",
-            "greedy_equivalence_pass", "stream_transport_pass", "fixed_seed_repeatability_pass",
-            "response_contract_pass", "server_log_capture",
-            "n_max_3_partial_acceptance_coverage_pass",
-        )
+    required_gates = (
+        "matrix_complete", "fresh_slot_pass", "mtp_exercised",
+        "greedy_equivalence_pass", "response_contract_pass", "server_log_capture",
+    )
+    optional_gates = (
+        "stream_transport_pass", "fixed_seed_repeatability_pass",
+        "n_max_3_partial_acceptance_coverage_pass",
+    )
+    passed = all(report["acceptance"][key] is True for key in required_gates)
+    passed = passed and all(
+        report["acceptance"][key] in (None, True) for key in optional_gates
     )
     if reference_dir is not None:
         passed = passed and report["acceptance"]["reference_n0_pass"] is True
@@ -1721,6 +2049,20 @@ def self_test() -> None:
         for n_max in (0, 1, 2, 3)
         for stream in (False, True)
     }
+    quick_matrix = condition_matrix(2, "greedy-n01")
+    assert len(quick_matrix) == 4
+    assert {
+        (item["temperature"], item["n_max"], item["stream"], item["repeat"])
+        for item in quick_matrix
+    } == {
+        (0.0, 0, False, 1), (0.0, 1, False, 1),
+        (0.0, 0, False, 2), (0.0, 1, False, 2),
+    }
+    try:
+        condition_matrix(1, "not-a-profile")
+        raise AssertionError("unknown matrix profile should fail")
+    except ValueError:
+        pass
 
     trace_log = (
         "1.00 I slot accepted  0/ 3 draft tokens\n"
@@ -1735,6 +2077,38 @@ def self_test() -> None:
     ]
     assert trace_events[1]["restore_checkpoint"] is True
     assert trace_events[3]["partial"] is False
+    pre_rejection = outputs_before_first_rejection(trace_events)
+    assert pre_rejection["first_rejection_event_index"] == 0
+    assert pre_rejection["full_acceptance_events_before_first_rejection"] == 0
+    assert pre_rejection["minimum_outputs_before_first_rejection"] == 0
+    assert pre_rejection["first_rejection_restores_checkpoint"] is False
+    assert pre_rejection["all_captured_events_fully_accepted"] is False
+    full_then_restore = parse_draft_acceptance_events(
+        "1.00 I slot accepted 1/1 draft tokens\n"
+        "1.01 I slot accepted 2/2 draft tokens\n"
+        "1.02 I slot accepted 0/1 draft tokens (restore checkpoint)\n"
+    )
+    pre_rejection = outputs_before_first_rejection(full_then_restore)
+    assert pre_rejection["full_acceptance_events_before_first_rejection"] == 2
+    assert pre_rejection["minimum_outputs_before_first_rejection"] == 5
+    assert pre_rejection["first_rejection_observed"] is True
+    assert pre_rejection["first_rejection_restores_checkpoint"] is True
+    bounded_rejection = parse_draft_acceptance_events(
+        "1.00 I slot accepted 1/1 draft tokens\n"
+        "1.01 I slot accepted 0/1 draft tokens\n"
+        "1.02 I slot accepted 1/1 draft tokens (restore checkpoint)\n"
+    )
+    pre_rejection = outputs_before_first_rejection(bounded_rejection)
+    assert pre_rejection["first_rejection_event_index"] == 1
+    assert pre_rejection["minimum_outputs_before_first_rejection"] == 2
+    assert pre_rejection["first_rejection_restores_checkpoint"] is False
+    fully_accepted = outputs_before_first_rejection(parse_draft_acceptance_events(
+        "1.00 I slot accepted 1/1 draft tokens\n"
+        "1.01 I slot accepted 1/1 draft tokens\n"
+    ))
+    assert fully_accepted["first_rejection_observed"] is False
+    assert fully_accepted["all_captured_events_fully_accepted"] is True
+    assert fully_accepted["minimum_outputs_before_first_rejection"] == 4
     coverage_row = {
         "case_id": "coverage", "status": "ok", "n_max": 3,
         "draft_acceptance_events": trace_events,
@@ -1856,6 +2230,32 @@ def self_test() -> None:
     changed_bytes[1]["bytes"] = [98]
     byte_divergence = first_token_divergence(parsed_nonstream["token_trace"], changed_bytes)
     assert byte_divergence and byte_divergence["identity_fields_differ"] == ["bytes"]
+    changed_score = copy.deepcopy(parsed_nonstream["token_trace"])
+    changed_score[0]["logprob"] = -0.25
+    changed_score[0]["top"][0]["logprob"] = -0.25
+    score_divergence = first_scored_distribution_divergence(
+        parsed_nonstream["token_trace"], changed_score,
+    )
+    assert score_divergence and score_divergence["position"] == 0
+    assert first_scored_distribution_divergence(
+        parsed_nonstream["token_trace"], copy.deepcopy(parsed_nonstream["token_trace"]),
+    ) is None
+    placeholder_score = copy.deepcopy(parsed_nonstream["token_trace"])
+    placeholder_score[0]["logprob"] = 0.0
+    placeholder_score[0]["top"] = []
+    assert first_scored_distribution_divergence(
+        parsed_nonstream["token_trace"], placeholder_score,
+    ) is None
+    prob_left = copy.deepcopy(parsed_nonstream["token_trace"])
+    prob_right = copy.deepcopy(parsed_nonstream["token_trace"])
+    for trace in (prob_left, prob_right):
+        trace[0].pop("logprob", None)
+        trace[0]["prob"] = 0.75
+        trace[0]["top"][0].pop("logprob", None)
+        trace[0]["top"][0]["prob"] = 0.75
+    prob_right[0]["top"][0]["prob"] = 0.5
+    prob_divergence = first_scored_distribution_divergence(prob_left, prob_right)
+    assert prob_divergence and prob_divergence["score_field"] == "prob"
     shorter = first_token_divergence(parsed_nonstream["token_trace"], changed[:1])
     assert shorter and shorter["kind"] == "candidate_ended" and shorter["position"] == 1
 
@@ -1886,6 +2286,13 @@ def self_test() -> None:
             )
             if condition["temperature"] == 0.0 and condition["n_max"] == 1:
                 trace[1]["id"] = 12
+            if (
+                condition["temperature"] == 0.0
+                and condition["n_max"] == 2
+                and condition["stream"] is False
+            ):
+                trace[0]["logprob"] = -0.25
+                trace[0]["top"][0]["logprob"] = -0.25
             if legacy_distribution_error:
                 trace[1]["top"] = []
             token_file = pathlib.Path("tokens") / f"{identifier}.json"
@@ -1913,7 +2320,16 @@ def self_test() -> None:
                 "finish_reason": "stop",
                 "finish_reason_count": 1,
                 "fresh_slot": {"passed": True},
-                "draft_acceptance_events": trace_events if condition["n_max"] == 3 else [],
+                "draft_acceptance_events": (
+                    parse_draft_acceptance_events(
+                        "1.00 I slot accepted 1/1 draft tokens\n"
+                        "1.01 I slot accepted 0/1 draft tokens (restore checkpoint)\n"
+                    )
+                    if condition["temperature"] == 0.0
+                    and condition["n_max"] == 1
+                    and condition["stream"] is False
+                    else trace_events if condition["n_max"] == 3 else []
+                ),
                 "timings": {
                     "draft_n": 0 if condition["n_max"] == 0 else condition["n_max"],
                     "draft_n_accepted": 0 if condition["n_max"] == 0 else condition["n_max"],
@@ -1930,9 +2346,59 @@ def self_test() -> None:
         assert len(fake_report["legacy_distribution_rows_recovered"]) == 1
         assert len(fake_report["token_distribution_failures"]) == 1
         assert fake_report["greedy_divergences"][0]["n_max"] == 1
+        assert fake_report["pre_rejection_greedy_divergences"][0]["n_max"] == 1
+        assert (
+            fake_report["pre_rejection_greedy_divergences"][0]
+            ["pre_rejection_analysis"]["minimum_outputs_before_first_rejection"]
+        ) == 2
+        assert any(
+            item["n_max"] == 2
+            and item["first_scored_distribution_divergence"]["position"] == 0
+            for item in fake_report["prompt_boundary_score_drift"]
+        )
+        assert any(
+            item.startswith("target score drift is already visible on output token 0")
+            for item in fake_report["classification"]
+        )
         assert any(
             item.startswith("n=1 diverged under greedy decoding")
             for item in fake_report["classification"]
+        ) is False
+        assert any(
+            "occurred before the first rejected draft" in item
+            for item in fake_report["classification"]
+        )
+
+        verdict_report = copy.deepcopy(fake_report)
+        stream_items = [
+            item for item in verdict_report["comparisons"]
+            if item["kind"] == "stream_vs_nonstream"
+        ]
+        assert len(stream_items) == 8
+        for index, item in enumerate(stream_items):
+            item["exact_canonical_match"] = index < 6
+        verdict_report["acceptance"]["stream_transport_pass"] = False
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            print_verdict(verdict_report)
+        assert "Stream transport: FAIL (6/8 matched; 8/8 evaluated)" in captured.getvalue()
+
+        debug_rows = copy.deepcopy(fake_rows)
+        for row in debug_rows:
+            row["token_count"] = 2
+            row["response_contract"] = {
+                "passed": False,
+                "failures": ["finish reason 'length' is not one of ['stop', 'tool_calls']"],
+            }
+        atomic_json(root / "manifest.json", {
+            "conditions": matrix,
+            "max_tokens_override": 2,
+        })
+        debug_report = classify_run(root, debug_rows)
+        assert debug_report["debug_cap_contract_truncation"]["detected"] is True
+        assert any(
+            item.startswith("all response-contract failures are expected diagnostic truncations")
+            for item in debug_report["classification"]
         )
 
         empty_root = root / "empty-run"
@@ -1940,7 +2406,80 @@ def self_test() -> None:
         empty_report = classify_run(empty_root, [])
         assert empty_report["acceptance"]["matrix_complete"] is False
         assert empty_report["acceptance"]["greedy_equivalence_pass"] is False
-        assert empty_report["acceptance"]["stream_transport_pass"] is False
+        assert empty_report["acceptance"]["stream_transport_pass"] is None
+
+        quick_root = root / "quick-run"
+        quick_root.mkdir()
+        quick_conditions = condition_matrix(1, "greedy-n01")
+        atomic_json(quick_root / "manifest.json", {"conditions": quick_conditions})
+        quick_keys = {
+            (item["temperature"], item["n_max"], item["stream"], item["repeat"])
+            for item in quick_conditions
+        }
+        quick_rows = [
+            row for row in fake_rows
+            if (row["temperature"], row["n_max"], row["stream"], row["repeat"]) in quick_keys
+        ]
+        for row in quick_rows:
+            source_token = root / row["token_file"]
+            atomic_json(quick_root / row["token_file"], json.loads(source_token.read_text()))
+        quick_report = classify_run(quick_root, quick_rows)
+        assert quick_report["acceptance"]["matrix_complete"] is True
+        assert quick_report["comparison_coverage"]["greedy_expected"] == 1
+        assert quick_report["comparison_coverage"]["stream_transport_expected"] == 0
+        assert quick_report["acceptance"]["stream_transport_pass"] is None
+        assert quick_report["acceptance"]["n_max_3_partial_acceptance_coverage_pass"] is None
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            print_verdict(quick_report)
+        assert "Stream transport: N/A (0/0 matched; 0/0 evaluated)" in captured.getvalue()
+        assert "n_max=3 rollback coverage: N/A" in captured.getvalue()
+
+        boundary_root = root / "pre-rejection-boundary"
+        boundary_root.mkdir()
+        atomic_json(boundary_root / "manifest.json", {"conditions": quick_conditions})
+        boundary_rows = copy.deepcopy(quick_rows)
+        for row in boundary_rows:
+            row["status"] = "ok"
+            row.pop("error", None)
+            trace = copy.deepcopy(parsed_nonstream["token_trace"])
+            third = copy.deepcopy(trace[-1])
+            third.update({"position": 2, "id": 13, "token": "c", "bytes": [99]})
+            third["top"][0].update({"id": 13, "token": "c", "bytes": [99]})
+            trace.append(third)
+            if row["n_max"] == 1:
+                trace[2].update({"id": 14, "token": "d", "bytes": [100]})
+                trace[2]["top"][0].update({"id": 14, "token": "d", "bytes": [100]})
+                row["draft_acceptance_events"] = parse_draft_acceptance_events(
+                    "1.00 I slot accepted 1/1 draft tokens\n"
+                    "1.01 I slot accepted 0/1 draft tokens (restore checkpoint)\n"
+                )
+            token_file = pathlib.Path("tokens") / f"boundary-{row['n_max']}.json"
+            atomic_json(boundary_root / token_file, trace)
+            row["token_file"] = str(token_file)
+            row["token_count"] = len(trace)
+        boundary_report = classify_run(boundary_root, boundary_rows)
+        assert boundary_report["greedy_divergences"][0]["first_divergence"]["position"] == 2
+        assert boundary_report["greedy_divergences"][0]["pre_rejection_analysis"][
+            "minimum_outputs_before_first_rejection"
+        ] == 2
+        assert boundary_report["pre_rejection_greedy_divergences"] == []
+
+        no_rejection_rows = copy.deepcopy(boundary_rows)
+        for row in no_rejection_rows:
+            if row["n_max"] == 1:
+                row["draft_acceptance_events"] = parse_draft_acceptance_events(
+                    "1.00 I slot accepted 1/1 draft tokens\n"
+                    "1.01 I slot accepted 1/1 draft tokens\n"
+                )
+        no_rejection_report = classify_run(boundary_root, no_rejection_rows)
+        assert no_rejection_report["pre_rejection_greedy_divergences"][0][
+            "pre_rejection_analysis"
+        ]["proof_kind"] == "captured_without_rejection"
+        assert any(
+            "no rejected draft occurred in the captured request" in item
+            for item in no_rejection_report["classification"]
+        )
 
         truncated_root = root / "truncated-run"
         truncated_root.mkdir()
@@ -2008,7 +2547,7 @@ def self_test() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", help="run the 16-condition MTP chat diagnostic")
+    run = sub.add_parser("run", help="run the MTP chat diagnostic matrix")
     run.add_argument("--url", default="http://127.0.0.1:8080")
     run.add_argument("--fixture", default=str(DEFAULT_FIXTURE))
     run.add_argument("--output-root", default="results")
@@ -2022,6 +2561,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--max-tokens", type=int, default=None)
     run.add_argument("--top-logprobs", type=int, default=5)
     run.add_argument("--repeats", type=int, default=1)
+    run.add_argument(
+        "--matrix-profile",
+        choices=("full", "greedy-n01"),
+        default="full",
+        help="full 16-cell matrix or the short greedy n=0/n=1 isolation matrix",
+    )
     run.add_argument("--timeout", type=float, default=1800.0)
     run.add_argument("--require-pass", action="store_true")
     reclassify = sub.add_parser(
@@ -2046,6 +2591,10 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 "--require-pass requires --reference-run from a request-identical target-only server"
             )
+        if args.require_pass and args.matrix_profile != "full":
+            raise ValueError("--require-pass is only valid with --matrix-profile full")
+        if args.require_pass and args.repeats < 2:
+            raise ValueError("--require-pass requires at least two fixed-seed repeats")
         if args.repeats < 1:
             raise ValueError("--repeats must be positive")
         if args.slot < 0:

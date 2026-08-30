@@ -1,0 +1,297 @@
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -13,6 +13,7 @@
+ #include "llama-ext.h"
+ #include "llama.h"
+ 
++#include <algorithm>
+ #include <cinttypes>
+ #include <cmath>
+ #include <cstring>
+@@ -2160,6 +2160,99 @@ int llama_context::decode(const llama_batch & batch_inp, uint32_t n_ubatch_overr
+     return 0;
+ }
+ 
++int llama_context::decode_outer_serial_preserve_outputs(const llama_batch & batch_inp) {
++    if (batch_inp.n_tokens <= 1) {
++        return decode(batch_inp);
++    }
++
++    if (!batch_inp.token || batch_inp.embd || !batch_inp.logits) {
++        LLAMA_LOG_ERROR("%s: diagnostic serial decode requires token-only input and explicit logits rows\n", __func__);
++        return -1;
++    }
++    if (!batch_inp.pos || !batch_inp.n_seq_id || !batch_inp.seq_id) {
++        LLAMA_LOG_ERROR("%s: diagnostic serial decode requires explicit positions and sequence metadata\n", __func__);
++        return -1;
++    }
++    if ((uint32_t) batch_inp.n_tokens > cparams.n_batch) {
++        LLAMA_LOG_ERROR("%s: diagnostic row count exceeds the configured physical batch size\n", __func__);
++        return -1;
++    }
++    if (!sampling.samplers.empty()) {
++        LLAMA_LOG_ERROR("%s: diagnostic serial decode requires CPU-side target sampling\n", __func__);
++        return -1;
++    }
++    if (!cparams.embeddings_pre_norm || cparams.embeddings_pre_norm_masked) {
++        LLAMA_LOG_ERROR("%s: diagnostic serial decode requires unmasked pre-norm output\n", __func__);
++        return -1;
++    }
++    if (cparams.embeddings || std::any_of(
++            cparams.embeddings_layer_inp.begin(), cparams.embeddings_layer_inp.end(),
++            [](bool enabled) { return enabled; })) {
++        LLAMA_LOG_ERROR("%s: ordinary and layer-input embedding export is unsupported\n", __func__);
++        return -1;
++    }
++
++    const llama_seq_id verifier_seq = batch_inp.seq_id[0] ? batch_inp.seq_id[0][0] : -1;
++    const llama_pos verifier_pos = batch_inp.pos[0];
++    for (int32_t i = 0; i < batch_inp.n_tokens; ++i) {
++        if (batch_inp.logits[i] == 0 || batch_inp.n_seq_id[i] != 1 || !batch_inp.seq_id[i] ||
++                batch_inp.seq_id[i][0] != verifier_seq || batch_inp.pos[i] != verifier_pos + i) {
++            LLAMA_LOG_ERROR("%s: verifier rows must be one consecutive sequence with logits enabled\n", __func__);
++            return -1;
++        }
++    }
++
++    const size_t n_rows  = (size_t) batch_inp.n_tokens;
++    const size_t n_vocab = (size_t) model.vocab.n_tokens();
++    const size_t n_embd  = (size_t) model.n_embd_pre_norm();
++    std::vector<float> saved_logits(n_rows * n_vocab);
++    std::vector<float> saved_pre_norm(n_rows * n_embd);
++
++    for (int32_t i = 0; i < batch_inp.n_tokens; ++i) {
++        llama_batch row = {
++            1,
++            batch_inp.token + i,
++            nullptr,
++            batch_inp.pos + i,
++            batch_inp.n_seq_id + i,
++            batch_inp.seq_id + i,
++            batch_inp.logits + i,
++        };
++
++        const int ret = decode(row);
++        if (ret != 0) {
++            LLAMA_LOG_ERROR("%s: verifier row %d failed after earlier rows may have committed, ret = %d\n", __func__, i, ret);
++            return -2;
++        }
++
++        synchronize();
++        const float * row_logits = get_logits_ith(0);
++        const float * row_pre_norm = get_embeddings_pre_norm_ith(0);
++        if (!row_logits || !row_pre_norm) {
++            LLAMA_LOG_ERROR("%s: verifier row %d did not produce logits and pre-norm output\n", __func__, i);
++            return -2;
++        }
++        std::memcpy(saved_logits.data() + (size_t) i * n_vocab, row_logits, n_vocab * sizeof(float));
++        std::memcpy(saved_pre_norm.data() + (size_t) i * n_embd, row_pre_norm, n_embd * sizeof(float));
++    }
++
++    if (output_reserve((int32_t) n_rows) < n_rows) {
++        LLAMA_LOG_ERROR("%s: could not restore %zu diagnostic output rows\n", __func__, n_rows);
++        return -2;
++    }
++
++    std::memcpy(logits.data, saved_logits.data(), saved_logits.size() * sizeof(float));
++    std::memcpy(embd_pre_norm.data, saved_pre_norm.data(), saved_pre_norm.size() * sizeof(float));
++    n_outputs = (uint32_t) n_rows;
++    output_swaps.clear();
++    for (int32_t i = 0; i < batch_inp.n_tokens; ++i) {
++        output_ids[i] = i;
++    }
++
++    LLAMA_LOG_DEBUG("%s: preserved %zu true outer-decode verifier rows\n", __func__, n_rows);
++    return 0;
++}
++
+ //
+ // output
+ //
+@@ -4377,6 +4471,17 @@ int32_t llama_decode_with_ubatch(
+     return ret;
+ }
+ 
++int32_t llama_decode_outer_serial_preserve_outputs(
++        llama_context * ctx,
++          llama_batch   batch) {
++    const int ret = ctx->decode_outer_serial_preserve_outputs(batch);
++    if (ret != 0 && ret != 1) {
++        LLAMA_LOG_ERROR("%s: failed to decode, ret = %d\n", __func__, ret);
++    }
++
++    return ret;
++}
++
+ //
+ // perf
+ //
+diff --git a/src/llama-context.h b/src/llama-context.h
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -144,6 +144,7 @@ struct llama_context {
+ 
+     int encode(const llama_batch & batch_inp);
+     int decode(const llama_batch & batch_inp, uint32_t n_ubatch_override = 0);
++    int decode_outer_serial_preserve_outputs(const llama_batch & batch_inp);
+ 
+     //
+     // state save/load
+diff --git a/src/llama-ext.h b/src/llama-ext.h
+--- a/src/llama-ext.h
++++ b/src/llama-ext.h
+@@ -17,6 +17,13 @@ LLAMA_API int32_t llama_decode_with_ubatch(
+           struct llama_batch   batch,
+                    uint32_t     n_ubatch);
+ 
++// Diagnostic helper for a single consecutive sequence: process every token as
++// an independent outer decode while preserving raw logits and unmasked pre-norm
++// rows. Ordinary/layer embeddings and backend-sampler buffers are unsupported.
++LLAMA_API int32_t llama_decode_outer_serial_preserve_outputs(
++        struct llama_context * ctx,
++          struct llama_batch   batch);
++
+ // Reserve a new compute graph. It is valid until the next call to llama_graph_reserve.
+ LLAMA_API struct ggml_cgraph * llama_graph_reserve(
+         struct llama_context * ctx,
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -24,6 +24,7 @@
+ #include <cinttypes>
+ #include <ctime>
+ #include <exception>
++#include <limits>
+ #include <memory>
+ #include <filesystem>
+ #include <mutex>
+@@ -42,6 +43,11 @@ using json = nlohmann::ordered_json;
+ 
+ constexpr int HTTP_POLLING_SECONDS = 1;
+ 
++static bool mtp_diag_env_enabled(const char * name) {
++    const char * value = std::getenv(name);
++    return value && value[0] != '\0' && std::strcmp(value, "0") != 0;
++}
++
+ // state diagram: https://github.com/ggml-org/llama.cpp/pull/9283
+ enum slot_state {
+     SLOT_STATE_IDLE,
+@@ -298,12 +304,12 @@ struct server_slot {
+ 
+     bool need_embd() const {
+         GGML_ASSERT(task);
+-        return task->need_embd() || (can_speculate() && common_speculative_need_embd(spec));
++        return task->need_embd() || (target_export_enabled() && common_speculative_need_embd(spec));
+     }
+ 
+     bool need_embd_pre_norm() const {
+         GGML_ASSERT(task);
+-        return can_speculate() && common_speculative_need_embd_pre_norm(spec);
++        return target_export_enabled() && common_speculative_need_embd_pre_norm(spec);
+     }
+ 
+     // if the context does not have a memory module then all embeddings have to be computed within a single ubatch
+@@ -356,6 +362,11 @@ struct server_slot {
+         return has_speculative_backend() && task && task->params.speculative.draft.n_max > 0;
+     }
+ 
++    bool target_export_enabled() const {
++        return can_speculate() ||
++            (has_speculative_backend() && mtp_diag_env_enabled("LLAMA_MTP_DIAG_FORCE_TARGET_EXPORT"));
++    }
++
+     void add_token(const completion_token_output & token) {
+         if (!is_processing()) {
+             SLT_WRN(*this, "%s", "slot is not processing\n");
+@@ -891,6 +902,9 @@ private:
+                 }
+                 SRV_WRN("%s", "Qwen4Exp vision MTP: single-row target verification enabled for exact greedy output\n");
+                 SRV_WRN("%s", "Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints\n");
++                if (mtp_diag_env_enabled("LLAMA_MTP_DIAG_OUTER_SERIAL")) {
++                    SRV_WRN("%s", "Qwen4Exp MTP diagnostic: true outer-call serial target verification enabled\n");
++                }
+             } else if (is_qwen4exp && has_mtp && !params_base.mmproj.path.empty()) {
+                 SRV_WRN("%s", "Qwen4Exp vision MTP strict verification is disabled; greedy output may diverge from no-spec decoding\n");
+             }
+@@ -1555,6 +1569,13 @@ private:
+             // TODO: speculative decoding requires multiple samples per batch - not supported yet
+             backend_sampling &= !(spec && task.params.speculative.draft.n_max > 0);
+ 
++            // Diagnostic target comparisons require identical CPU-side raw
++            // logits for the n=0 control and n=1 verifier arms.
++            backend_sampling &= !(
++                mtp_diag_env_enabled("LLAMA_MTP_DIAG_FORCE_TARGET_EXPORT") ||
++                mtp_diag_env_enabled("LLAMA_MTP_DIAG_OUTER_SERIAL") ||
++                mtp_diag_env_enabled("LLAMA_MTP_DIAG_TRACE_TARGET_LOGITS"));
++
+             // TODO: getting pre sampling logits is not yet supported with backend sampling
+             backend_sampling &= !need_pre_sample_logits;
+ 
+@@ -1574,7 +1595,11 @@ private:
+         slot.task = std::make_unique<const server_task>(std::move(task));
+ 
+         if (slot.has_speculative_backend() && !slot.can_speculate()) {
+-            SLT_INF(slot, "%s", "speculative decoding disabled for request; target hidden-state export bypassed (speculative.n_max = 0)\n");
++            if (slot.target_export_enabled()) {
++                SLT_INF(slot, "%s", "speculative decoding disabled for request; diagnostic target hidden-state export forced (speculative.n_max = 0)\n");
++            } else {
++                SLT_INF(slot, "%s", "speculative decoding disabled for request; target hidden-state export bypassed (speculative.n_max = 0)\n");
++            }
+         }
+ 
+         slot.state = slot.task->is_child()
+@@ -3394,9 +3419,49 @@ private:
+                 }
+             }
+ 
+-            const int ret = has_single_row_mtp_verification
+-                ? llama_decode_with_ubatch(ctx_tgt, batch_view, 1)
+-                : llama_decode(ctx_tgt, batch_view);
++            const bool use_outer_serial =
++                has_single_row_mtp_verification &&
++                strict_qwen4exp_vision_mtp_verification &&
++                mtp_diag_env_enabled("LLAMA_MTP_DIAG_OUTER_SERIAL");
++
++            const int ret = use_outer_serial
++                ? llama_decode_outer_serial_preserve_outputs(ctx_tgt, batch_view)
++                : has_single_row_mtp_verification
++                    ? llama_decode_with_ubatch(ctx_tgt, batch_view, 1)
++                    : llama_decode(ctx_tgt, batch_view);
++
++            if (ret == 0 && mtp_diag_env_enabled("LLAMA_MTP_DIAG_TRACE_TARGET_LOGITS")) {
++                const int32_t n_vocab = llama_vocab_n_tokens(vocab);
++                for (int32_t row = 0; row < batch_view.n_tokens; ++row) {
++                    if (batch_view.logits[row] == 0) {
++                        continue;
++                    }
++                    const float * raw = llama_get_logits_ith(ctx_tgt, row);
++                    if (!raw) {
++                        continue;
++                    }
++                    llama_token top1 = LLAMA_TOKEN_NULL;
++                    llama_token top2 = LLAMA_TOKEN_NULL;
++                    float logit1 = std::numeric_limits<float>::lowest();
++                    float logit2 = std::numeric_limits<float>::lowest();
++                    for (llama_token token = 0; token < n_vocab; ++token) {
++                        const float value = raw[token];
++                        if (value > logit1) {
++                            top2 = top1;
++                            logit2 = logit1;
++                            top1 = token;
++                            logit1 = value;
++                        } else if (value > logit2) {
++                            top2 = token;
++                            logit2 = value;
++                        }
++                    }
++                    SRV_INF(
++                        "MTP target-logit fingerprint: seq=%d row=%d pos=%d outer_serial=%d top1=%d logit1=%.9g top2=%d logit2=%.9g margin=%.9g\n",
++                        batch_view.seq_id[row][0], row, batch_view.pos[row], (int) use_outer_serial,
++                        top1, logit1, top2, logit2, logit1 - logit2);
++                }
++            }
+ 
+             metrics.on_decoded(slots);
+ 

@@ -846,6 +846,135 @@ tmux kill-session -t qwen-mtp-checkpoint
 sudo systemctl start qwen-flash-next
 ```
 
+That checkpoint run localized the earliest failure more tightly than rollback:
+greedy `n_max=1` diverged at zero-based output token 37 after 23 complete 1/1
+acceptance events, while the first rejected draft occurred only after at least
+46 speculative outputs. The mismatch therefore predates both bounded rollback
+and full-checkpoint restore. The selected token's real top-candidate score also
+already changes at output token 0 when MTP is enabled (`-0.427770` to
+`-0.273570`), before any draft can be verified. The next test must isolate the
+target hidden-state-export graph and the verifier's logical two-row decode; it
+must not repeat the full matrix.
+
+Version 1.4 adds a reduced `greedy-n01` profile and three opt-in server
+diagnostics. None is enabled in production:
+
+- `LLAMA_MTP_DIAG_FORCE_TARGET_EXPORT=1` makes the per-request `n_max=0`
+  control export the same target pre-norm hidden row as an MTP request while
+  still generating no drafts.
+- `LLAMA_MTP_DIAG_OUTER_SERIAL=1` replaces the existing one-logical-batch,
+  `n_ubatch=1` verifier with independent one-token outer decode calls, then
+  reconstructs the logits and pre-norm rows consumed by the unchanged verifier.
+- `LLAMA_MTP_DIAG_TRACE_TARGET_LOGITS=1` logs each target row's raw top-two
+  token IDs, logits, and margin before sampling.
+
+Rebuild and rerun the ROCm audit first because this diagnostic adds code to both
+`libllama.so` and `llama-server`:
+
+```bash
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+git pull --ff-only
+python3 qwen_mtp_diag.py self-test
+./build-rocm10-dual.sh
+python3 qwen_bench.py rocm-audit --run-ops
+```
+
+First run the hidden-export arm without true outer serialization:
+
+```bash
+sudo systemctl stop qwen-flash-next
+tmux kill-session -t qwen-mtp-export 2>/dev/null || true
+install -d -m0700 /tmp/qwen-mtp-diag-slots
+: > /tmp/qwen-mtp-export-server.log
+
+tmux new-session -d -s qwen-mtp-export \
+  "bash -lc 'cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench; set -a; source /etc/qwen-flash-next.env; set +a; export LLAMA_MTP_MODE=checkpoint-diagnostic LLAMA_CONTEXT_SIZE=8192 LLAMA_TRACE=1 LLAMA_LOG_VERBOSITY=4 LLAMA_SLOT_SAVE_PATH=/tmp/qwen-mtp-diag-slots LLAMA_MTP_DIAG_FORCE_TARGET_EXPORT=1 LLAMA_MTP_DIAG_TRACE_TARGET_LOGITS=1; exec ./deployment/run-production.sh >>/tmp/qwen-mtp-export-server.log 2>&1'"
+
+for _ in {1..120}; do
+  grep -q "listening on" /tmp/qwen-mtp-export-server.log && break
+  tmux has-session -t qwen-mtp-export 2>/dev/null || { tail -n 100 /tmp/qwen-mtp-export-server.log; exit 1; }
+  sleep 5
+done
+grep -q "listening on" /tmp/qwen-mtp-export-server.log || { tail -n 100 /tmp/qwen-mtp-export-server.log; exit 1; }
+
+read -rsp "API key: " QWEN_TEST_API_KEY
+echo
+export QWEN_TEST_API_KEY
+python3 qwen_mtp_diag.py run \
+  --url http://127.0.0.1:8080 \
+  --server-label export-n01 \
+  --server-log /tmp/qwen-mtp-export-server.log \
+  --matrix-profile greedy-n01 \
+  --repeats 2 \
+  --max-tokens 40
+unset QWEN_TEST_API_KEY
+
+RUN=$(ls -dt results/*-mtp-diagnostic-export-n01 | head -1)
+python3 qwen_bench.py archive "$RUN"
+tmux kill-session -t qwen-mtp-export
+for _ in {1..60}; do
+  pgrep -f '/build-hip10-dual/bin/llama-server' >/dev/null || break
+  sleep 1
+done
+pgrep -f '/build-hip10-dual/bin/llama-server' >/dev/null && {
+  echo "export diagnostic server did not stop within 60 seconds" >&2
+  exit 1
+}
+```
+
+Then repeat with genuine independent target decode calls:
+
+```bash
+: > /tmp/qwen-mtp-outer-server.log
+tmux kill-session -t qwen-mtp-outer 2>/dev/null || true
+tmux new-session -d -s qwen-mtp-outer \
+  "bash -lc 'cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench; set -a; source /etc/qwen-flash-next.env; set +a; export LLAMA_MTP_MODE=checkpoint-diagnostic LLAMA_CONTEXT_SIZE=8192 LLAMA_TRACE=1 LLAMA_LOG_VERBOSITY=4 LLAMA_SLOT_SAVE_PATH=/tmp/qwen-mtp-diag-slots LLAMA_MTP_DIAG_FORCE_TARGET_EXPORT=1 LLAMA_MTP_DIAG_OUTER_SERIAL=1 LLAMA_MTP_DIAG_TRACE_TARGET_LOGITS=1; exec ./deployment/run-production.sh >>/tmp/qwen-mtp-outer-server.log 2>&1'"
+
+for _ in {1..120}; do
+  grep -q "listening on" /tmp/qwen-mtp-outer-server.log && break
+  tmux has-session -t qwen-mtp-outer 2>/dev/null || { tail -n 100 /tmp/qwen-mtp-outer-server.log; exit 1; }
+  sleep 5
+done
+grep -q "listening on" /tmp/qwen-mtp-outer-server.log || { tail -n 100 /tmp/qwen-mtp-outer-server.log; exit 1; }
+
+read -rsp "API key: " QWEN_TEST_API_KEY
+echo
+export QWEN_TEST_API_KEY
+python3 qwen_mtp_diag.py run \
+  --url http://127.0.0.1:8080 \
+  --server-label outer-n01 \
+  --server-log /tmp/qwen-mtp-outer-server.log \
+  --matrix-profile greedy-n01 \
+  --repeats 2 \
+  --max-tokens 40
+unset QWEN_TEST_API_KEY
+
+RUN=$(ls -dt results/*-mtp-diagnostic-outer-n01 | head -1)
+python3 qwen_bench.py archive "$RUN"
+tmux kill-session -t qwen-mtp-outer
+for _ in {1..60}; do
+  pgrep -f '/build-hip10-dual/bin/llama-server' >/dev/null || break
+  sleep 1
+done
+pgrep -f '/build-hip10-dual/bin/llama-server' >/dev/null && {
+  echo "outer-serial diagnostic server did not stop within 60 seconds" >&2
+  exit 1
+}
+sudo systemctl start qwen-flash-next
+```
+
+The 40-token cap includes the known zero-based `n=1` divergence at token 37 and
+stays below the baseline run's conservative lower bound of 46 outputs before
+the first rejection. The classifier verifies rejection timing independently in
+each new arm because the diagnostic itself could change acceptance timing; do
+not exclude rollback unless that arm reports either a pre-rejection divergence
+or no rejected draft in the captured request. If forced target export makes
+`n=0` and `n=1` match, the original token-0 drift comes from the target export
+graph. If the export arm still differs but the outer-serial arm matches, token
+37 is caused by shared logical-batch target memory/PLE preparation. If both arms
+still differ before any rejection, the next instrumentation target is accepted-
+path recurrent/PLE state or MTP hidden-state handoff—not rollback.
+
 Do not combine the bounded strict and checkpoint flags; the launcher
 deliberately selects exactly one.
 
@@ -1121,7 +1250,8 @@ not contain both required code objects. It also applies
 `patches/rocmfpx-mtp-vision-resync.patch`,
 `patches/rocmfpx-qwen4exp-vision-strict.patch`,
 `patches/rocmfpx-qwen4exp-vision-strict-checkpoint.patch`, and
-`patches/rocmfpx-host-checkpoints.patch` idempotently. This also upgrades a source
+`patches/rocmfpx-host-checkpoints.patch`, plus the opt-in
+`patches/rocmfpx-mtp-target-isolation.patch` diagnostics idempotently. This also upgrades a source
 tree that already has either earlier MTP patch. Version 1.36.1 also detects and
 removes the malformed zero-context host-checkpoint patch shipped in commit
 `dc18127` before applying its contextual replacement. The first two patches add the missing
@@ -1147,6 +1277,8 @@ against `/opt/rocm-10.0.0` with:
 - a compiled Qwen4Exp vision single-row verification marker in `llama-server`;
 - a compiled Qwen4Exp checkpoint-backed strict-verification marker in `llama-server`;
 - a compiled host-checkpoint marker in `libllama-common.so`.
+- compiled target-export, true outer-serial verifier, and raw-logit diagnostic
+  markers in `llama-server` and `libllama.so`.
 
 Collect the new build evidence, then run the numerical gate:
 
