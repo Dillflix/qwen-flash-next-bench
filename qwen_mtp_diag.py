@@ -30,7 +30,7 @@ import urllib.parse
 from typing import Any
 
 
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 DEFAULT_FIXTURE = pathlib.Path(__file__).resolve().parent / "diagnostics" / "mtp-agentic-openwebui.json"
 API_KEY_REDACTION = "[REDACTED_API_KEY]"
 
@@ -1544,8 +1544,9 @@ def classify_run(
         prime_rows = loaded_priming if isinstance(loaded_priming, list) else [loaded_priming]
         prime_rows = [item for item in prime_rows if isinstance(item, dict)]
         first_baseline = indexed.get((0.0, 0, False, repeats[0]))
-        if prime_rows and ready(first_baseline):
-            prime_trace = load_trace(run_dir, prime_rows[-1])
+        n0_prime_rows = [item for item in prime_rows if item.get("n_max") == 0]
+        if n0_prime_rows and ready(first_baseline):
+            prime_trace = load_trace(run_dir, n0_prime_rows[-1])
             first_baseline_trace = load_trace(run_dir, first_baseline)
             prime_matches_first_baseline = bool(
                 prime_trace and first_baseline_trace
@@ -2039,6 +2040,7 @@ def command_run(args: argparse.Namespace) -> int:
         "repeats": args.repeats,
         "matrix_profile": args.matrix_profile,
         "prime_requests": args.prime_requests,
+        "prime_n_max": args.prime_n_max,
         "conditions": conditions,
         "controlled_fields": [
             "temperature", "seed", "stream", "cache_prompt", "id_slot",
@@ -2060,14 +2062,14 @@ def command_run(args: argparse.Namespace) -> int:
     for prime_index in range(1, args.prime_requests + 1):
         print(
             f"[prime {prime_index:02d}/{args.prime_requests:02d}] "
-            "request-identical greedy n_max=0",
+            f"request-identical greedy n_max={args.prime_n_max}",
             flush=True,
         )
         prime_args = copy.copy(args)
         prime_args.server_label = f"{args.server_label}-prime{prime_index:02d}"
         prime_condition = {
             "temperature": 0.0,
-            "n_max": 0,
+            "n_max": args.prime_n_max,
             "stream": False,
             "repeat": 0,
         }
@@ -2618,6 +2620,18 @@ def self_test() -> None:
             for item in transition_report["classification"]
         )
 
+        # An MTP prime intentionally changes the scheduler/allocation regime;
+        # it must not be treated as evidence that the ordinary n=0 baseline was
+        # already stable before the measured matrix.
+        mtp_prime = copy.deepcopy(first_n0)
+        mtp_prime.update({"case_id": "mtp-prime", "repeat": 0, "n_max": 1})
+        atomic_json(cold_root / "priming.json", [mtp_prime])
+        mtp_primed_report = classify_run(cold_root, cold_rows)
+        assert any(
+            "first measured request is a cold-start outlier" in item
+            for item in mtp_primed_report["classification"]
+        )
+
         boundary_root = root / "pre-rejection-boundary"
         boundary_root.mkdir()
         atomic_json(boundary_root / "manifest.json", {"conditions": quick_conditions})
@@ -2724,6 +2738,12 @@ def self_test() -> None:
         assert name == "test" and loaded["model"] == "test" and len(digest) == 64
         assert validation == {}
 
+    parsed_prime = build_parser().parse_args([
+        "run", "--prime-requests", "1", "--prime-n-max", "1",
+    ])
+    assert parsed_prime.prime_requests == 1
+    assert parsed_prime.prime_n_max == 1
+
     print(f"qwen_mtp_diag.py {VERSION}: self-test passed")
 
 
@@ -2747,10 +2767,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--prime-requests", type=int, default=0,
         help=(
-            "run and archive this many unmeasured request-identical greedy n=0 "
+            "run and archive this many unmeasured request-identical greedy "
             "requests before the matrix; each request is followed by the normal "
             "fresh-slot erase before measurement"
         ),
+    )
+    run.add_argument(
+        "--prime-n-max", type=int, choices=(0, 1, 2, 3), default=0,
+        help="speculative.n_max used by unmeasured priming requests (default: 0)",
     )
     run.add_argument(
         "--matrix-profile",

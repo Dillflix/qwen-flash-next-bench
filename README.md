@@ -904,6 +904,16 @@ counts. A passing primed arm proves whether forced target export restores
 n=0/n=1 parity independently of the startup-only target-state defect; it does
 not excuse that defect for production.
 
+The `20260830-183700-mtp-diagnostic-prompt-mask-n01-primed` run proved that
+last-token-only prompt logits reduced every arm to 40 target-logit fingerprints,
+but the first `n_max=1` request still performed a one-time 3,045.95 MiB ROCm0
+scheduler reserve with 166 graph nodes. Its first target distribution changed,
+and every later `n_max=0` and `n_max=1` request matched in that stabilized
+allocation regime. Use `--prime-n-max 1` with `--prime-requests 1` to reserve
+the real MTP/pre-norm graph before measuring. Unlike an `n_max=0` prime, an MTP
+prime is not used by the classifier as evidence of ordinary target cold-start
+repeatability.
+
 The forced-export arm proves graph-path parity only by making the n=0 control
 use the hidden-state-export graph. It is not a production fix: ordinary target
 decoding must remain the reference. The next candidate changes only Qwen4Exp's
