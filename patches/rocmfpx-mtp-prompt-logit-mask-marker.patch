@@ -1,0 +1,13 @@
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -3255,6 +3255,10 @@ private:
+                         // output buffer, and must not force vocabulary logits for every
+                         // prompt token. Qwen4Exp MTP prompt logits remain last-token-only.
++                        if (slot.need_embd_pre_norm() && slot.n_prompt_tokens_processed == 0) {
++                            LLAMA_LOG_DEBUG("Qwen4Exp MTP prompt-logit mask active\n");
++                        }
++
+                         common_batch_add(batch,
+                             cur_tok,
+                             slot.prompt.tokens.pos_next(),

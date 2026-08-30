@@ -41,12 +41,12 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.45.6"
+VERSION = "1.45.7"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
 QWEN4EXP_TARGET_EXPORT_ORDER_MARKER = "qwen4exp_mtp_h_pre_norm_post_logits"
-MTP_PROMPT_LOGIT_MASK_MARKER = "Qwen4Exp MTP prompt logits remain last-token-only"
+MTP_PROMPT_LOGIT_MASK_MARKER = "Qwen4Exp MTP prompt-logit mask active"
 QWEN4EXP_MTP_ROLLBACK_MARKER = "qwen4exp recurrent conv rollback snapshots enabled"
 QWEN4EXP_PLE_ROLLBACK_MARKER = "non-consecutive Qwen4Exp PLE history position"
 MTP_VERIFIER_STATE_MARKER = "MTP verifier state-correctness patch active"
@@ -4825,9 +4825,14 @@ def self_test() -> None:
     prompt_logit_mask_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-mtp-prompt-logit-mask.patch"
     assert prompt_logit_mask_patch.is_file()
     prompt_logit_mask_text = prompt_logit_mask_patch.read_text(encoding="utf-8")
-    assert MTP_PROMPT_LOGIT_MASK_MARKER in prompt_logit_mask_text
+    assert "Qwen4Exp MTP prompt logits remain last-token-only" in prompt_logit_mask_text
     assert "-                            slot.need_embd() || slot.need_embd_pre_norm());" in prompt_logit_mask_text
     assert "+                            slot.need_embd());" in prompt_logit_mask_text
+    prompt_logit_marker_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-mtp-prompt-logit-mask-marker.patch"
+    assert prompt_logit_marker_patch.is_file()
+    prompt_logit_marker_text = prompt_logit_marker_patch.read_text(encoding="utf-8")
+    assert MTP_PROMPT_LOGIT_MASK_MARKER in prompt_logit_marker_text
+    assert "slot.need_embd_pre_norm() && slot.n_prompt_tokens_processed == 0" in prompt_logit_marker_text
     host_checkpoint_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-host-checkpoints.patch"
     assert host_checkpoint_patch.is_file()
     host_checkpoint_patch_text = host_checkpoint_patch.read_text(encoding="utf-8")
@@ -4862,6 +4867,7 @@ def self_test() -> None:
     assert "rocmfpx-mtp-target-isolation.patch" in build_script
     assert "rocmfpx-qwen4exp-target-export-order.patch" in build_script
     assert "rocmfpx-mtp-prompt-logit-mask.patch" in build_script
+    assert "rocmfpx-mtp-prompt-logit-mask-marker.patch" in build_script
     assert 'SERVER_BINARY="$BUILD_DIR/bin/llama-server"' in build_script
     assert "libllama-server-impl.so" not in build_script
     assert "rocmfpx-host-checkpoints-v1-broken.patch" in build_script
