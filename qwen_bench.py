@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.45.2"
+VERSION = "1.45.3"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -55,6 +55,9 @@ QWEN4EXP_VISION_CHECKPOINT_MARKER = "Qwen4Exp vision MTP: recurrent rollback dis
 QWEN4EXP_TEXT_STRICT_MARKER = "Qwen/Qwen4Exp strict MTP: boundary-safe multi-row verification"
 REQUEST_SPEC_BYPASS_MARKER = "speculative decoding disabled for request; target hidden-state export bypassed"
 AUTO_MTMD_SPEC_BYPASS_MARKER = "multimodal request detected; speculative decoding disabled automatically"
+MTP_TARGET_EXPORT_MARKER = "diagnostic target hidden-state export forced"
+MTP_OUTER_SERIAL_MARKER = "preserved %zu true outer-decode verifier rows"
+MTP_TARGET_LOGIT_MARKER = "MTP target-logit fingerprint"
 SINGLE_VALUE_SERVER_OPTIONS = {
     "-m",
     "-md",
@@ -1605,16 +1608,21 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["llama_library"]["qwen4exp_ple_rollback_marker"] = (
                 QWEN4EXP_PLE_ROLLBACK_MARKER.encode("ascii") in llama_binary
             )
+            result["llama_library"]["mtp_outer_serial_marker"] = (
+                MTP_OUTER_SERIAL_MARKER.encode("ascii") in llama_binary
+            )
         except OSError:
             result["llama_library"]["qwen4exp_mtp_marker"] = False
             result["llama_library"]["qwen4exp_mtp_scheduling_marker"] = False
             result["llama_library"]["qwen4exp_mtp_rollback_marker"] = False
             result["llama_library"]["qwen4exp_ple_rollback_marker"] = False
+            result["llama_library"]["mtp_outer_serial_marker"] = False
     else:
         result["llama_library"]["qwen4exp_mtp_marker"] = False
         result["llama_library"]["qwen4exp_mtp_scheduling_marker"] = False
         result["llama_library"]["qwen4exp_mtp_rollback_marker"] = False
         result["llama_library"]["qwen4exp_ple_rollback_marker"] = False
+        result["llama_library"]["mtp_outer_serial_marker"] = False
     if common_library.is_file():
         try:
             common_binary = common_library.read_bytes()
@@ -1632,23 +1640,30 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
         result["common_library"]["mtp_verifier_state_marker"] = False
     if server.is_file():
         try:
+            server_binary = server.read_bytes()
             result["server"]["mtp_vision_resync_marker"] = (
-                MTP_VISION_RESYNC_MARKER.encode("ascii") in server.read_bytes()
+                MTP_VISION_RESYNC_MARKER.encode("ascii") in server_binary
             )
             result["server"]["qwen4exp_vision_strict_marker"] = (
-                QWEN4EXP_VISION_STRICT_MARKER.encode("ascii") in server.read_bytes()
+                QWEN4EXP_VISION_STRICT_MARKER.encode("ascii") in server_binary
             )
             result["server"]["qwen4exp_vision_checkpoint_marker"] = (
-                QWEN4EXP_VISION_CHECKPOINT_MARKER.encode("ascii") in server.read_bytes()
+                QWEN4EXP_VISION_CHECKPOINT_MARKER.encode("ascii") in server_binary
             )
             result["server"]["qwen4exp_text_strict_marker"] = (
-                QWEN4EXP_TEXT_STRICT_MARKER.encode("ascii") in server.read_bytes()
+                QWEN4EXP_TEXT_STRICT_MARKER.encode("ascii") in server_binary
             )
             result["server"]["request_spec_bypass_marker"] = (
-                REQUEST_SPEC_BYPASS_MARKER.encode("ascii") in server.read_bytes()
+                REQUEST_SPEC_BYPASS_MARKER.encode("ascii") in server_binary
             )
             result["server"]["auto_mtmd_spec_bypass_marker"] = (
-                AUTO_MTMD_SPEC_BYPASS_MARKER.encode("ascii") in server.read_bytes()
+                AUTO_MTMD_SPEC_BYPASS_MARKER.encode("ascii") in server_binary
+            )
+            result["server"]["mtp_target_export_marker"] = (
+                MTP_TARGET_EXPORT_MARKER.encode("ascii") in server_binary
+            )
+            result["server"]["mtp_target_logit_marker"] = (
+                MTP_TARGET_LOGIT_MARKER.encode("ascii") in server_binary
             )
         except OSError:
             result["server"]["mtp_vision_resync_marker"] = False
@@ -1657,6 +1672,8 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
             result["server"]["qwen4exp_text_strict_marker"] = False
             result["server"]["request_spec_bypass_marker"] = False
             result["server"]["auto_mtmd_spec_bypass_marker"] = False
+            result["server"]["mtp_target_export_marker"] = False
+            result["server"]["mtp_target_logit_marker"] = False
     else:
         result["server"]["mtp_vision_resync_marker"] = False
         result["server"]["qwen4exp_vision_strict_marker"] = False
@@ -1664,6 +1681,8 @@ def rocm_build_fingerprint(config: dict[str, Any]) -> dict[str, Any]:
         result["server"]["qwen4exp_text_strict_marker"] = False
         result["server"]["request_spec_bypass_marker"] = False
         result["server"]["auto_mtmd_spec_bypass_marker"] = False
+        result["server"]["mtp_target_export_marker"] = False
+        result["server"]["mtp_target_logit_marker"] = False
     return result
 
 
@@ -1804,12 +1823,29 @@ def inspect_request_spec_bypass_source(repo: pathlib.Path) -> dict[str, Any]:
     common_path = repo / "tools" / "server" / "server-common.h"
     text = server_path.read_text(encoding="utf-8", errors="ignore") if server_path.is_file() else ""
     common_text = common_path.read_text(encoding="utf-8", errors="ignore") if common_path.is_file() else ""
+    diagnostic_export_gate = all((
+        "bool target_export_enabled() const" in text,
+        "return can_speculate() ||" in text,
+        'mtp_diag_env_enabled("LLAMA_MTP_DIAG_FORCE_TARGET_EXPORT")' in text,
+    ))
     markers = {
         REQUEST_SPEC_BYPASS_MARKER: REQUEST_SPEC_BYPASS_MARKER in text,
         AUTO_MTMD_SPEC_BYPASS_MARKER: AUTO_MTMD_SPEC_BYPASS_MARKER in text,
         "request_n_max_gate": "task->params.speculative.draft.n_max > 0" in text,
-        "embedding_gate": "can_speculate() && common_speculative_need_embd(spec)" in text,
-        "pre_norm_embedding_gate": "can_speculate() && common_speculative_need_embd_pre_norm(spec)" in text,
+        "embedding_gate": (
+            "can_speculate() && common_speculative_need_embd(spec)" in text
+            or (
+                diagnostic_export_gate
+                and "target_export_enabled() && common_speculative_need_embd(spec)" in text
+            )
+        ),
+        "pre_norm_embedding_gate": (
+            "can_speculate() && common_speculative_need_embd_pre_norm(spec)" in text
+            or (
+                diagnostic_export_gate
+                and "target_export_enabled() && common_speculative_need_embd_pre_norm(spec)" in text
+            )
+        ),
         "batch_compatibility_gate": "can_speculate() == other_slot.can_speculate()" in text,
         "post_process_gate": "slot_batched->can_speculate() && !common_speculative_process" in text,
         "media_detection": "bool has_media() const" in common_text,
@@ -4747,6 +4783,12 @@ def self_test() -> None:
     assert "bool has_media() const" in auto_mtmd_bypass_text
     assert "task.tokens.has_media()" in auto_mtmd_bypass_text
     assert "LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL" in auto_mtmd_bypass_text
+    target_isolation_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-mtp-target-isolation.patch"
+    assert target_isolation_patch.is_file()
+    target_isolation_text = target_isolation_patch.read_text(encoding="utf-8")
+    assert MTP_TARGET_EXPORT_MARKER in target_isolation_text
+    assert MTP_OUTER_SERIAL_MARKER in target_isolation_text
+    assert MTP_TARGET_LOGIT_MARKER in target_isolation_text
     host_checkpoint_patch = pathlib.Path(__file__).with_name("patches") / "rocmfpx-host-checkpoints.patch"
     assert host_checkpoint_patch.is_file()
     host_checkpoint_patch_text = host_checkpoint_patch.read_text(encoding="utf-8")
@@ -4776,11 +4818,33 @@ def self_test() -> None:
     assert "rocmfpx-qwen4exp-mtp-state-correctness.patch" in build_script
     assert "rocmfpx-request-spec-bypass.patch" in build_script
     assert "rocmfpx-auto-mtmd-spec-bypass.patch" in build_script
+    assert "rocmfpx-mtp-target-isolation.patch" in build_script
     assert 'SERVER_BINARY="$BUILD_DIR/bin/llama-server"' in build_script
     assert "libllama-server-impl.so" not in build_script
     assert "rocmfpx-host-checkpoints-v1-broken.patch" in build_script
     assert "apply --reverse --check --unidiff-zero" in build_script
     with tempfile.TemporaryDirectory() as raw_tmp:
+        fake_source = pathlib.Path(raw_tmp) / "source"
+        fake_server_source = fake_source / "tools" / "server" / "server-context.cpp"
+        fake_common_source = fake_source / "tools" / "server" / "server-common.h"
+        fake_server_source.parent.mkdir(parents=True)
+        fake_server_source.write_text("\n".join((
+            REQUEST_SPEC_BYPASS_MARKER,
+            AUTO_MTMD_SPEC_BYPASS_MARKER,
+            "task->params.speculative.draft.n_max > 0",
+            "bool target_export_enabled() const",
+            "return can_speculate() ||",
+            'mtp_diag_env_enabled("LLAMA_MTP_DIAG_FORCE_TARGET_EXPORT")',
+            "target_export_enabled() && common_speculative_need_embd(spec)",
+            "target_export_enabled() && common_speculative_need_embd_pre_norm(spec)",
+            "can_speculate() == other_slot.can_speculate()",
+            "slot_batched->can_speculate() && !common_speculative_process",
+            "task.tokens.has_media()",
+            "LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL",
+        )), encoding="utf-8")
+        fake_common_source.write_text("bool has_media() const", encoding="utf-8")
+        assert inspect_request_spec_bypass_source(fake_source)["ready"] is True
+
         fake_bin = pathlib.Path(raw_tmp) / "bin"
         fake_bin.mkdir()
         fake_server = fake_bin / "llama-server"
@@ -4790,13 +4854,16 @@ def self_test() -> None:
             QWEN4EXP_VISION_CHECKPOINT_MARKER.encode("ascii") + b"\x00" +
             QWEN4EXP_TEXT_STRICT_MARKER.encode("ascii") + b"\x00" +
             REQUEST_SPEC_BYPASS_MARKER.encode("ascii") + b"\x00" +
-            AUTO_MTMD_SPEC_BYPASS_MARKER.encode("ascii")
+            AUTO_MTMD_SPEC_BYPASS_MARKER.encode("ascii") + b"\x00" +
+            MTP_TARGET_EXPORT_MARKER.encode("ascii") + b"\x00" +
+            MTP_TARGET_LOGIT_MARKER.encode("ascii")
         )
         (fake_bin / "libllama.so").write_bytes(
             QWEN4EXP_MTP_MARKER.encode("ascii") + b"\x00" +
             QWEN4EXP_MTP_SCHED_MARKER.encode("ascii") + b"\x00" +
             QWEN4EXP_MTP_ROLLBACK_MARKER.encode("ascii") + b"\x00" +
-            QWEN4EXP_PLE_ROLLBACK_MARKER.encode("ascii")
+            QWEN4EXP_PLE_ROLLBACK_MARKER.encode("ascii") + b"\x00" +
+            MTP_OUTER_SERIAL_MARKER.encode("ascii")
         )
         (fake_bin / "libllama-common.so").write_bytes(
             HOST_CHECKPOINT_MARKER.encode("ascii") + b"\x00" +
@@ -4811,8 +4878,11 @@ def self_test() -> None:
         assert fake_fingerprint["server"]["qwen4exp_text_strict_marker"] is True
         assert fake_fingerprint["server"]["request_spec_bypass_marker"] is True
         assert fake_fingerprint["server"]["auto_mtmd_spec_bypass_marker"] is True
+        assert fake_fingerprint["server"]["mtp_target_export_marker"] is True
+        assert fake_fingerprint["server"]["mtp_target_logit_marker"] is True
         assert fake_fingerprint["llama_library"]["qwen4exp_mtp_rollback_marker"] is True
         assert fake_fingerprint["llama_library"]["qwen4exp_ple_rollback_marker"] is True
+        assert fake_fingerprint["llama_library"]["mtp_outer_serial_marker"] is True
         assert fake_fingerprint["common_library"]["mtp_verifier_state_marker"] is True
         assert "server_impl_library" not in fake_fingerprint
     production_launcher = pathlib.Path(__file__).with_name("deployment") / "run-production.sh"
