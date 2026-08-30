@@ -1,62 +1,199 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-llama_server="${LLAMA_SERVER:-/srv/llm/src/llama-qwen4exp/build-vulkan/bin/llama-server}"
-model="${MODEL:-/srv/llm/models/qwen-flash-next/Qwen3.8-Flash-Next-Q4_0-ROCmFP4-STRIX-PLE16.gguf}"
+usage() {
+    cat <<'EOF'
+Usage: run-production.sh [--api-key KEY | --api-key-file PATH] [--check]
+
+Launch the allocation-qualified ROCm Qwen3.8 Flash Next server.
+
+Authentication priority:
+  1. --api-key / --api-key-file
+  2. LLAMA_API_KEY / LLAMA_ARG_API_KEY_FILE
+  3. QWEN_API_KEY / API_KEY (compatibility aliases)
+
+The API key is passed to llama-server through its native environment variable,
+not copied into the llama-server command line. Multiple comma-separated keys
+are accepted by llama-server. Use --check to validate without starting it.
+EOF
+}
+
+api_key_override=""
+api_key_file_override=""
+check_only=0
+
+while (( $# > 0 )); do
+    case "$1" in
+        --api-key)
+            if (( $# < 2 )) || [[ -z "$2" ]]; then
+                echo "--api-key requires a non-empty value" >&2
+                exit 64
+            fi
+            api_key_override="$2"
+            shift 2
+            ;;
+        --api-key=*)
+            api_key_override="${1#*=}"
+            if [[ -z "$api_key_override" ]]; then
+                echo "--api-key requires a non-empty value" >&2
+                exit 64
+            fi
+            shift
+            ;;
+        --api-key-file)
+            if (( $# < 2 )) || [[ -z "$2" ]]; then
+                echo "--api-key-file requires a path" >&2
+                exit 64
+            fi
+            api_key_file_override="$2"
+            shift 2
+            ;;
+        --api-key-file=*)
+            api_key_file_override="${1#*=}"
+            if [[ -z "$api_key_file_override" ]]; then
+                echo "--api-key-file requires a path" >&2
+                exit 64
+            fi
+            shift
+            ;;
+        --check)
+            check_only=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage >&2
+            exit 64
+            ;;
+    esac
+done
+
+llama_server="${LLAMA_SERVER:-/srv/llm/src/ROCmFPX-qwen4exp/build-hip10-dual/bin/llama-server}"
+model="${MODEL:-/srv/llm/models/qwen-flash-next/Qwen3.8-Flash-Next-Q4_0-ROCmFP4-STRIX.gguf}"
 mtp="${MTP:-/srv/llm/models/qwen-flash-next/mtp-Qwen3.8-Flash-Next-Q8_0.gguf}"
+mmproj="${MMPROJ:-/srv/llm/models/qwen-flash-next/mmproj-Qwen3.8-Flash-Next-BF16.gguf}"
 listen_host="${LLAMA_HOST:-127.0.0.1}"
 listen_port="${LLAMA_PORT:-8080}"
-target_split="${TARGET_SPLIT:-88,12}"
 threads="${THREADS:-16}"
-api_key="${API_KEY:-}"
+target_split="${TARGET_SPLIT:-88,12}"
 
-if [[ "$listen_host" != "127.0.0.1" && "$listen_host" != "::1" && -z "$api_key" ]]; then
-    echo "Refusing a non-loopback bind without API_KEY" >&2
+api_key="${api_key_override:-${LLAMA_API_KEY:-${QWEN_API_KEY:-${API_KEY:-}}}}"
+api_key_file="${api_key_file_override:-${LLAMA_ARG_API_KEY_FILE:-}}"
+
+if [[ -n "$api_key" && -n "$api_key_file" ]]; then
+    echo "Configure either an API key or an API-key file, not both" >&2
+    exit 64
+fi
+if [[ "$listen_host" != "127.0.0.1" && "$listen_host" != "::1" && -z "$api_key" && -z "$api_key_file" ]]; then
+    echo "Refusing a non-loopback bind without LLAMA_API_KEY or LLAMA_ARG_API_KEY_FILE" >&2
+    exit 64
+fi
+if [[ -n "$api_key_file" && ! -r "$api_key_file" ]]; then
+    echo "API-key file is not readable: $api_key_file" >&2
+    exit 66
+fi
+if [[ ! "$listen_port" =~ ^[0-9]+$ ]] || (( listen_port < 1 || listen_port > 65535 )); then
+    echo "LLAMA_PORT must be an integer from 1 through 65535" >&2
+    exit 64
+fi
+if [[ ! "$threads" =~ ^[0-9]+$ ]] || (( threads < 1 )); then
+    echo "THREADS must be a positive integer" >&2
+    exit 64
+fi
+if [[ "$target_split" != "88,12" ]]; then
+    echo "TARGET_SPLIT=$target_split is not the allocation-qualified production split (88,12)" >&2
     exit 64
 fi
 
-for required in "$llama_server" "$model" "$mtp"; do
+if [[ ! -x "$llama_server" ]]; then
+    echo "llama-server is missing or not executable: $llama_server" >&2
+    exit 66
+fi
+for required in "$model" "$mtp" "$mmproj"; do
     if [[ ! -f "$required" ]]; then
-        echo "Required file is missing: $required" >&2
+        echo "Required model file is missing: $required" >&2
         exit 66
     fi
 done
 
-auth_args=()
+# These placements are part of the qualified topology, not optional tuning.
+export ROCM_PATH="${ROCM_PATH:-/opt/rocm-10.0.0}"
+export HIP_PATH="${HIP_PATH:-$ROCM_PATH}"
+rocm_library_path="$ROCM_PATH/lib:$ROCM_PATH/lib/rocm_sysdeps/lib"
+case "${LD_LIBRARY_PATH:-}" in
+    "$rocm_library_path"|"$rocm_library_path":*) ;;
+    *) export LD_LIBRARY_PATH="$rocm_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+esac
+export LLAMA_CKPT_FORCE_HOST=1
+export MTMD_BACKEND_DEVICE=ROCm1
 if [[ -n "$api_key" ]]; then
-    auth_args=(--api-key "$api_key")
+    export LLAMA_API_KEY="$api_key"
+    unset QWEN_API_KEY API_KEY
+else
+    unset LLAMA_API_KEY QWEN_API_KEY API_KEY
+fi
+if [[ -n "$api_key_file" ]]; then
+    export LLAMA_ARG_API_KEY_FILE="$api_key_file"
+else
+    unset LLAMA_ARG_API_KEY_FILE
+fi
+for required_dir in "$ROCM_PATH" "$HIP_PATH" "$ROCM_PATH/lib"; do
+    if [[ ! -d "$required_dir" ]]; then
+        echo "Required ROCm 10 directory is missing: $required_dir" >&2
+        exit 66
+    fi
+done
+
+if (( check_only )); then
+    auth_mode="none (loopback only)"
+    [[ -n "$api_key" ]] && auth_mode="API key"
+    [[ -n "$api_key_file" ]] && auth_mode="API-key file"
+    printf 'Production configuration valid: ROCm, 1x256K, split %s, ubatch 1536, auth: %s\n' \
+        "$target_split" "$auth_mode"
+    exit 0
 fi
 
 exec "$llama_server" \
     -m "$model" \
     --host "$listen_host" \
     --port "$listen_port" \
-    --ctx-size 524288 \
-    --parallel 2 \
+    --ctx-size 262144 \
+    --parallel 1 \
     --no-kv-unified \
     --cont-batching \
+    --ctx-checkpoints 8 \
+    --checkpoint-every-n-tokens 32768 \
     --no-context-shift \
     --n-gpu-layers 999 \
-    --device Vulkan1,Vulkan0 \
+    --device ROCm0,ROCm1 \
     --main-gpu 0 \
     --split-mode layer \
     --tensor-split "$target_split" \
-    --override-tensor '^ple_ngram_embd\.[0-9]+\.weight$=CPU' \
-    --load-mode mmap \
+    --override-tensor '^blk\.[0-9]+\.ffn_(down|gate|up)_exps\.weight$=ROCm1,^per_layer_token_embd\.weight$=CPU' \
+    --mmap \
     --fit off \
     --flash-attn on \
     --cache-type-k f16 \
     --cache-type-v f16 \
     --batch-size 2048 \
-    --ubatch-size 2048 \
+    --ubatch-size 1536 \
     --cache-ram 0 \
     -md "$mtp" \
-    --spec-draft-device Vulkan0 \
+    --spec-draft-device ROCm0 \
     --spec-draft-ngl 999 \
     --spec-type draft-mtp \
-    --spec-draft-n-max 4 \
+    --spec-draft-n-max 3 \
     --spec-draft-p-min 0.75 \
+    --spec-draft-type-k f16 \
+    --spec-draft-type-v f16 \
+    --mmproj "$mmproj" \
+    --image-min-tokens 1024 \
+    --image-max-tokens 2240 \
+    --mmproj-offload \
     --threads "$threads" \
     --jinja \
-    --metrics \
-    "${auth_args[@]}"
+    --metrics

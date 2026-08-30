@@ -34,6 +34,26 @@ jobs:
           python -m json.tool prompts.json >/dev/null
           python -m json.tool vision_cases.json >/dev/null
           python -c 'import pathlib, qwen_bench; qwen_bench.load_config(pathlib.Path("matrix.json"))'
+      - name: Validate production deployment
+        run: |
+          bash -n deployment/run-production.sh
+          LLAMA_SERVER=/bin/true \
+          MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
+          ROCM_PATH=/usr HIP_PATH=/usr \
+          LLAMA_HOST=0.0.0.0 LLAMA_API_KEY=test-key \
+            deployment/run-production.sh --check
+          LLAMA_SERVER=/bin/true \
+          MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
+          ROCM_PATH=/usr HIP_PATH=/usr LLAMA_HOST=0.0.0.0 \
+            deployment/run-production.sh --api-key test-key --check
+          if LLAMA_SERVER=/bin/true \
+             MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
+             ROCM_PATH=/usr HIP_PATH=/usr \
+             LLAMA_HOST=0.0.0.0 \
+               deployment/run-production.sh --check; then
+            echo "non-loopback unauthenticated launch unexpectedly passed" >&2
+            exit 1
+          fi
 
   rocmfpx-integration-patches:
     runs-on: ubuntu-latest

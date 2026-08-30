@@ -602,7 +602,96 @@ per-device VRAM/GTT peaks, storage bytes read, and major faults. File-backed cac
 is reclaimable, so capacity conclusions should use `MemAvailable` and device
 allocations rather than process RSS alone.
 
-### Recommended two-user production deployment
+### Qualified ROCm production deployment
+
+The checked-in launcher now reproduces the configuration that actually passed
+the 256K allocation, near-full-context, text-MTP, and vision qualification:
+
+- joined ROCmFP4 model with its 51.2B PLE tensor CPU-mapped;
+- ROCm devices ordered `ROCm0,ROCm1`, with an 88/12 target split and routed
+  experts forced to the iGPU;
+- one 262,144-token slot, F16 target/draft KV, batch 2048, and ubatch 1536;
+- Q8_0 MTP n=3 on the RX 7900 XT;
+- eight host-resident prompt checkpoints at 32K-token intervals;
+- BF16 projector on the iGPU; and
+- no prompt-response RAM cache and no context shifting.
+
+This is deliberately a **one-slot** service. Multiple clients may connect, but
+requests queue behind the active slot. Two simultaneous 256K slots have not been
+qualified and are not silently enabled by the production launcher.
+
+For a foreground launch, provide authentication either as an argument or through
+llama-server's native environment variable:
+
+```bash
+./deployment/run-production.sh --api-key 'replace-with-a-long-random-key'
+
+# Equivalent, and avoids putting the key in llama-server's command line:
+LLAMA_API_KEY='replace-with-a-long-random-key' \
+  ./deployment/run-production.sh
+
+# Validate paths, placement, authentication, and scalar settings without loading:
+LLAMA_API_KEY='replace-with-a-long-random-key' \
+  ./deployment/run-production.sh --check
+```
+
+The command-line form is converted to `LLAMA_API_KEY` before `exec`, so the
+secret is not present in the resulting llama-server argument list. It can still
+be retained by shell history; use the environment or an API-key file for normal
+operation. `QWEN_API_KEY` and the old `API_KEY` name are accepted as compatibility
+aliases. The launcher refuses a non-loopback bind without an API key or key file
+and rejects target splits other than the qualified 88/12 layout. It also pins
+the process to `/opt/rocm-10.0.0` by default so systemd cannot resolve a different
+host ROCm installation.
+
+Install the launcher, configuration, and hardened systemd unit:
+
+```bash
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+sudo install -Dm0755 deployment/run-production.sh \
+  /usr/local/libexec/qwen-flash-next
+sudo install -Dm0644 deployment/qwen-flash-next.service \
+  /etc/systemd/system/qwen-flash-next.service
+sudo install -Dm0640 -o root -g jdillman \
+  deployment/qwen-flash-next.env.example /etc/qwen-flash-next.env
+sudoedit /etc/qwen-flash-next.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now qwen-flash-next.service
+systemctl status qwen-flash-next.service --no-pager
+journalctl -u qwen-flash-next.service -n 100 --no-pager
+```
+
+For the service, either set `LLAMA_API_KEY` in the root-managed environment file
+or put one key per line in a separate mode-0640 file and set
+`LLAMA_ARG_API_KEY_FILE` to its path. The key-file form is preferred. Leave the
+unused setting empty. The unit validates the complete configuration with
+`--check` before every start and does not restart-loop on configuration or
+missing-file exit codes.
+
+To prepare the preferred key file without placing the key in a command line:
+
+```bash
+sudo install -m0640 -o root -g jdillman /dev/null \
+  /etc/qwen-flash-next.keys
+sudoedit /etc/qwen-flash-next.keys
+# Then set LLAMA_ARG_API_KEY_FILE=/etc/qwen-flash-next.keys in the environment file.
+```
+
+Keep `LLAMA_HOST=127.0.0.1` behind an authenticated TLS reverse proxy or a trusted
+Tailscale path when possible. An API key authenticates requests but does not
+encrypt traffic. If binding directly to another interface, set both
+`LLAMA_HOST` and authentication before starting the unit.
+
+Vision calls to this shared text/vision service must include
+`"speculative.n_max": 0`; that invokes the qualified target-only vision path
+while leaving n=3 MTP loaded and available for text requests. Metrics remain
+available at `/metrics`.
+
+### Historical, unqualified two-user Vulkan work
+
+The following experiments document the earlier concurrency investigation. They
+are retained for reproducibility, but they are not the recommended deployment
+and the old Vulkan topology must not be substituted into the service above.
 
 The production candidate keeps the split PLE16 table CPU-mapped, puts the Q8 MTP
 sidecar on the RX 7900 XT, uses F16 target KV, and gives each of two independent
@@ -699,22 +788,8 @@ measurement, so the near-full case retains margin for 256 generated tokens insid
 each 262,144-token slot. Slot KV is erased after every pair without dropping the
 model mapping or Linux page cache.
 
-After the chosen split passes, install the checked-in systemd deployment:
-
-```bash
-sudo cp deployment/qwen-flash-next.env.example /etc/qwen-flash-next.env
-sudo cp deployment/qwen-flash-next.service /etc/systemd/system/
-sudo chmod 640 /etc/qwen-flash-next.env
-sudo systemctl daemon-reload
-sudo systemctl enable --now qwen-flash-next.service
-systemctl status qwen-flash-next.service
-```
-
-Edit `/etc/qwen-flash-next.env` before starting if capacity selected 90/10, the
-paths differ, or the server must listen somewhere other than
-`127.0.0.1:8080`. The launcher refuses any non-loopback bind without `API_KEY`.
-Keep the service on loopback behind an authenticated reverse proxy or Tailscale
-when possible. Metrics are available from llama-server's `/metrics` endpoint.
+The historical install instructions were removed. Use the qualified ROCm
+launcher and systemd procedure in the preceding section.
 
 ### Focused 7900 XT prefill screen
 
