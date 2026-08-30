@@ -189,26 +189,40 @@ multimodal boundary tracked by llama.cpp
 MTP-specific failure in
 [issue #22867](https://github.com/ggml-org/llama.cpp/issues/22867).
 
-The pinned ROCmFPX build now carries a narrow experimental workaround. It skips
-only the invalid raw-image decode on a target-conditioned draft context. The
-target context still decodes the image normally and verifies every output token;
-the existing MTP boundary-resync path seeds the next draft boundary. This should
-preserve correctness, but the first proposal after an image may be rejected and
-acceptance must be measured rather than assumed. Rebuild, re-audit, and repeat
-only the formerly crashing cell:
+The first narrow workaround skips only the invalid raw-image decode on a
+target-conditioned draft context. The target context still decodes the image and
+the existing MTP boundary-resync path seeds the next draft boundary. Run
+`20260829-215638-rocm-vision-mtp-resync-smoke` proved that this removes the crash,
+but it did **not** prove correctness: both warm-up and measured responses read
+`UNSLOTH 1` instead of `UNSLOTH 42` (6/7 anchors), despite 84.1% MTP acceptance.
+The result was also slower than the earlier target-only control on this short
+answer (24.39 versus 32.39 decode tok/s).
+
+Because the requests are greedy, an ungrounded draft should reduce acceptance,
+not change the target answer. The remaining divergence is therefore tested at
+the target verifier. Qwen4Exp is recurrent, but the pinned server's existing
+single-row exact-verification path recognized HY3 only. The second patch enables
+that same serial target verification automatically for Qwen4Exp when both MTP
+and a projector are loaded. Text-only MTP is unchanged; `--no-spec-mtp-strict`
+can still disable the diagnostic path. Rebuild, re-audit, and run the matched A/B:
 
 ```bash
 ./build-rocm10-dual.sh
 python3 qwen_bench.py rocm-audit --run-ops
-python3 qwen_bench.py preflight --tier rocm-vision-mtp-resync-smoke
-./run-bench.sh --tier rocm-vision-mtp-resync-smoke --fail-fast
+python3 qwen_bench.py preflight --tier rocm-vision-mtp-strict-ab
+./run-bench.sh --tier rocm-vision-mtp-strict-ab --fail-fast
 ```
 
-The preflight requires both a source marker and the compiled marker in
-`llama-server`, so the old crashing server cannot accidentally be
-benchmarked. Every MTP vision request must also emit the runtime resync marker or
-the harness fails the cell. If the focused cell passes its 100% anchor gate, run the complete
-fixture set. This final tier allocates the native 262144-token context and uses
+The A/B uses two fresh-server rounds of the same image, target model, iGPU BF16
+projector, sampler, and 64-token budget. The target-only arm is the explicit output-hash
+baseline. The MTP arm must both emit the runtime resync marker and enable the
+compiled Qwen4Exp single-row verification marker; 100% anchors and hash agreement
+are the correctness criteria. Compare decode speed only after those pass. If
+strict verification restores correctness but loses to target-only, production
+vision should automatically omit MTP rather than accept a quality regression.
+
+Only after the strict A/B passes should the complete fixture set run. This final
+tier allocates the native 262144-token context and uses
 the selected production topology: 88/12 target split, ubatch 1536, CPU-mmap PLE,
 host checkpoints, iGPU BF16 projector, F16 target/draft KV, and n=3 Q8_0 MTP on
 the 7900 XT. Its no-MTP arm is otherwise matched:
@@ -220,10 +234,9 @@ python3 qwen_bench.py preflight --tier rocm-vision
 
 Both ROCm tiers explicitly use F16 target KV and F16 draft KV. Q8 draft KV is not
 present. The Q8 projector is also excluded because the earlier Vulkan run failed
-the OCR quality gate; that is independent of the draft-KV decision. If the
-resync workaround does not pass all three image fixtures, production vision must
-remain target-only/no-MTP rather than treating a server crash as a placement
-problem.
+the OCR quality gate; that is independent of the draft-KV decision. Until the
+strict A/B reaches 100% anchors and matches the target-only greedy output,
+production vision remains target-only/no-MTP.
 
 The projector is deliberately not placed on the 7900 XT: its scarce VRAM is reserved
 for MTP and the selected target tensors. CPU versus iGPU projector placement remains
@@ -695,14 +708,17 @@ silently change the experiment. The build script refuses another revision, the
 wrong source family, an incompatible existing CMake cache, or a library that does
 not contain both required code objects. It also applies
 `patches/rocmfpx-qwen4exp-mtp.patch`, its hidden-state scheduling follow-up,
-`patches/rocmfpx-mtp-vision-resync.patch`, and
+`patches/rocmfpx-mtp-vision-resync.patch`,
+`patches/rocmfpx-qwen4exp-vision-strict.patch`, and
 `patches/rocmfpx-host-checkpoints.patch` idempotently. This also upgrades a source
 tree that already has either earlier MTP patch. Version 1.36.1 also detects and
 removes the malformed zero-context host-checkpoint patch shipped in commit
 `dc18127` before applying its contextual replacement. The first two patches add the missing
 Qwen4Exp MTP sidecar loader/graph integration. The vision-resync patch prevents a
 target-conditioned draft from decoding tokenless projector embeddings directly;
-it remains experimental until the focused vision tier passes. The final patch adds an opt-in
+the strict follow-up serializes greedy target verification only for Qwen4Exp MTP
+with a projector loaded. Both remain experimental until the focused vision A/B
+passes. The final patch adds an opt-in
 `LLAMA_CKPT_FORCE_HOST=1` path that clears the device-storage flag only for prompt
 checkpoint save/restore, retaining those checkpoints in host/unified RAM instead
 of discrete-GPU VRAM. None replaces the ROCmFP4 kernels or changes Vulkan. The
@@ -716,6 +732,7 @@ against `/opt/rocm-10.0.0` with:
 - `test-backend-ops` and compile-command metadata enabled;
 - a compiled Qwen4Exp MTP marker in `libllama.so`;
 - a compiled MTP multimodal-resync marker in `llama-server`;
+- a compiled Qwen4Exp vision single-row verification marker in `llama-server`;
 - a compiled host-checkpoint marker in `libllama-common.so`.
 
 Collect the new build evidence, then run the numerical gate:

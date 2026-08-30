@@ -1493,7 +1493,7 @@
       "request_timeout_s": 1200
     },
     "rocm-vision-mtp-resync-smoke": {
-      "description": "Focused regression test for the Qwen4Exp MTP multimodal resync patch: repeat only the formerly crashing BF16 iGPU-projector plus n=3 MTP cell.",
+      "description": "Compatibility regression for the Qwen4Exp MTP multimodal resync path. This proves the former crash is gone but does not replace the strict target-only/MTP quality A/B.",
       "mode": "vision",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
@@ -1518,6 +1518,38 @@
       "vision_min_anchor_score": 1.0,
       "warmups": 1,
       "rounds": 1,
+      "settle_seconds": 2,
+      "telemetry_interval_s": 0.2,
+      "startup_timeout_s": 1200,
+      "request_timeout_s": 1200
+    },
+    "rocm-vision-mtp-strict-ab": {
+      "description": "Exact greedy A/B for the Qwen4Exp vision MTP strict-verification patch: matched iGPU BF16 projector target-only control versus n=3 MTP on the 7900 XT.",
+      "mode": "vision",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "require_rocm_mtp_vision": true,
+      "cache_state": "hot",
+      "experiments": [
+        "vision_bf16_igpu_hip_no_mtp_strict_ab",
+        "vision_bf16_igpu_hip_mtp_n3_strict"
+      ],
+      "vision_cases": [
+        "shapes"
+      ],
+      "depths": [
+        0
+      ],
+      "ctx_size": 8192,
+      "n_predict": 64,
+      "request": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "vision_min_anchor_score": 1.0,
+      "warmups": 1,
+      "rounds": 2,
       "settle_seconds": 2,
       "telemetry_interval_s": 0.2,
       "startup_timeout_s": 1200,
@@ -3306,6 +3338,18 @@
         "--spec-draft-type-v",
         "f16"
       ]
+    },
+    {
+      "name": "vision_bf16_igpu_hip_no_mtp_strict_ab",
+      "description": "Target-only baseline for exact greedy Qwen4Exp vision MTP verification, using the same iGPU BF16 projector topology.",
+      "extends": "vision_bf16_igpu_hip_no_mtp",
+      "baseline": true
+    },
+    {
+      "name": "vision_bf16_igpu_hip_mtp_n3_strict",
+      "description": "n=3 Q8_0 MTP candidate with automatic Qwen4Exp vision single-row target verification.",
+      "extends": "vision_bf16_igpu_hip_mtp_n3",
+      "baseline": false
     },
     {
       "name": "vision_bf16_igpu_prod_hip_no_mtp",

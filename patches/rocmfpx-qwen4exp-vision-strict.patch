@@ -1,0 +1,78 @@
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -735,6 +735,7 @@ struct server_context_impl {
+     common_speculative_ptr spec;
+     bool strict_hy3_mtp_verification = false;
+     bool strict_qwen_mtp_verification = false;
++    bool strict_qwen4exp_vision_mtp_verification = false;
+ 
+     bool add_bos_token = true;
+ 
+@@ -829,6 +830,7 @@ struct server_context_impl {
+             const bool is_qwen35 =
+                 has_model_arch &&
+                 (strcmp(model_arch, "qwen35") == 0 || strcmp(model_arch, "qwen35moe") == 0);
++            const bool is_qwen4exp = has_model_arch && strcmp(model_arch, "qwen4exp") == 0;
+             const bool has_mtp =
+                 std::find(params_base.speculative.types.begin(),
+                           params_base.speculative.types.end(),
+@@ -836,6 +838,9 @@ struct server_context_impl {
+ 
+             strict_hy3_mtp_verification = is_hy3 && has_mtp && params_base.speculative.mtp_strict;
+             strict_qwen_mtp_verification = is_qwen35 && has_mtp && params_base.speculative.mtp_strict_qwen;
++            strict_qwen4exp_vision_mtp_verification =
++                is_qwen4exp && has_mtp && !params_base.mmproj.path.empty() &&
++                params_base.speculative.mtp_strict;
+ 
+             if (params_base.speculative.mtp_strict_qwen && !strict_qwen_mtp_verification) {
+                 SRV_ERR("%s", "--spec-mtp-strict-qwen requires a qwen35 or qwen35moe target with draft-mtp enabled\n");
+@@ -865,6 +870,16 @@ struct server_context_impl {
+             } else if (is_qwen35 && has_mtp) {
+                 SRV_WRN("%s", "Qwen MTP strict verification is disabled; greedy output may diverge from no-spec decoding (enable --spec-mtp-strict-qwen)\n");
+             }
++
++            if (strict_qwen4exp_vision_mtp_verification) {
++                if (params_base.n_parallel != 1) {
++                    SRV_ERR("%s", "Qwen4Exp vision MTP strict verification requires a single server slot; restart with -np 1 or use --no-spec-mtp-strict\n");
++                    return false;
++                }
++                SRV_WRN("%s", "Qwen4Exp vision MTP: single-row target verification enabled for exact greedy output\n");
++            } else if (is_qwen4exp && has_mtp && !params_base.mmproj.path.empty()) {
++                SRV_WRN("%s", "Qwen4Exp vision MTP strict verification is disabled; greedy output may diverge from no-spec decoding\n");
++            }
+         }
+ 
+         if (params_base.speculative.has_dft()) {
+@@ -3321,25 +3336,25 @@ struct server_context_impl {
+                 batch.logits   + i,
+             };
+ 
+-            bool has_hy3_mtp_verification = false;
+-            if (strict_hy3_mtp_verification) {
++            bool has_single_row_mtp_verification = false;
++            if (strict_hy3_mtp_verification || strict_qwen4exp_vision_mtp_verification) {
+                 for (const auto & slot : slots) {
+                     if (!slot.task || slot.task->params.sampling.temp > 0.0f) {
+                         continue;
+                     }
+ 
+-                    has_hy3_mtp_verification = std::any_of(
++                    has_single_row_mtp_verification = std::any_of(
+                         slot.spec_i_batch.begin(),
+                         slot.spec_i_batch.end(),
+                         [i, n_tokens](int32_t idx) {
+                             return idx >= i && idx < i + n_tokens;
+                         });
+-                    if (has_hy3_mtp_verification) {
++                    if (has_single_row_mtp_verification) {
+                         break;
+                     }
+                 }
+             }
+ 
+-            const int ret = has_hy3_mtp_verification
++            const int ret = has_single_row_mtp_verification
+                 ? llama_decode_with_ubatch(ctx_tgt, batch_view, 1)
+                 : llama_decode(ctx_tgt, batch_view);
+ 
