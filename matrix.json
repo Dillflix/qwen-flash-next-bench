@@ -1588,15 +1588,15 @@
       "request_timeout_s": 1200
     },
     "rocm-vision": {
-      "description": "Two-round BF16 ROCm vision validation at the native 256K allocation using the production 88/12, ubatch-1536 placement, iGPU projector, and an otherwise matched no-MTP control.",
+      "description": "Full BF16 ROCm vision validation at the native 256K allocation: the production server keeps n=3 MTP loaded for text, bypasses it per vision request, and is compared with a matched target-only control.",
       "mode": "vision",
       "require_rocm_audit": true,
       "require_rocm_mtp": true,
-      "require_rocm_mtp_vision": true,
+      "require_rocm_request_spec_bypass": true,
       "cache_state": "hot",
       "experiments": [
         "vision_bf16_igpu_prod_hip_no_mtp",
-        "vision_bf16_igpu_prod_hip_mtp_n3"
+        "vision_bf16_igpu_prod_hip_mtp_loaded_request_disabled"
       ],
       "vision_cases": [
         "shapes",
@@ -3444,7 +3444,7 @@
     },
     {
       "name": "vision_bf16_igpu_prod_hip_mtp_n3",
-      "description": "Production 256K placement with BF16 projector on the iGPU and n=3 Q8_0 MTP on the 7900 XT; target and draft KV remain F16.",
+      "description": "Diagnostic strict-verification topology at 256K with BF16 projector on the iGPU and n=3 Q8_0 MTP on the 7900 XT; retained for investigation, not production.",
       "extends": "prod_hip_256k_tail_88_12_ub1536",
       "baseline": false,
       "env": {
@@ -3459,6 +3459,29 @@
         "2240",
         "--mmproj-offload",
         "--spec-mtp-strict-qwen4exp-vision"
+      ]
+    },
+    {
+      "name": "vision_bf16_igpu_prod_hip_mtp_loaded_request_disabled",
+      "description": "Production 256K server topology with n=3 Q8_0 MTP retained on the 7900 XT for text, while each vision request disables speculative work completely with speculative.n_max=0.",
+      "extends": "prod_hip_256k_tail_88_12_ub1536",
+      "baseline": false,
+      "require_zero_draft": true,
+      "require_spec_bypass_marker": true,
+      "env": {
+        "MTMD_BACKEND_DEVICE": "ROCm1"
+      },
+      "request": {
+        "speculative.n_max": 0
+      },
+      "args_append": [
+        "--mmproj",
+        "{mmproj_bf16}",
+        "--image-min-tokens",
+        "1024",
+        "--image-max-tokens",
+        "2240",
+        "--mmproj-offload"
       ]
     }
   ]

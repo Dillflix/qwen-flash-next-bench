@@ -265,11 +265,19 @@ the request log lacks the compiled bypass marker. Production can use one loaded
 server for fast text MTP and exact target-only vision only if this arm matches
 the control hash and recovers target-only speed (allowing only normal run noise).
 
-Do not run the complete fixture set until the per-request-disable A/B passes.
-That result determines whether the final 262144-token tier should keep the MTP
-sidecar loaded and bypass it for vision, or launch without MTP. The remaining
+The patched A/B passed. Across two fresh-server rounds, target-only median decode
+was 32.17 tok/s and the MTP-loaded/request-disabled median was 32.20 tok/s.
+Median prefill was 399.13 versus 397.69 tok/s (-0.36%), and median image time was
+2370.5 versus 2378.5 ms (+0.34%). Both arms retained 100% anchors; the candidate
+reported zero drafted tokens and emitted the required bypass marker. The former
+21.8% decode penalty is gone.
+
+The final 262144-token tier therefore keeps the sidecar loaded on the 7900 XT
+for n=3 text MTP and sends `"speculative.n_max": 0` on vision requests. It tests
+all three fixtures against a matched target-only control. The remaining
 production topology stays fixed: 88/12 target split, ubatch 1536, CPU-mmap PLE,
-host checkpoints, iGPU BF16 projector, and F16 target/draft KV.
+host checkpoints, iGPU BF16 projector, and F16 target/draft KV. No additional
+runtime rebuild is required after the passing patched A/B:
 
 ```bash
 python3 qwen_bench.py preflight --tier rocm-vision
@@ -278,9 +286,9 @@ python3 qwen_bench.py preflight --tier rocm-vision
 
 Both ROCm tiers explicitly use F16 target KV and F16 draft KV. Q8 draft KV is not
 present. The Q8 projector is also excluded because the earlier Vulkan run failed
-the OCR quality gate; that is independent of the draft-KV decision. Until the
-strict A/B reaches 100% anchors and matches the target-only greedy output,
-production vision remains target-only/no-MTP.
+the OCR quality gate; that is independent of the draft-KV decision. Strict
+checkpoint-backed vision MTP remains available only as a diagnostic: production
+vision is target-only execution inside the shared MTP-loaded server.
 
 The projector is deliberately not placed on the 7900 XT: its scarce VRAM is reserved
 for MTP and the selected target tensors. CPU versus iGPU projector placement remains

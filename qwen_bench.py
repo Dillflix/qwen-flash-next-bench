@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.40.0"
+VERSION = "1.41.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -4509,14 +4509,15 @@ def self_test() -> None:
         expanded_shipped_config, request_disable_tier, request_disable_experiments[1],
     ).get("speculative.n_max") == 0
     rocm_vision_full = expanded_shipped_config["tiers"]["rocm-vision"]
-    assert rocm_vision_full.get("require_rocm_mtp_vision") is True
+    assert rocm_vision_full.get("require_rocm_mtp_vision") is not True
+    assert rocm_vision_full.get("require_rocm_request_spec_bypass") is True
     assert int(rocm_vision_full["ctx_size"]) == 262144
     rocm_vision_full_experiments = select_experiments(
         expanded_shipped_config, rocm_vision_full, None,
     )
     assert [item["name"] for item in rocm_vision_full_experiments] == [
         "vision_bf16_igpu_prod_hip_no_mtp",
-        "vision_bf16_igpu_prod_hip_mtp_n3",
+        "vision_bf16_igpu_prod_hip_mtp_loaded_request_disabled",
     ]
     for item in rocm_vision_full_experiments:
         full_args = server_command(expanded_shipped_config, rocm_vision_full, item)[1:]
@@ -4543,7 +4544,12 @@ def self_test() -> None:
     assert option_value(full_mtp_args, "--spec-draft-n-max") == "3"
     assert option_value(full_mtp_args, "--spec-draft-type-k") == "f16"
     assert option_value(full_mtp_args, "--spec-draft-type-v") == "f16"
-    assert "--spec-mtp-strict-qwen4exp-vision" in full_mtp_args
+    assert "--spec-mtp-strict-qwen4exp-vision" not in full_mtp_args
+    assert rocm_vision_full_experiments[1].get("require_zero_draft") is True
+    assert rocm_vision_full_experiments[1].get("require_spec_bypass_marker") is True
+    assert merged_request(
+        expanded_shipped_config, rocm_vision_full, rocm_vision_full_experiments[1],
+    ).get("speculative.n_max") == 0
     for tier_name in (
         "rocm-ple-ssd",
         "rocm-ple-storage-screen",
