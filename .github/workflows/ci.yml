@@ -26,6 +26,7 @@ jobs:
           python -m py_compile qwen_rocm.py
           python -m py_compile qwen_inventory.py
           python -m py_compile qwen_mtp_diag.py
+          python -m py_compile qwen_prefix_diag.py
           python -m py_compile deployment/prime-production.py
           python qwen_bench.py self-test
           python qwen_quant.py self-test
@@ -33,6 +34,7 @@ jobs:
           python qwen_rocm.py self-test
           python qwen_inventory.py self-test
           python qwen_mtp_diag.py self-test
+          python qwen_prefix_diag.py self-test
           python deployment/prime-production.py --self-test
           python -m json.tool matrix.json >/dev/null
           python -m json.tool prompts.json >/dev/null
@@ -51,6 +53,13 @@ jobs:
             deployment/run-production.sh --check
           LLAMA_SERVER=/bin/true \
           MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
+          ROCM_PATH=/usr HIP_PATH=/usr REQUIRE_AUTO_VISION_BYPASS=0 \
+          LLAMA_HOST=127.0.0.1 LLAMA_MULTI_SLOT_DIAGNOSTIC=1 \
+          LLAMA_PARALLEL=2 LLAMA_CONTEXT_SIZE=16384 LLAMA_MTP_MODE=off \
+          LLAMA_SLOT_SAVE_PATH=/tmp \
+            deployment/run-production.sh --check
+          LLAMA_SERVER=/bin/true \
+          MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
           ROCM_PATH=/usr HIP_PATH=/usr REQUIRE_AUTO_VISION_BYPASS=0 LLAMA_HOST=0.0.0.0 \
             deployment/run-production.sh --api-key test-key --check
           if LLAMA_SERVER=/bin/true \
@@ -59,6 +68,14 @@ jobs:
              LLAMA_HOST=0.0.0.0 \
                deployment/run-production.sh --check; then
             echo "non-loopback unauthenticated launch unexpectedly passed" >&2
+            exit 1
+          fi
+          if LLAMA_SERVER=/bin/true \
+             MODEL=/etc/hosts MTP=/etc/hosts MMPROJ=/etc/hosts \
+             ROCM_PATH=/usr HIP_PATH=/usr REQUIRE_AUTO_VISION_BYPASS=0 \
+             LLAMA_HOST=127.0.0.1 LLAMA_PARALLEL=2 LLAMA_MTP_MODE=off \
+               deployment/run-production.sh --check; then
+            echo "unqualified parallel launch unexpectedly passed" >&2
             exit 1
           fi
           if LLAMA_SERVER=/bin/true \

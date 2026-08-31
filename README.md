@@ -635,6 +635,78 @@ This is deliberately a **one-slot** service. Multiple clients may connect, but
 requests queue behind the active slot. Two simultaneous 256K slots have not been
 qualified and are not silently enabled by the production launcher.
 
+### Two-slot prefix-state qualification
+
+`qwen_prefix_diag.py` is the first gate for changing that constraint. It first
+runs a short target-only A/B/A sequence against two explicitly selected slots:
+
+1. establish conversation A in slot 0;
+2. establish conversation B in slot 1;
+3. resume A, resume B, then resume A again;
+4. erase slot 1 and replay the final A request cold there.
+
+Every resumed request must report a substantial prompt-cache hit, every cold
+request must report zero cached prompt tokens, the server must report the
+requested slot, and A/B canaries must not cross slots. The final cached A output
+must match the request-identical cold output at the exact generated-token ID and
+byte level. This distinguishes real per-slot state retention from a superficially
+fast but contaminated response.
+
+It then erases both slots and repeats A/B/A without sending `id_slot`. The
+server's LCP scheduler must establish A and B in distinct slots and route each
+resume back to the correct original slot. This second phase models ordinary
+OpenWebUI callers, which should not need to know llama-server's slot numbers.
+
+The production launcher exposes the required topology only when
+`LLAMA_MULTI_SLOT_DIAGNOSTIC=1`. It remains target-only and rejects MTP because
+the Qwen4Exp PLE/recurrent lifecycle has not yet been qualified across multiple
+live target contexts. A 16K total context gives each of two slots 8K for this
+inexpensive first gate:
+
+```bash
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+sudo systemctl stop qwen-flash-next
+tmux kill-session -t qwen-prefix-target 2>/dev/null || true
+install -d -m0700 /tmp/qwen-prefix-diag-slots
+: > /tmp/qwen-prefix-target-server.log
+
+tmux new-session -d -s qwen-prefix-target \
+  "bash -lc 'cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench; set -a; source /etc/qwen-flash-next.env; set +a; export LLAMA_MTP_MODE=off LLAMA_MULTI_SLOT_DIAGNOSTIC=1 LLAMA_PARALLEL=2 LLAMA_CONTEXT_SIZE=16384 LLAMA_SLOT_SAVE_PATH=/tmp/qwen-prefix-diag-slots; exec ./deployment/run-production.sh >>/tmp/qwen-prefix-target-server.log 2>&1'"
+
+until grep -q "listening on" /tmp/qwen-prefix-target-server.log; do
+  tmux has-session -t qwen-prefix-target 2>/dev/null || {
+    tail -n 200 /tmp/qwen-prefix-target-server.log
+    exit 1
+  }
+  sleep 5
+done
+
+read -rsp "API key: " QWEN_TEST_API_KEY
+echo
+export QWEN_TEST_API_KEY
+python3 qwen_prefix_diag.py run \
+  --url http://127.0.0.1:8080 \
+  --server-label target-2x8k \
+  --server-log /tmp/qwen-prefix-target-server.log \
+  --n-max 0 \
+  --require-pass
+unset QWEN_TEST_API_KEY
+
+RUN=$(ls -dt results/*-prefix-slots-target-2x8k | head -1)
+python3 qwen_bench.py archive "$RUN"
+```
+
+Stop the diagnostic server and restore systemd after packaging the result:
+
+```bash
+tmux kill-session -t qwen-prefix-target
+sudo systemctl start qwen-flash-next
+```
+
+Passing this target-only gate proves ordinary two-slot KV/prefix isolation. It
+does **not** qualify strict MTP, slot persistence/import, context shifting, or
+two 256K allocations. Those remain separate gates rather than assumptions.
+
 For a foreground launch, provide authentication either as an argument or through
 llama-server's native environment variable:
 

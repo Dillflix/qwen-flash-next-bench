@@ -24,6 +24,11 @@ strict verification with single-row verification and full-state checkpoints.
 Set LLAMA_SLOT_SAVE_PATH to an existing writable absolute directory only for
 diagnostics that use the slots erase endpoint. It is empty by default because
 production does not import or persist slot state.
+
+LLAMA_MULTI_SLOT_DIAGNOSTIC=1 permits a target-only, explicitly non-production
+two-slot launch. Set LLAMA_PARALLEL=2, a total LLAMA_CONTEXT_SIZE, and an
+LLAMA_SLOT_SAVE_PATH. MTP is rejected in this mode until per-slot Qwen4Exp
+recurrent/PLE lifecycle handling passes the dedicated A/B/A diagnostic.
 EOF
 }
 
@@ -90,6 +95,8 @@ listen_port="${LLAMA_PORT:-8080}"
 threads="${THREADS:-16}"
 target_split="${TARGET_SPLIT:-88,12}"
 context_size="${LLAMA_CONTEXT_SIZE:-262144}"
+parallel="${LLAMA_PARALLEL:-1}"
+multi_slot_diagnostic="${LLAMA_MULTI_SLOT_DIAGNOSTIC:-0}"
 require_auto_vision_bypass="${REQUIRE_AUTO_VISION_BYPASS:-1}"
 mtp_mode="${LLAMA_MTP_MODE:-off}"
 slot_save_path="${LLAMA_SLOT_SAVE_PATH:-}"
@@ -121,6 +128,14 @@ if [[ ! "$context_size" =~ ^[0-9]+$ ]] || (( context_size < 4096 )); then
     echo "LLAMA_CONTEXT_SIZE must be an integer of at least 4096" >&2
     exit 64
 fi
+if [[ ! "$parallel" =~ ^[0-9]+$ ]] || (( parallel < 1 )); then
+    echo "LLAMA_PARALLEL must be a positive integer" >&2
+    exit 64
+fi
+if [[ "$multi_slot_diagnostic" != "0" && "$multi_slot_diagnostic" != "1" ]]; then
+    echo "LLAMA_MULTI_SLOT_DIAGNOSTIC must be 0 or 1" >&2
+    exit 64
+fi
 if [[ "$target_split" != "88,12" ]]; then
     echo "TARGET_SPLIT=$target_split is not the allocation-qualified production split (88,12)" >&2
     exit 64
@@ -138,7 +153,24 @@ case "$mtp_mode" in
 esac
 mtp_enabled=0
 [[ "$mtp_mode" != "off" ]] && mtp_enabled=1
-if [[ "$mtp_mode" != "checkpoint-diagnostic" && "$context_size" != "262144" ]]; then
+if [[ "$multi_slot_diagnostic" == "1" ]]; then
+    if (( parallel < 2 )); then
+        echo "LLAMA_MULTI_SLOT_DIAGNOSTIC=1 requires LLAMA_PARALLEL of at least 2" >&2
+        exit 64
+    fi
+    if (( mtp_enabled )); then
+        echo "Multi-slot MTP is not qualified; run the target-only A/B/A prefix diagnostic first" >&2
+        exit 64
+    fi
+    if (( context_size % parallel != 0 || context_size / parallel < 4096 )); then
+        echo "Diagnostic total context must divide evenly into at least 4096 tokens per slot" >&2
+        exit 64
+    fi
+elif (( parallel != 1 )); then
+    echo "LLAMA_PARALLEL=$parallel is unqualified; set LLAMA_MULTI_SLOT_DIAGNOSTIC=1 for an isolated target-only test" >&2
+    exit 64
+fi
+if [[ "$multi_slot_diagnostic" != "1" && "$mtp_mode" != "checkpoint-diagnostic" && "$context_size" != "262144" ]]; then
     echo "LLAMA_CONTEXT_SIZE=$context_size is diagnostic-only; production and bounded strict require 262144" >&2
     exit 64
 fi
@@ -151,6 +183,10 @@ if [[ -n "$slot_save_path" ]]; then
         echo "LLAMA_SLOT_SAVE_PATH must be an existing writable directory: $slot_save_path" >&2
         exit 66
     fi
+fi
+if [[ "$multi_slot_diagnostic" == "1" && -z "$slot_save_path" ]]; then
+    echo "LLAMA_MULTI_SLOT_DIAGNOSTIC=1 requires LLAMA_SLOT_SAVE_PATH for deterministic slot erasure" >&2
+    exit 64
 fi
 
 if [[ ! -x "$llama_server" ]]; then
@@ -250,8 +286,10 @@ if (( check_only )); then
     [[ -n "$api_key_file" ]] && auth_mode="API-key file"
     slot_mode="disabled"
     [[ -n "$slot_save_path" ]] && slot_mode="$slot_save_path"
-    printf 'Production configuration valid: ROCm, context %s, split %s, ubatch 1536, MTP: %s, auth: %s, slot actions: %s\n' \
-        "$context_size" "$target_split" "$mtp_mode" "$auth_mode" "$slot_mode"
+    launch_kind="production"
+    [[ "$multi_slot_diagnostic" == "1" ]] && launch_kind="multi-slot diagnostic"
+    printf '%s configuration valid: ROCm, total context %s, slots %s, split %s, ubatch 1536, MTP: %s, auth: %s, slot actions: %s\n' \
+        "$launch_kind" "$context_size" "$parallel" "$target_split" "$mtp_mode" "$auth_mode" "$slot_mode"
     exit 0
 fi
 
@@ -261,7 +299,7 @@ command=(
     --host "$listen_host" \
     --port "$listen_port" \
     --ctx-size "$context_size" \
-    --parallel 1 \
+    --parallel "$parallel" \
     --no-kv-unified \
     --cont-batching \
     --ctx-checkpoints 8 \
