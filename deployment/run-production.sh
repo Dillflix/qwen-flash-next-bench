@@ -100,6 +100,7 @@ multi_slot_diagnostic="${LLAMA_MULTI_SLOT_DIAGNOSTIC:-0}"
 require_auto_vision_bypass="${REQUIRE_AUTO_VISION_BYPASS:-1}"
 mtp_mode="${LLAMA_MTP_MODE:-off}"
 slot_save_path="${LLAMA_SLOT_SAVE_PATH:-}"
+disable_hip_graphs="${LLAMA_DISABLE_HIP_GRAPHS:-1}"
 
 api_key="${api_key_override:-${LLAMA_API_KEY:-${QWEN_API_KEY:-${API_KEY:-}}}}"
 api_key_file="${api_key_file_override:-${LLAMA_ARG_API_KEY_FILE:-}}"
@@ -134,6 +135,10 @@ if [[ ! "$parallel" =~ ^[0-9]+$ ]] || (( parallel < 1 )); then
 fi
 if [[ "$multi_slot_diagnostic" != "0" && "$multi_slot_diagnostic" != "1" ]]; then
     echo "LLAMA_MULTI_SLOT_DIAGNOSTIC must be 0 or 1" >&2
+    exit 64
+fi
+if [[ "$disable_hip_graphs" != "0" && "$disable_hip_graphs" != "1" ]]; then
+    echo "LLAMA_DISABLE_HIP_GRAPHS must be 0 or 1" >&2
     exit 64
 fi
 if [[ "$target_split" != "88,12" ]]; then
@@ -257,6 +262,11 @@ case "${LD_LIBRARY_PATH:-}" in
 esac
 export LLAMA_CKPT_FORCE_HOST=1
 export MTMD_BACKEND_DEVICE=ROCm1
+if [[ "$disable_hip_graphs" == "1" ]]; then
+    export GGML_CUDA_DISABLE_GRAPHS=1
+else
+    unset GGML_CUDA_DISABLE_GRAPHS
+fi
 if (( mtp_enabled )); then
     export LLAMA_AUTO_DISABLE_SPEC_MULTIMODAL=1
 else
@@ -288,8 +298,10 @@ if (( check_only )); then
     [[ -n "$slot_save_path" ]] && slot_mode="$slot_save_path"
     launch_kind="production"
     [[ "$multi_slot_diagnostic" == "1" ]] && launch_kind="multi-slot diagnostic"
-    printf '%s configuration valid: ROCm, total context %s, slots %s, split %s, ubatch 1536, MTP: %s, auth: %s, slot actions: %s\n' \
-        "$launch_kind" "$context_size" "$parallel" "$target_split" "$mtp_mode" "$auth_mode" "$slot_mode"
+    hip_graphs="enabled"
+    [[ "$disable_hip_graphs" == "1" ]] && hip_graphs="disabled"
+    printf '%s configuration valid: ROCm, total context %s, slots %s, split %s, ubatch 1536, MTP: %s, HIP graphs: %s, auth: %s, slot actions: %s\n' \
+        "$launch_kind" "$context_size" "$parallel" "$target_split" "$mtp_mode" "$hip_graphs" "$auth_mode" "$slot_mode"
     exit 0
 fi
 

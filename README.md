@@ -622,6 +622,14 @@ long agentic response. Strict mode is qualified only after one real n=3 startup
 prime initializes its scheduler/graph regime; systemd performs that prime before
 the service reaches the active state.
 
+HIP graph capture is disabled by default with `LLAMA_DISABLE_HIP_GRAPHS=1`.
+The matched 32K production-topology A/B produced identical output hashes and
+identical MTP acceptance (167/197 drafts): graphs disabled measured 46.82 decode
+tok/s and 508.40 prefill tok/s, versus 46.00 and 507.52 with graphs enabled.
+Because the earlier service crash occurred inside `hipGraphExecUpdate`, removing
+that path is the production-safe choice and has no demonstrated performance
+cost. Set `LLAMA_DISABLE_HIP_GRAPHS=0` only for isolated diagnostics.
+
 - joined ROCmFP4 model with its 51.2B PLE tensor CPU-mapped;
 - ROCm devices ordered `ROCm0,ROCm1`, with an 88/12 target split and routed
   experts forced to the iGPU;
@@ -1323,6 +1331,7 @@ LLAMA_MTP_MODE=strict
 LLAMA_STARTUP_PRIME=1
 LLAMA_STARTUP_PRIME_TIMEOUT=1800
 LLAMA_STARTUP_PRIME_REQUEST_TIMEOUT=300
+LLAMA_DISABLE_HIP_GRAPHS=1
 ```
 
 For the service, either set `LLAMA_API_KEY` in the root-managed environment file
