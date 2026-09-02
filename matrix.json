@@ -941,7 +941,7 @@
       "warmup_depth": 32768,
       "rounds": 1,
       "request": {
-        "ignore_eos": false
+        "ignore_eos": true
       },
       "settle_seconds": 5,
       "telemetry_interval_s": 0.5,

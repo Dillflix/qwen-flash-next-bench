@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.47.0"
+VERSION = "1.47.1"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -4401,6 +4401,7 @@ def self_test() -> None:
     assert int(hip_graphs_tier["warmup_depth"]) == 32768
     assert hip_graphs_tier.get("exact_prompt_tokens") is True
     assert int(hip_graphs_tier["n_predict"]) == 256
+    assert hip_graphs_tier["request"]["ignore_eos"] is True
     hip_graphs_experiments = select_experiments(
         expanded_shipped_config, hip_graphs_tier, None,
     )

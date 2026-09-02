@@ -644,6 +644,8 @@ CPU-mmap PLE, ubatch 1536, and host checkpoints. Each arm first runs an exact
 32768-token warm-up to make the model and PLE storage hot, erases the slot, and
 then measures one exact 32768-token prompt plus 256 generated tokens. The first
 arm explicitly unsets `GGML_CUDA_DISABLE_GRAPHS`; the second sets it to `1`.
+EOS is ignored for this throughput-only probe so both arms must execute all 256
+decode tokens instead of occasionally terminating on the first sampled token.
 
 Stop the production service so its model allocation cannot contaminate the A/B,
 then run:
