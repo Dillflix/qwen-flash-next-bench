@@ -41,7 +41,7 @@ from collections import defaultdict
 from typing import Any, Iterable
 
 
-VERSION = "1.46.0"
+VERSION = "1.47.0"
 SUCCESS_STATES = {"ok"}
 QWEN4EXP_MTP_MARKER = "qwen4exp MTP requires exactly one appended prediction layer"
 QWEN4EXP_MTP_SCHED_MARKER = "qwen4exp_mtp_h_pre_norm_scheduled"
@@ -51,6 +51,7 @@ QWEN4EXP_MTP_ROLLBACK_MARKER = "qwen4exp recurrent conv rollback snapshots enabl
 QWEN4EXP_PLE_ROLLBACK_MARKER = "non-consecutive Qwen4Exp PLE history position"
 MTP_VERIFIER_STATE_MARKER = "MTP verifier state-correctness patch active"
 HOST_CHECKPOINT_MARKER = "LLAMA_CKPT_FORCE_HOST"
+HIP_GRAPHS_DISABLE_ENV = "GGML_CUDA_DISABLE_GRAPHS"
 MTP_VISION_RESYNC_MARKER = "MTP multimodal resync: skipping direct image decode"
 QWEN4EXP_VISION_STRICT_MARKER = "Qwen4Exp vision MTP: single-row target verification enabled"
 QWEN4EXP_VISION_CHECKPOINT_MARKER = "Qwen4Exp vision MTP: recurrent rollback disabled; using full-state checkpoints"
@@ -659,6 +660,8 @@ def merged_env(config: dict[str, Any], experiment: dict[str, Any]) -> dict[str, 
     for source in (config.get("defaults", {}).get("env", {}), experiment.get("env", {})):
         for key, value in source.items():
             env[str(key)] = str(value)
+    for key in experiment.get("env_unset", []):
+        env.pop(str(key), None)
     return env
 
 
@@ -1132,6 +1135,10 @@ class ManagedServer:
             self.log_handle.write(
                 f"# {HOST_CHECKPOINT_MARKER}={self.env[HOST_CHECKPOINT_MARKER]}\n"
             )
+        self.log_handle.write(
+            f"# {HIP_GRAPHS_DISABLE_ENV}="
+            f"{self.env.get(HIP_GRAPHS_DISABLE_ENV, '<unset>')}\n"
+        )
         self.log_handle.flush()
         started = time.monotonic()
         self.process = subprocess.Popen(
@@ -4388,6 +4395,38 @@ def self_test() -> None:
     assert option_value(production_base_args, "--checkpoint-every-n-tokens") == "32768"
     assert "--checkpoint-min-step" not in production_base_args
     assert production_base.get("env", {}).get(HOST_CHECKPOINT_MARKER) == "1"
+    hip_graphs_tier = expanded_shipped_config["tiers"]["rocm-hip-graphs-ab-32k"]
+    assert int(hip_graphs_tier["ctx_size"]) == 262144
+    assert hip_graphs_tier["depths"] == [32768]
+    assert int(hip_graphs_tier["warmup_depth"]) == 32768
+    assert hip_graphs_tier.get("exact_prompt_tokens") is True
+    assert int(hip_graphs_tier["n_predict"]) == 256
+    hip_graphs_experiments = select_experiments(
+        expanded_shipped_config, hip_graphs_tier, None,
+    )
+    assert [item["name"] for item in hip_graphs_experiments] == [
+        "prod_hip_256k_tail_88_12_ub1536_hip_graphs_on",
+        "prod_hip_256k_tail_88_12_ub1536_hip_graphs_off",
+    ]
+    hip_graphs_commands = [
+        server_command(expanded_shipped_config, hip_graphs_tier, item)
+        for item in hip_graphs_experiments
+    ]
+    assert hip_graphs_commands[0] == hip_graphs_commands[1]
+    previous_graphs_env = os.environ.get(HIP_GRAPHS_DISABLE_ENV)
+    os.environ[HIP_GRAPHS_DISABLE_ENV] = "inherited-test-value"
+    try:
+        assert HIP_GRAPHS_DISABLE_ENV not in merged_env(
+            expanded_shipped_config, hip_graphs_experiments[0],
+        )
+        assert merged_env(
+            expanded_shipped_config, hip_graphs_experiments[1],
+        )[HIP_GRAPHS_DISABLE_ENV] == "1"
+    finally:
+        if previous_graphs_env is None:
+            os.environ.pop(HIP_GRAPHS_DISABLE_ENV, None)
+        else:
+            os.environ[HIP_GRAPHS_DISABLE_ENV] = previous_graphs_env
     ple_storage_screen = expanded_shipped_config["tiers"]["rocm-ple-storage-screen"]
     ple_ram_capacity = expanded_shipped_config["tiers"]["rocm-ple-ram-capacity"]
     ple_storage_full = expanded_shipped_config["tiers"]["rocm-ple-storage-full"]

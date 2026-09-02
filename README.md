@@ -635,6 +635,36 @@ This is deliberately a **one-slot** service. Multiple clients may connect, but
 requests queue behind the active slot. Two simultaneous 256K slots have not been
 qualified and are not silently enabled by the production launcher.
 
+### HIP graph crash and matched 32K performance A/B
+
+`rocm-hip-graphs-ab-32k` isolates the `hipGraphExecUpdate` crash path without
+changing MTP or the qualified production topology. Both arms allocate the full
+262144-token context, retain strict n=3 MTP, F16 target/draft KV, the 88/12 split,
+CPU-mmap PLE, ubatch 1536, and host checkpoints. Each arm first runs an exact
+32768-token warm-up to make the model and PLE storage hot, erases the slot, and
+then measures one exact 32768-token prompt plus 256 generated tokens. The first
+arm explicitly unsets `GGML_CUDA_DISABLE_GRAPHS`; the second sets it to `1`.
+
+Stop the production service so its model allocation cannot contaminate the A/B,
+then run:
+
+```bash
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+sudo systemctl stop qwen-flash-next.service
+
+python3 qwen_bench.py self-test
+python3 qwen_bench.py preflight --tier rocm-hip-graphs-ab-32k
+./run-bench.sh --tier rocm-hip-graphs-ab-32k
+
+sudo systemctl start qwen-flash-next.service
+```
+
+The result archive contains each server command, the effective HIP-graph
+environment marker, exact prompt/decode timings, MTP acceptance, memory and GPU
+telemetry, and the raw logs. This short A/B measures performance and catches an
+immediate graph failure; it does not replace the subsequent hour/1000-request
+soak needed to qualify the graphs-off workaround for production stability.
+
 ### Two-slot prefix-state qualification
 
 `qwen_prefix_diag.py` is the first gate for changing that constraint. It first

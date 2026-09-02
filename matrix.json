@@ -919,6 +919,35 @@
       "startup_timeout_s": 1800,
       "request_timeout_s": 1800
     },
+    "rocm-hip-graphs-ab-32k": {
+      "description": "Matched production-topology A/B of HIP graphs enabled versus disabled, using one exact 32768-token prompt for warm-up and one for measured prefill/decode per arm.",
+      "require_rocm_audit": true,
+      "require_rocm_mtp": true,
+      "cache_state": "hot",
+      "experiments": [
+        "prod_hip_256k_tail_88_12_ub1536_hip_graphs_on",
+        "prod_hip_256k_tail_88_12_ub1536_hip_graphs_off"
+      ],
+      "workloads": [
+        "code"
+      ],
+      "depths": [
+        32768
+      ],
+      "ctx_size": 262144,
+      "n_predict": 256,
+      "exact_prompt_tokens": true,
+      "warmups": 1,
+      "warmup_depth": 32768,
+      "rounds": 1,
+      "request": {
+        "ignore_eos": false
+      },
+      "settle_seconds": 5,
+      "telemetry_interval_s": 0.5,
+      "startup_timeout_s": 1800,
+      "request_timeout_s": 1800
+    },
     "rocm-ple-ram-capacity": {
       "description": "Allocation-only 256K gate for the no-mmap, CPU-resident PLE production arm; run before attempting its near-full prompt.",
       "require_rocm_audit": true,
@@ -2823,6 +2852,22 @@
         "--ubatch-size",
         "1536"
       ]
+    },
+    {
+      "name": "prod_hip_256k_tail_88_12_ub1536_hip_graphs_on",
+      "description": "Production 256K topology with HIP graph capture explicitly enabled by removing GGML_CUDA_DISABLE_GRAPHS from the child environment.",
+      "extends": "prod_hip_256k_tail_88_12_ub1536",
+      "env_unset": [
+        "GGML_CUDA_DISABLE_GRAPHS"
+      ]
+    },
+    {
+      "name": "prod_hip_256k_tail_88_12_ub1536_hip_graphs_off",
+      "description": "Otherwise identical production 256K topology with HIP graph capture disabled as the crash-isolation arm.",
+      "extends": "prod_hip_256k_tail_88_12_ub1536",
+      "env": {
+        "GGML_CUDA_DISABLE_GRAPHS": "1"
+      }
     },
     {
       "name": "prod_hip_256k_tail_88_12_ub1536_ple_ram",
