@@ -1,0 +1,243 @@
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -9,6 +9,8 @@
+ #include "llama-memory.h"
+ #include "llama-mmap.h"
+ #include "llama-model.h"
++#include "models/models.h"
++#include "llama-ple-state.h"
+ #include "llama-ext.h"
+ #include "llama.h"
+ 
+@@ -3333,6 +3335,13 @@
+         memory->state_write(io, seq_id, flags);
+     }
+ 
++    if (model.arch == LLM_ARCH_QWEN4EXP) {
++        const auto & qwen = static_cast<const llama_model_qwen4exp &>(model);
++        const auto it = qwen.ple_hist.find(seq_id);
++        const llama_model_qwen4exp::ple_history empty;
++        qwen_ple_state_write(io, it == qwen.ple_hist.end() ? empty : it->second);
++    }
++
+     return io.n_bytes();
+ }
+ 
+@@ -3341,6 +3350,11 @@
+ 
+     if (memory) {
+         memory->state_read(io, seq_id, flags);
++    }
++
++    if (model.arch == LLM_ARCH_QWEN4EXP) {
++        const auto & qwen = static_cast<const llama_model_qwen4exp &>(model);
++        qwen_ple_state_read(io, qwen.ple_hist[seq_id], uint64_t(cparams.n_ctx) + cparams.n_batch);
+     }
+ 
+     return io.n_bytes();
+diff --git a/src/llama-ple-state.h b/src/llama-ple-state.h
+new file mode 100644
+--- /dev/null
++++ b/src/llama-ple-state.h
+@@ -0,0 +1,46 @@
++#pragma once
++
++#include <cstdint>
++#include <stdexcept>
++#include <utility>
++
++// Qwen4Exp PLE history is model-side state, not part of the KV/recurrent memory.
++// Include it in every sequence snapshot (including PARTIAL_ONLY checkpoints).
++// Old Qwen snapshots lack this trailer and must be rejected, never guessed.
++template<class IO, class History>
++void qwen_ple_state_write(IO & io, const History & history) {
++    const uint32_t tag = 0x504c4501;
++    const uint64_t count = history.toks.size();
++    io.write(&tag, sizeof(tag));
++    io.write(&history.first_pos, sizeof(history.first_pos));
++    io.write(&history.next_pos, sizeof(history.next_pos));
++    io.write(&count, sizeof(count));
++    if (count) {
++        io.write(history.toks.data(), count * sizeof(history.toks[0]));
++    }
++}
++
++template<class IO, class History>
++void qwen_ple_state_read(IO & io, History & history, uint64_t max_tokens) {
++    History restored;
++    uint32_t tag = 0;
++    uint64_t count = 0;
++    io.read(&tag, sizeof(tag));
++    if (tag != 0x504c4501) {
++        throw std::runtime_error("Qwen4Exp PLE snapshot version mismatch; discard old cache files");
++    }
++    io.read(&restored.first_pos, sizeof(restored.first_pos));
++    io.read(&restored.next_pos, sizeof(restored.next_pos));
++    io.read(&count, sizeof(count));
++    const bool empty = count == 0 && restored.first_pos == -1 && restored.next_pos == -1;
++    if (count > max_tokens || (!empty && (restored.first_pos < 0 ||
++            restored.next_pos < restored.first_pos ||
++            uint64_t(int64_t(restored.next_pos) - restored.first_pos) != count))) {
++        throw std::runtime_error("invalid Qwen4Exp PLE snapshot history");
++    }
++    restored.toks.resize(count);
++    if (count) {
++        io.read(restored.toks.data(), count * sizeof(restored.toks[0]));
++    }
++    history = std::move(restored);
++}
+diff --git a/tools/server/server-cache-checkpoint.h b/tools/server/server-cache-checkpoint.h
+new file mode 100644
+--- /dev/null
++++ b/tools/server/server-cache-checkpoint.h
+@@ -0,0 +1,25 @@
++#pragma once
++
++// A checkpoint at p0 includes the first differing token and is too late.
++// Metadata alone (as in disk-cache entries) is not a restorable checkpoint.
++template<class Checkpoint, class Position>
++bool server_cache_checkpoint_usable(const Checkpoint & ckpt, int lcp, Position p0, bool has_draft) {
++    return ckpt.n_tokens > 0 && ckpt.n_tokens <= lcp &&
++           ckpt.pos_min >= 0 && ckpt.pos_min <= ckpt.pos_max && ckpt.pos_max < p0 &&
++           !ckpt.data_tgt.empty() && (!has_draft || !ckpt.data_dft.empty()) &&
++           !ckpt.data_spec.empty();
++}
++
++template<class Prompt>
++int server_cache_checkpoint_prefix(const Prompt & prompt, int lcp, bool has_draft) {
++    if (lcp <= 0) {
++        return 0;
++    }
++    const auto p0 = prompt.tokens.pos_next(lcp);
++    for (auto it = prompt.checkpoints.rbegin(); it != prompt.checkpoints.rend(); ++it) {
++        if (server_cache_checkpoint_usable(*it, lcp, p0, has_draft)) {
++            return int(it->n_tokens);
++        }
++    }
++    return 0;
++}
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -4,6 +4,7 @@
+ #include "server-common.h"
+ #include "server-http.h"
+ #include "server-task.h"
++#include "server-cache-checkpoint.h"
+ #include "server-queue.h"
+ 
+ #include "build-info.h"
+@@ -2908,7 +2909,7 @@
+                                     const auto it = std::find_if(
+                                                         slot.prompt.checkpoints.rbegin(), slot.prompt.checkpoints.rend(),
+                                                         [&](const auto & cur) {
+-                                                            return cur.pos_max <= p0_rm;
++                                                            return server_cache_checkpoint_usable(cur, n_past, p0_rm, ctx_dft != nullptr);
+                                                         });
+ 
+                                     bool salvaged = false;
+@@ -2927,11 +2928,12 @@
+                                             // with the replayed batches — without it the draft
+                                             // sync fails on every batch ("missing MTP boundary")
+                                             // and the request aborts on empty batches
+-                                            common_speculative_set_state(spec.get(), slot.id, it->data_spec);
+-                                            salvaged = true;
+-                                            SLT_INF(slot,
++                                            salvaged = common_speculative_set_state(spec.get(), slot.id, it->data_spec);
++                                            if (salvaged) {
++                                                SLT_INF(slot,
+                                                     "prompt cache checkpoint rollback: lcp=%d cached_tokens=%d request_tokens=%d checkpoint=[%d,%d] n_past=%d spec_state=%zu\n",
+                                                     lcp_orig, slot.prompt.n_tokens(), slot.task->n_tokens(), it->pos_min, it->pos_max, n_past, it->data_spec.size());
++                                            }
+                                         } else {
+                                             SLT_WRN(slot,
+                                                     "failed to restore context checkpoint for cache salvage (target=%d, draft=%d, spec_state=%zu, pos_min = %d, pos_max = %d); forcing full prompt re-processing\n",
+diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
+--- a/tools/server/server-task.cpp
++++ b/tools/server/server-task.cpp
+@@ -1,4 +1,5 @@
+ #include "server-task.h"
++#include "server-cache-checkpoint.h"
+ 
+ #include "build-info.h"
+ #include "server-chat.h"
+@@ -3035,7 +3036,16 @@
+         return n_rs_min == UINT32_MAX || delta <= (size_t) n_rs_min;
+     };
+ 
+-    const bool base_boundary_valid = spec_boundary_valid(prompt.tokens.size(), lcp_best);
++    // RAM entries retain full checkpoint payloads. Admit an older checkpoint
++    // even when the endpoint is beyond the bounded recurrent rollback window.
++    // Actual restoration remains checked in update_slots; disk entries retain
++    // metadata only and must continue using the original boundary guard.
++    const auto reusable_prefix = [&](const server_prompt & candidate, int lcp) {
++        return spec_boundary_valid(candidate.tokens.size(), lcp) ? lcp
++            : server_cache_checkpoint_prefix(candidate, lcp, ctx_dft != nullptr);
++    };
++    const int base_reusable = reusable_prefix(prompt, lcp_best);
++    const bool base_boundary_valid = spec_boundary_valid(prompt.tokens.size(), lcp_best) || base_reusable > 0;
+     float f_keep_best = base_boundary_valid && prompt.tokens.size() > 0 ? float(lcp_best) / prompt.tokens.size() : -1.0f; // empty slot: any cache entry wins
+     float sim_best    = base_boundary_valid ? float(lcp_best) / std::max<size_t>(1, tokens_new.size()) : -1.0f;
+ 
+@@ -3049,7 +3059,7 @@
+     auto it_best_ram  = states.end();
+     auto it_best_disk = disk_states.end();
+     size_t lcp_selected = 0;
+-    size_t spec_boundary_best = base_boundary_valid ? prompt.tokens.size() : 0;
++    size_t spec_boundary_best = base_boundary_valid ? base_reusable : 0;
+     bool ram_loaded = false;
+ 
+     // Find the most similar RAM prompt first. On an equal match, the hot RAM
+@@ -3057,7 +3067,8 @@
+     for (auto it = states.begin(); it != states.end(); ++it) {
+         const int lcp_cur = it->tokens.get_common_prefix(tokens_new);
+ 
+-        if (!spec_boundary_valid(it->tokens.size(), lcp_cur)) {
++        const int reusable = reusable_prefix(*it, lcp_cur);
++        if (!spec_boundary_valid(it->tokens.size(), lcp_cur) && reusable == 0) {
+             SRV_INF("prompt cache skip: reason=spec-boundary-mismatch source=ram lcp=%d cached_tokens=%zu request_tokens=%zu spec_bytes=%zu\n",
+                     lcp_cur, it->tokens.size(), tokens_new.size(), it->data.spec.size());
+             continue;
+@@ -3068,6 +3079,11 @@
+             continue;
+         }
+ 
++        if (spec_state_required && reusable < lcp_cur) {
++            SRV_INF("prompt cache checkpoint candidate: source=ram lcp=%d reusable=%d cached_tokens=%zu\n",
++                    lcp_cur, reusable, it->tokens.size());
++        }
++
+         const float f_keep_cur = float(lcp_cur) / std::max<size_t>(1, it->tokens.size());
+         const float sim_cur    = float(lcp_cur) / std::max<size_t>(1, tokens_new.size());
+ 
+@@ -3077,12 +3093,12 @@
+         }
+ 
+         const bool is_better = spec_state_required
+-            ? it->tokens.size() > spec_boundary_best
++            ? size_t(reusable) > spec_boundary_best
+             : f_keep_best < f_keep_cur && sim_best < sim_cur;
+         if (is_better) {
+             f_keep_best = f_keep_cur;
+             sim_best    = sim_cur;
+-            spec_boundary_best = it->tokens.size();
++            spec_boundary_best = reusable;
+ 
+             it_best_ram  = it;
+             it_best_disk = disk_states.end();
+@@ -3116,12 +3132,12 @@
+         }
+ 
+         const bool is_better = spec_state_required
+-            ? it->tokens.size() > spec_boundary_best
++            ? size_t(lcp_cur) > spec_boundary_best
+             : f_keep_best < f_keep_cur && sim_best < sim_cur;
+         if (is_better) {
+             f_keep_best = f_keep_cur;
+             sim_best    = sim_cur;
+-            spec_boundary_best = it->tokens.size();
++            spec_boundary_best = lcp_cur;
+ 
+             it_best_ram  = states.end();
+             it_best_disk = it;

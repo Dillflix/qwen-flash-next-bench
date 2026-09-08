@@ -130,6 +130,13 @@ jobs:
           git -C rocmfpx apply --reverse --unidiff-zero "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints-v1-broken.patch"
           git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints.patch"
           git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-host-checkpoints.patch"
+          git -C rocmfpx apply --check "$GITHUB_WORKSPACE/patches/rocmfpx-backing-cache-checkpoint.patch"
+          git -C rocmfpx apply "$GITHUB_WORKSPACE/patches/rocmfpx-backing-cache-checkpoint.patch"
+          git -C rocmfpx apply --reverse --check "$GITHUB_WORKSPACE/patches/rocmfpx-backing-cache-checkpoint.patch"
+          c++ -std=c++17 -Wall -Wextra -Werror \
+            -I rocmfpx/src -I rocmfpx/tools/server \
+            tests/test_backing_cache_state.cpp -o /tmp/test-backing-cache-state
+          /tmp/test-backing-cache-state
           cmake -S rocmfpx -B rocmfpx/build-ci -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DGGML_NATIVE=OFF \

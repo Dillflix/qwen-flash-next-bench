@@ -681,13 +681,17 @@ For backing prompt caching with **one** active slot, use the separate diagnostic
 
 ```bash
 cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+./build-rocm10-dual.sh
+python3 qwen_bench.py rocm-audit --run-ops
 bash run-backing-cache.sh
 ```
 
 This stops the production service, loads its existing model/runtime paths, and
 runs isolated cache-off and 8192-MiB RAM-cache servers on loopback port 8189.
-It restores the service afterward if it was initially active. No rebuild or API
-key entry is needed. It keeps strict MTP n=3, one slot, F16 KV, CPU-mapped PLE,
+It restores the service afterward if it was initially active. Rebuild once for
+the checkpoint-aware RAM-cache patch; no API key entry is needed. The diagnostic
+checks compiled patch markers and records binary fingerprints before loading.
+It keeps strict MTP n=3, one slot, F16 KV, CPU-mapped PLE,
 HIP graphs disabled, ubatch 1536, and the 262144-token allocation. Only short
 ledger prompts are sent; there is no 256K prefill. Avoid other requests during
 the test. For SSH disconnection resilience, run it in your existing tmux shell.
@@ -700,6 +704,24 @@ The cache-off arm is the reference for exactly matching requests. A pass require
 substantial cache hits in the RAM arm, exact output-token and message agreement,
 correct JSON ledger content, and observed MTP in both arms. The fixture omits
 thinking, tools, and images; a pass does not qualify all Open WebUI transformations.
+
+The September 8 run stored entries but rejected their matching prefixes before
+checkpoint restoration (`spec-boundary-mismatch`). The new patch admits RAM
+candidates with complete target/draft/MTP checkpoint payloads strictly before
+the divergence, ranks them by reusable prefix, and still requires every restore
+to succeed. Disk entries carry checkpoint metadata, not payloads, so their
+eligibility is deliberately unchanged. Qwen PLE token history is now included
+in sequence snapshots as well as KV/recurrent state. Old Qwen sequence-cache
+files are incompatible and rejected; this test uses fresh in-memory snapshots
+and disables backing disk-cache settings. No existing cache files are deleted.
+
+The fixture may legitimately restore 1225 of 2765 prompt tokens from the older
+checkpoint, rather than all 2740 matching tokens. Below-50% reuse only qualifies
+when the request log shows a RAM checkpoint candidate, successful checkpoint
+rollback to that same boundary, and exactly that many cached tokens in the API
+response. A candidate log without a successful restore cannot pass. The original
+exact-token, JSON, and MTP gates remain mandatory. This is a candidate runtime
+fix, not GPU-validated restoration until the next host A/B passes.
 
 Results, raw replies, request-scoped server logs, prefill/decode timings, and
 one-second host/GPU memory samples are automatically archived, including partial

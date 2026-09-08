@@ -24,6 +24,7 @@ REQUEST_SPEC_BYPASS_PATCH="$SCRIPT_DIR/patches/rocmfpx-request-spec-bypass.patch
 AUTO_MTMD_SPEC_BYPASS_PATCH="$SCRIPT_DIR/patches/rocmfpx-auto-mtmd-spec-bypass.patch"
 MTP_TARGET_ISOLATION_PATCH="$SCRIPT_DIR/patches/rocmfpx-mtp-target-isolation.patch"
 HOST_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-host-checkpoints.patch"
+BACKING_CACHE_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-backing-cache-checkpoint.patch"
 LEGACY_HOST_CHECKPOINT_PATCH="$SCRIPT_DIR/patches/rocmfpx-host-checkpoints-v1-broken.patch"
 
 fail() {
@@ -160,6 +161,11 @@ apply_patch_once \
     "LLAMA_CKPT_FORCE_HOST"
 
 [[ -x "$ROCM_ROOT/bin/hipcc" ]] || fail "ROCm compiler is missing at $ROCM_ROOT/bin/hipcc"
+apply_patch_once \
+    "$BACKING_CACHE_CHECKPOINT_PATCH" \
+    "RAM backing-cache checkpoint and PLE-state patch" \
+    "tools/server/server-task.cpp" \
+    "prompt cache checkpoint candidate: source=ram"
 [[ -f "$SOURCE_DIR/src/models/qwen4exp.cpp" ]] || fail "source tree does not contain src/models/qwen4exp.cpp"
 grep -Fq '~LLAMA_STATE_SEQ_FLAGS_ON_DEVICE' "$SOURCE_DIR/common/common.cpp" \
     || fail "host-checkpoint source does not clear the device-storage flag"
@@ -301,6 +307,10 @@ COMMON_LIBRARY="$BUILD_DIR/bin/libllama-common.so"
 [[ -f "$COMMON_LIBRARY" ]] || fail "build completed without libllama-common.so"
 SERVER_BINARY="$BUILD_DIR/bin/llama-server"
 [[ -f "$SERVER_BINARY" ]] || fail "build completed without llama-server"
+grep -aFq 'prompt cache checkpoint candidate: source=ram' "$SERVER_BINARY" \
+    || fail "llama-server lacks checkpoint-aware RAM cache selection"
+grep -aFq 'Qwen4Exp PLE snapshot version mismatch' "$LLAMA_LIBRARY" \
+    || fail "libllama.so lacks sequence-snapshot PLE history"
 grep -aFq 'qwen4exp MTP requires exactly one appended prediction layer' "$LLAMA_LIBRARY" \
     || fail "libllama.so lacks the compiled qwen4exp MTP integration marker"
 grep -aFq 'qwen4exp_mtp_h_pre_norm_scheduled' "$LLAMA_LIBRARY" \

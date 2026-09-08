@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
+import mmap
 import os
 import pathlib
+import re
 import secrets
 import signal
 import socket
@@ -19,7 +22,7 @@ import qwen_mtp_diag as mtp
 import qwen_prefix_diag as prefix
 
 ROOT = pathlib.Path(__file__).resolve().parent
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 def payload(family: str, revision: int, blocks: int) -> tuple[dict, dict]:
@@ -79,6 +82,27 @@ def record_memory(pid: int, path: pathlib.Path, done: threading.Event) -> None:
             out.write(json.dumps(snapshot(pid)) + "\n")
             out.flush()
             done.wait(1)
+
+
+def check_runtime_patch() -> dict:
+    server = pathlib.Path(os.environ.get("LLAMA_SERVER") or
+        "/srv/llm/src/ROCmFPX-qwen4exp/build-hip10-dual/bin/llama-server")
+    library = server.parent / "libllama.so"
+    if not library.is_file():
+        library = server.parent.parent / "lib/libllama.so"
+    result = {}
+    for name, path, marker in (
+        ("server", server, b"prompt cache checkpoint candidate: source=ram"),
+        ("llama_library", library, b"Qwen4Exp PLE snapshot version mismatch"),
+    ):
+        if not path.is_file() or path.stat().st_size == 0:
+            raise RuntimeError(f"Missing {path}; rebuild with ./build-rocm10-dual.sh")
+        with path.open("rb") as stream:
+            with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                if data.find(marker) < 0:
+                    raise RuntimeError(f"{path} lacks the backing-cache patch; rebuild with ./build-rocm10-dual.sh")
+                result[name] = {"path": str(path), "sha256": hashlib.sha256(data).hexdigest()}
+    return result
 
 
 def arm(run_dir: pathlib.Path, label: str, mib: int, args, api_key: str) -> list[dict]:
@@ -188,6 +212,18 @@ def arm(run_dir: pathlib.Path, label: str, mib: int, args, api_key: str) -> list
     return rows
 
 
+def checkpoint_evidence(run_dir: pathlib.Path, row: dict) -> dict:
+    path = run_dir / "request-logs" / f"{row['case_id']}.log" if row.get("case_id") else None
+    text = path.read_text(errors="replace") if path and path.is_file() else ""
+    candidates = re.findall(r"prompt cache checkpoint candidate: source=ram lcp=(\d+) reusable=(\d+)", text)
+    restored = re.findall(r"prompt cache checkpoint rollback: lcp=(\d+).*?n_past=(\d+) spec_state=(\d+)", text)
+    count = prefix.cache_count(row)
+    for lcp, n_past, spec_bytes in restored:
+        if (lcp, n_past) in candidates and int(spec_bytes) > 0 and count == int(n_past) and count > 0:
+            return {"verified": True, "lcp": int(lcp), "reused": count}
+    return {"verified": False}
+
+
 def report(run_dir: pathlib.Path, rows: list[dict]) -> dict:
     by_id = {row["case_id"]: row for row in rows}
     comparisons = []
@@ -197,8 +233,11 @@ def report(run_dir: pathlib.Path, rows: list[dict]) -> dict:
         comparison = prefix.exact_output_comparison(run_dir, cached, cold)
         count = prefix.cache_count(cached)
         total = cached.get("usage_prompt_n") or 0
+        checkpoint = checkpoint_evidence(run_dir, cached)
         comparison.update({"case": case, "cache_n": count,
-                           "cache_hit_pass": count is not None and total > 0 and count / total >= 0.5,
+                           "checkpoint_restore": checkpoint,
+                           "cache_hit_pass": count is not None and total > 0 and 0 < count <= total
+                               and (count / total >= 0.5 or checkpoint["verified"]),
                            "token_evidence_present": all(r.get("token_count", 0) > 0
                                and r.get("token_count") == r.get("completion_tokens")
                                and r.get("token_evidence", {}).get("identity_complete") is True
@@ -248,6 +287,7 @@ def main() -> int:
         "parallel": 1, "context": 262144, "mtp_n": 3, "hip_graphs": False,
         "blocks": args.blocks, "note": "Short prompts; 256K allocation, not 256K prefill. No slot erasure. Fixed order off then RAM."})
     try:
+        mtp.atomic_json(run_dir / "runtime-fingerprint.json", check_runtime_patch())
         for label, mib in (("off", 0), ("ram", 8192)):
             rows.extend(arm(run_dir, label, mib, args, api_key))
     except (Exception, KeyboardInterrupt) as exc:
