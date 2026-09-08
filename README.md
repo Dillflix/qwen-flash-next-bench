@@ -677,6 +677,44 @@ soak needed to qualify the graphs-off workaround for production stability.
 
 ### Two-slot prefix-state qualification
 
+For backing prompt caching with **one** active slot, use the separate diagnostic:
+
+```bash
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+bash run-backing-cache.sh
+```
+
+This stops the production service, loads its existing model/runtime paths, and
+runs isolated cache-off and 8192-MiB RAM-cache servers on loopback port 8189.
+It restores the service afterward if it was initially active. No rebuild or API
+key entry is needed. It keeps strict MTP n=3, one slot, F16 KV, CPU-mapped PLE,
+HIP graphs disabled, ubatch 1536, and the 262144-token allocation. Only short
+ledger prompts are sent; there is no 256K prefill. Avoid other requests during
+the test. For SSH disconnection resilience, run it in your existing tmux shell.
+
+Each arm starts a fresh process and primes MTP, then sends A, B, resumed A,
+resumed B with automatic slot selection and `cache_prompt=true`. The resumed
+requests change a trailing instruction while retaining a long prefix, exercising
+restoration after the only slot was overwritten. No slot erase is performed.
+The cache-off arm is the reference for exactly matching requests. A pass requires
+substantial cache hits in the RAM arm, exact output-token and message agreement,
+correct JSON ledger content, and observed MTP in both arms. The fixture omits
+thinking, tools, and images; a pass does not qualify all Open WebUI transformations.
+
+Results, raw replies, request-scoped server logs, prefill/decode timings, and
+one-second host/GPU memory samples are automatically archived, including partial
+runs on request failure. Read `report.json` for the verdict and `results.jsonl`
+for each measurement. The fixed off-then-RAM order is a functional comparison,
+not a statistically controlled throughput claim. An 8-GiB cache is a capacity
+limit, not an assurance that 8 GiB fits every workload; PLE page-cache residency
+can change under RAM pressure.
+
+The launcher accepts `LLAMA_CACHE_RAM_MIB=0..8192` for this test; nonzero values
+require `LLAMA_BACKING_CACHE_DIAGNOSTIC=1`. Production remains at zero pending
+correct target/draft/PLE restoration. Additional live slots are not required
+for backing caching. Do not deploy the diagnostic setting solely because it
+loads successfully.
+
 `qwen_prefix_diag.py` is the first gate for changing that constraint. It first
 runs a short target-only A/B/A sequence against two explicitly selected slots:
 

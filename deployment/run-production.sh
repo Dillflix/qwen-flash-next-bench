@@ -101,9 +101,28 @@ require_auto_vision_bypass="${REQUIRE_AUTO_VISION_BYPASS:-1}"
 mtp_mode="${LLAMA_MTP_MODE:-off}"
 slot_save_path="${LLAMA_SLOT_SAVE_PATH:-}"
 disable_hip_graphs="${LLAMA_DISABLE_HIP_GRAPHS:-1}"
+cache_ram_mib="${LLAMA_CACHE_RAM_MIB:-0}"
+backing_cache_diagnostic="${LLAMA_BACKING_CACHE_DIAGNOSTIC:-0}"
 
 api_key="${api_key_override:-${LLAMA_API_KEY:-${QWEN_API_KEY:-${API_KEY:-}}}}"
 api_key_file="${api_key_file_override:-${LLAMA_ARG_API_KEY_FILE:-}}"
+
+if [[ ! "$cache_ram_mib" =~ ^[0-9]+$ ]] || (( cache_ram_mib > 8192 )); then
+    echo "LLAMA_CACHE_RAM_MIB must be an integer from 0 through 8192" >&2
+    exit 64
+fi
+if [[ "$backing_cache_diagnostic" != "0" && "$backing_cache_diagnostic" != "1" ]]; then
+    echo "LLAMA_BACKING_CACHE_DIAGNOSTIC must be 0 or 1" >&2
+    exit 64
+fi
+if (( cache_ram_mib > 0 )) && [[ "$backing_cache_diagnostic" != "1" ]]; then
+    echo "Backing-cache restoration is not qualified; use LLAMA_BACKING_CACHE_DIAGNOSTIC=1 for the isolated A/B" >&2
+    exit 64
+fi
+if [[ "$backing_cache_diagnostic" == "1" ]] && (( parallel != 1 )); then
+    echo "The backing-cache diagnostic requires exactly one slot" >&2
+    exit 64
+fi
 
 if [[ -n "$api_key" && -n "$api_key_file" ]]; then
     echo "Configure either an API key or an API-key file, not both" >&2
@@ -298,10 +317,12 @@ if (( check_only )); then
     [[ -n "$slot_save_path" ]] && slot_mode="$slot_save_path"
     launch_kind="production"
     [[ "$multi_slot_diagnostic" == "1" ]] && launch_kind="multi-slot diagnostic"
+    [[ "$backing_cache_diagnostic" == "1" ]] && launch_kind="backing-cache diagnostic"
     hip_graphs="enabled"
     [[ "$disable_hip_graphs" == "1" ]] && hip_graphs="disabled"
     printf '%s configuration valid: ROCm, total context %s, slots %s, split %s, ubatch 1536, MTP: %s, HIP graphs: %s, auth: %s, slot actions: %s\n' \
         "$launch_kind" "$context_size" "$parallel" "$target_split" "$mtp_mode" "$hip_graphs" "$auth_mode" "$slot_mode"
+    printf 'Backing prompt cache limit: %s MiB\n' "$cache_ram_mib"
     exit 0
 fi
 
@@ -330,7 +351,7 @@ command=(
     --cache-type-v f16 \
     --batch-size 2048 \
     --ubatch-size 1536 \
-    --cache-ram 0 \
+    --cache-ram "$cache_ram_mib" \
     --mmproj "$mmproj" \
     --image-min-tokens 1024 \
     --image-max-tokens 2240 \

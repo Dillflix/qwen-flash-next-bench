@@ -35,6 +35,7 @@ jobs:
           python qwen_inventory.py self-test
           python qwen_mtp_diag.py self-test
           python qwen_prefix_diag.py self-test
+          python -m unittest discover -s tests -p 'test_backing_cache_diag.py'
           python deployment/prime-production.py --self-test
           python -m json.tool matrix.json >/dev/null
           python -m json.tool prompts.json >/dev/null
@@ -44,6 +45,7 @@ jobs:
       - name: Validate production deployment
         run: |
           bash -n deployment/run-production.sh
+          bash -n run-backing-cache.sh
           LLAMA_MTP_MODE=off LLAMA_STARTUP_PRIME=1 \
             python deployment/prime-production.py --check
           LLAMA_SERVER=/bin/true \
