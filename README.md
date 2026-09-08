@@ -731,7 +731,7 @@ not a statistically controlled throughput claim. An 8-GiB cache is a capacity
 limit, not an assurance that 8 GiB fits every workload; PLE page-cache residency
 can change under RAM pressure.
 
-The launcher accepts `LLAMA_CACHE_RAM_MIB=0..8192` for diagnostics or production.
+The launcher accepts `LLAMA_CACHE_RAM_MIB=0..16384` for diagnostics or production.
 Nonzero values require one active slot and compiled markers for checkpoint-aware
 RAM selection and PLE sequence snapshots. The September 8 patched A/B passed
 both resumed conversations with 1225 reused tokens, identical output tokens,
@@ -760,13 +760,21 @@ sudo systemctl status qwen-flash-next.service --no-pager
 
 The rebuilt runtime from `4eae42b` is required; another rebuild is unnecessary
 if that version already passed the backing-cache test. The drop-in changes only
-the RAM cache limit (8192 MiB) and clears the diagnostic flag, preserving MTP,
+the RAM cache limit (16384 MiB / 16 GiB) and clears the diagnostic flag, preserving MTP,
 PLE mmap, F16 KV, one-slot context allocation, and the API key/bind address.
-Look for `Backing prompt cache limit: 8192 MiB` in the new startup journal and
+Look for `Backing prompt cache limit: 16384 MiB` in the new startup journal and
 confirm `active (running)` after priming. To disable without removing any files,
 set `LLAMA_CACHE_RAM_MIB=0` with `sudoedit /etc/qwen-flash-next-cache.env`, then
 restart the service. Cache contents are in process RAM and do not survive restart.
 SSD-backed PLE is unchanged; this does not enable SSD-backed prompt caching.
+
+The 16-GiB production budget is an explicit capacity increase, not a claim that
+a filled 16-GiB cache has passed a long-context soak. The isolated A/B remains
+at 8 GiB for comparability. Monitor available RAM, swap activity, and PLE storage
+reads as production cache occupancy grows; the larger budget can displace PLE
+page-cache residency. To return to the previous budget, set the cache environment
+file to `LLAMA_CACHE_RAM_MIB=8192` and restart. No ROCm rebuild is needed for this
+budget change, but the updated installed launcher is required.
 
 `qwen_prefix_diag.py` is the first gate for changing that constraint. It first
 runs a short target-only A/B/A sequence against two explicitly selected slots:

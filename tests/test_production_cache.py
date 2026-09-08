@@ -12,7 +12,7 @@ BASH = ("C:/Program Files/Git/bin/bash.exe" if os.name == "nt" else shutil.which
 
 @unittest.skipUnless(BASH and pathlib.Path(BASH).is_file(), "bash is required")
 class ProductionCache(unittest.TestCase):
-    def launch(self, cache="8192", parallel="1", patched=True):
+    def launch(self, cache="16384", parallel="1", patched=True):
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
@@ -34,6 +34,11 @@ class ProductionCache(unittest.TestCase):
     def test_production_opt_in_needs_no_diagnostic_flag(self):
         result = self.launch()
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Backing prompt cache limit: 16384 MiB", result.stdout)
+
+    def test_previous_eight_gib_setting_remains_supported(self):
+        result = self.launch(cache="8192")
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Backing prompt cache limit: 8192 MiB", result.stdout)
 
     def test_unpatched_runtime_is_rejected(self):
@@ -47,11 +52,11 @@ class ProductionCache(unittest.TestCase):
 
     def test_multi_slot_and_excessive_budget_rejected(self):
         self.assertEqual(self.launch(parallel="2").returncode, 64)
-        self.assertEqual(self.launch(cache="8193").returncode, 64)
+        self.assertEqual(self.launch(cache="16385").returncode, 64)
 
     def test_dropin_only_overrides_cache_settings(self):
         lines = (ROOT / "deployment/backing-cache.env").read_text().splitlines()
         settings = dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
-        self.assertEqual(settings, {"LLAMA_CACHE_RAM_MIB": "8192", "LLAMA_BACKING_CACHE_DIAGNOSTIC": "0"})
+        self.assertEqual(settings, {"LLAMA_CACHE_RAM_MIB": "16384", "LLAMA_BACKING_CACHE_DIAGNOSTIC": "0"})
         self.assertIn("EnvironmentFile=/etc/qwen-flash-next-cache.env",
                       (ROOT / "deployment/20-backing-cache.conf").read_text())

@@ -107,8 +107,8 @@ backing_cache_diagnostic="${LLAMA_BACKING_CACHE_DIAGNOSTIC:-0}"
 api_key="${api_key_override:-${LLAMA_API_KEY:-${QWEN_API_KEY:-${API_KEY:-}}}}"
 api_key_file="${api_key_file_override:-${LLAMA_ARG_API_KEY_FILE:-}}"
 
-if [[ ! "$cache_ram_mib" =~ ^[0-9]+$ ]] || (( cache_ram_mib > 8192 )); then
-    echo "LLAMA_CACHE_RAM_MIB must be an integer from 0 through 8192" >&2
+if [[ ! "$cache_ram_mib" =~ ^[0-9]+$ ]] || (( cache_ram_mib > 16384 )); then
+    echo "LLAMA_CACHE_RAM_MIB must be an integer from 0 through 16384" >&2
     exit 64
 fi
 if [[ "$backing_cache_diagnostic" != "0" && "$backing_cache_diagnostic" != "1" ]]; then
