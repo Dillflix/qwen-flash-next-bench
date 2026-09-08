@@ -36,6 +36,7 @@ jobs:
           python qwen_mtp_diag.py self-test
           python qwen_prefix_diag.py self-test
           python -m unittest discover -s tests -p 'test_backing_cache_diag.py'
+          python -m unittest discover -s tests -p 'test_production_cache.py'
           python deployment/prime-production.py --self-test
           python -m json.tool matrix.json >/dev/null
           python -m json.tool prompts.json >/dev/null

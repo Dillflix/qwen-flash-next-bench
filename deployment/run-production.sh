@@ -115,12 +115,8 @@ if [[ "$backing_cache_diagnostic" != "0" && "$backing_cache_diagnostic" != "1" ]
     echo "LLAMA_BACKING_CACHE_DIAGNOSTIC must be 0 or 1" >&2
     exit 64
 fi
-if (( cache_ram_mib > 0 )) && [[ "$backing_cache_diagnostic" != "1" ]]; then
-    echo "Backing-cache restoration is not qualified; use LLAMA_BACKING_CACHE_DIAGNOSTIC=1 for the isolated A/B" >&2
-    exit 64
-fi
-if [[ "$backing_cache_diagnostic" == "1" ]] && (( parallel != 1 )); then
-    echo "The backing-cache diagnostic requires exactly one slot" >&2
+if { (( cache_ram_mib > 0 )) || [[ "$backing_cache_diagnostic" == "1" ]]; } && [[ "$parallel" != "1" ]]; then
+    echo "Backing prompt caching requires exactly one slot" >&2
     exit 64
 fi
 
@@ -220,6 +216,13 @@ fi
 build_dir="$(cd -- "$(dirname -- "$llama_server")/.." && pwd)"
 llama_library="$build_dir/bin/libllama.so"
 [[ -f "$llama_library" ]] || llama_library="$build_dir/lib/libllama.so"
+if (( cache_ram_mib > 0 )); then
+    if ! grep -aFq 'prompt cache checkpoint candidate: source=ram' "$llama_server" ||
+       ! grep -aFq 'Qwen4Exp PLE snapshot version mismatch' "$llama_library"; then
+        echo "Backing prompt caching requires the checkpoint/PLE snapshot fix; rebuild with ./build-rocm10-dual.sh" >&2
+        exit 66
+    fi
+fi
 common_library="$build_dir/bin/libllama-common.so"
 [[ -f "$common_library" ]] || common_library="$build_dir/lib/libllama-common.so"
 for required in "$model" "$mmproj"; do

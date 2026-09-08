@@ -731,11 +731,42 @@ not a statistically controlled throughput claim. An 8-GiB cache is a capacity
 limit, not an assurance that 8 GiB fits every workload; PLE page-cache residency
 can change under RAM pressure.
 
-The launcher accepts `LLAMA_CACHE_RAM_MIB=0..8192` for this test; nonzero values
-require `LLAMA_BACKING_CACHE_DIAGNOSTIC=1`. Production remains at zero pending
-correct target/draft/PLE restoration. Additional live slots are not required
-for backing caching. Do not deploy the diagnostic setting solely because it
-loads successfully.
+The launcher accepts `LLAMA_CACHE_RAM_MIB=0..8192` for diagnostics or production.
+Nonzero values require one active slot and compiled markers for checkpoint-aware
+RAM selection and PLE sequence snapshots. The September 8 patched A/B passed
+both resumed conversations with 1225 reused tokens, identical output tokens,
+and MTP active. This is not blanket qualification of all client transformations
+or a long-running soak. Additional live slots are not required for backing caching.
+
+#### Enable the RAM backing cache in the existing production service
+
+The launcher still defaults to zero unless explicitly enabled. Install the
+updated launcher and this dedicated opt-in drop-in; **do not reinstall the main
+environment example**, which would replace your authentication/network settings.
+The existing service and prime helper remain unchanged. This briefly interrupts
+requests while the model reloads and startup priming runs.
+
+```bash
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench
+git pull --ff-only &&
+sudo install -Dm0755 deployment/run-production.sh /usr/local/libexec/qwen-flash-next &&
+sudo install -Dm0644 deployment/backing-cache.env /etc/qwen-flash-next-cache.env &&
+sudo install -Dm0644 deployment/20-backing-cache.conf \
+  /etc/systemd/system/qwen-flash-next.service.d/20-backing-cache.conf &&
+sudo systemctl daemon-reload &&
+sudo systemctl restart qwen-flash-next.service &&
+sudo systemctl status qwen-flash-next.service --no-pager
+```
+
+The rebuilt runtime from `4eae42b` is required; another rebuild is unnecessary
+if that version already passed the backing-cache test. The drop-in changes only
+the RAM cache limit (8192 MiB) and clears the diagnostic flag, preserving MTP,
+PLE mmap, F16 KV, one-slot context allocation, and the API key/bind address.
+Look for `Backing prompt cache limit: 8192 MiB` in the new startup journal and
+confirm `active (running)` after priming. To disable without removing any files,
+set `LLAMA_CACHE_RAM_MIB=0` with `sudoedit /etc/qwen-flash-next-cache.env`, then
+restart the service. Cache contents are in process RAM and do not survive restart.
+SSD-backed PLE is unchanged; this does not enable SSD-backed prompt caching.
 
 `qwen_prefix_diag.py` is the first gate for changing that constraint. It first
 runs a short target-only A/B/A sequence against two explicitly selected slots:
