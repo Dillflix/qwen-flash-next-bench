@@ -81,3 +81,51 @@ reports whether drafting occurred: successful vision with a native bypass is
 not evidence that speculative image-conditioned decoding was exercised.
 Passing this short test does not qualify a fully populated 8 GiB cache, long
 conversations, multiple active slots, or near-full-context vision inference.
+
+## Focused uncached repeat / cache / MTP comparison
+
+The initial smoke demonstrated cache reuse and correct shapes/OCR, but the
+first cold output differed from both identical cached outputs. To separate
+uncached repeatability from cache-path drift, use:
+
+```bash
+python3 qwen_strix_service_smoke.py --repeat-ab --run
+```
+
+This runs **six requests**, all with the same saved 32768-token prompt and a
+32-token generation cap:
+
+1. Fresh server with MTP n=3: uncached, uncached, cached.
+2. Fresh server without the draft model or speculative options: uncached,
+   uncached, cached.
+
+Each uncached request explicitly uses `cache_prompt: false`; reported
+`cache_n=0` and `prompt_n=32768` must confirm full processing. The cached request
+must demonstrate reuse. The test checks observed draft activity in both arms.
+Target settings, SSD PLE, vision loading, 256K allocation, and cache settings
+are unchanged. Removing MTP also removes its memory allocation and changes
+verification batch shapes; this is a diagnostic contrast, not proof of a
+specific fault. No image requests, diversion requests, or full-256K prompts
+are repeated. Four full 32K prefills are unavoidable in this comparison;
+using the recent timings, allow roughly six minutes including two model loads,
+or longer if the cached requests miss or the host is busy.
+
+Both arms run even if the first reports output drift. A crash, timeout, or
+malformed response stops the run and is archived. Production is stopped and
+conditionally restored once around the entire pair, with one combined archive
+under `trial-results/hip-cache-repeat-ab.*.tar.gz`.
+
+The per-arm verdict distinguishes:
+
+- `PASS`: both uncached responses and the cached response match exactly.
+- `INCONCLUSIVE_UNCACHED_DRIFT`: the uncached responses differ; do not attribute
+  the difference specifically to caching.
+- `CACHE_PATH_DRIFT`: the uncached pair matches but cached output differs.
+- `INVALID`: cache or MTP activity did not satisfy the diagnostic controls.
+
+Non-PASS results return a nonzero status. Token divergence positions and IDs,
+full outputs, and per-request prefill/decode timings are retained. A
+cross-arm comparison of the second uncached responses is recorded separately
+in `results.json`; passing per-arm tests is not a general MTP equivalence or
+quality certification. Cache-path drift alone still cannot distinguish floating
+point/batch-shape effects from incomplete checkpoint restoration.

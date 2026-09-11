@@ -11,6 +11,58 @@ import qwen_strix_service_smoke as smoke
 
 
 class ServiceSmokeTests(unittest.TestCase):
+    def test_mtp_off_removes_draft_options_without_changing_target_or_vision(self):
+        on = smoke.command_for(pathlib.Path('/trial'), pathlib.Path('/models'))
+        off = smoke.without_mtp(on)
+        self.assertNotIn('-md', off)
+        self.assertFalse(any(arg.startswith('--spec-') for arg in off))
+        for flag in ('-m', '--device', '--mmproj', '--mmproj-device', '--cache-ram', '--ctx-size'):
+            self.assertEqual(on[on.index(flag) + 1], off[off.index(flag) + 1])
+        self.assertIn('--ngram-on-disk', off)
+
+    def test_repeat_classification(self):
+        def response(tokens, cached=0):
+            return {'tokens': tokens, 'content': str(tokens),
+                    'timings': {'cache_n': cached, 'prompt_n': 32768 - cached, 'draft_n': 5}}
+        data = {'uncached_1': response([1, 2]), 'uncached_2': response([1, 2]),
+                'cached': response([1, 2], 32764)}
+        self.assertEqual(smoke.repeat_verdict(data, 32768, True)['status'], 'PASS')
+        data['cached'] = response([1, 3], 32764)
+        self.assertEqual(smoke.repeat_verdict(data, 32768, True)['status'], 'CACHE_PATH_DRIFT')
+        data['uncached_2'] = response([1, 3])
+        self.assertEqual(smoke.repeat_verdict(data, 32768, True)['status'], 'INCONCLUSIVE_UNCACHED_DRIFT')
+        data['uncached_1'] = response([1, 2], 5)
+        self.assertEqual(smoke.repeat_verdict(data, 32768, True)['status'], 'INVALID')
+
+    def test_missing_draft_activity_invalidates_enabled_arm(self):
+        response = {'tokens': [1], 'content': 'one', 'timings': {'cache_n': 0, 'prompt_n': 10}}
+        cached = dict(response, timings={'cache_n': 9, 'prompt_n': 1})
+        data = {'uncached_1': response, 'uncached_2': response, 'cached': cached}
+        self.assertEqual(smoke.repeat_verdict(data, 10, False)['status'], 'PASS')
+        self.assertEqual(smoke.repeat_verdict(data, 10, True)['status'], 'INVALID')
+
+    def test_comparison_detects_shorter_output(self):
+        result = smoke.output_comparison({'tokens': [1, 2]}, {'tokens': [1]})
+        self.assertFalse(result['tokens_match'])
+        self.assertEqual(result['first_divergence_zero_based'], 1)
+        self.assertIsNone(result['second_token_id'])
+
+    def test_repeat_probe_request_sequence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = []
+            def respond(endpoint, body):
+                calls.append(body)
+                cached = 9 if body['cache_prompt'] else 0
+                return {'content': 'valid result', 'tokens': [10, 11],
+                        'timings': {'cache_n': cached, 'prompt_n': 10-cached, 'predicted_n': 2, 'draft_n': 1}}
+            results = {}
+            with mock.patch.object(smoke, 'post', side_effect=respond), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                smoke.repeat_probes(pathlib.Path(tmp), list(range(10)), results, True)
+            self.assertEqual([body['cache_prompt'] for body in calls], [False, False, True])
+            self.assertTrue(all('id_slot' not in body for body in calls))
+            self.assertEqual(results['verdict']['status'], 'PASS')
+
     def test_device_and_memory_constraints(self):
         command = smoke.command_for(pathlib.Path('/trial'), pathlib.Path('/models'))
         for option, value in {
@@ -116,7 +168,7 @@ class ServiceSmokeTests(unittest.TestCase):
                 baseline = root / 'trial-results/hip-templated-32k.xhe6lmo5/prompt-tokens.json'
                 baseline.parent.mkdir(parents=True)
                 baseline.write_text(json.dumps([1] * 32768))
-                args = types.SimpleNamespace(trial_dir=root, model_dir=root, run=True)
+                args = types.SimpleNamespace(trial_dir=root, model_dir=root, run=True, repeat_ab=False)
 
                 def run_result(command, **kwargs):
                     code = (0 if active else 3) if command[:2] == ['systemctl', 'is-active'] else 0
@@ -139,6 +191,49 @@ class ServiceSmokeTests(unittest.TestCase):
                 archives = list((root / 'trial-results').glob('hip-cache-vision-256k.*.tar.gz'))
                 self.assertEqual(len(archives), 1)
                 self.assertTrue(pathlib.Path(str(archives[0]) + '.sha256').is_file())
+
+    def test_ab_continues_after_drift_and_restores_service_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            command = smoke.command_for(root, root)
+            for flag in ('-m', '-md', '--mmproj'):
+                path = pathlib.Path(command[command.index(flag) + 1])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            baseline = root / 'trial-results/hip-templated-32k.xhe6lmo5/prompt-tokens.json'
+            baseline.parent.mkdir(parents=True)
+            baseline.write_text(json.dumps([1] * 32768))
+            args = types.SimpleNamespace(trial_dir=root, model_dir=root, run=True, repeat_ab=True)
+
+            def probes(out, tokens, results, mtp):
+                results['verdict'] = {'status': 'CACHE_PATH_DRIFT' if mtp else 'PASS'}
+                results['uncached_2'] = {'tokens': [1, 2], 'content': 'two'}
+
+            with mock.patch.object(smoke.argparse.ArgumentParser, 'parse_args', return_value=args), \
+                    mock.patch.object(smoke.sys, 'platform', 'linux'), \
+                    mock.patch.object(smoke.os, 'access', return_value=True), \
+                    mock.patch.object(smoke.subprocess, 'check_output', return_value=smoke.PIN), \
+                    mock.patch.object(smoke.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)) as run, \
+                    mock.patch.object(smoke.subprocess, 'Popen') as launch, \
+                    mock.patch.object(smoke, 'memory_monitor'), \
+                    mock.patch.object(smoke, 'wait_ready'), \
+                    mock.patch.object(smoke, 'stop_server'), \
+                    mock.patch.object(smoke, 'repeat_probes', side_effect=probes) as probe, \
+                    mock.patch.object(smoke.urllib.request, 'urlopen') as urlopen, \
+                    mock.patch.object(smoke.socket, 'socket') as socket, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                socket.return_value.__enter__.return_value.connect_ex.return_value = 1
+                urlopen.return_value.__enter__.return_value.read.return_value = json.dumps({
+                    'modalities': {'vision': True}, 'default_generation_settings': {'n_ctx': 262144}}).encode()
+                self.assertEqual(smoke.main(), 1)
+            self.assertEqual(launch.call_count, 2)
+            self.assertIn('-md', launch.call_args_list[0].args[0])
+            self.assertNotIn('-md', launch.call_args_list[1].args[0])
+            self.assertEqual([call.kwargs['mtp'] for call in probe.call_args_list], [True, False])
+            actions = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(actions.count(['sudo', 'systemctl', 'stop', smoke.SERVICE]), 1)
+            self.assertEqual(actions.count(['sudo', 'systemctl', 'start', smoke.SERVICE]), 1)
+            self.assertEqual(len(list((root / 'trial-results').glob('hip-cache-repeat-ab.*.tar.gz'))), 1)
 
 
 if __name__ == '__main__':

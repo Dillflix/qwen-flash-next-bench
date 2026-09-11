@@ -56,6 +56,102 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
+def without_mtp(command):
+    result, index = [], 0
+    while index < len(command):
+        if command[index] == "-md" or command[index].startswith("--spec-"):
+            index += 2
+        else:
+            result.append(command[index])
+            index += 1
+    return result
+
+
+def output_comparison(first, second):
+    a, b = first.get("tokens", []), second.get("tokens", [])
+    shared = lcp(a, b)
+    equal = bool(a) and a == b
+    return {"tokens_match": equal, "text_matches": first.get("content") == second.get("content"),
+            "first_divergence_zero_based": None if equal else shared,
+            "first_token_id": a[shared] if shared < len(a) else None,
+            "second_token_id": b[shared] if shared < len(b) else None}
+
+
+def repeat_verdict(results, prompt_length, mtp):
+    errors = []
+    for name in ("uncached_1", "uncached_2"):
+        timing = results[name].get("timings", {})
+        if timing.get("cache_n") != 0 or timing.get("prompt_n") != prompt_length:
+            errors.append(f"{name}: not a full uncached {prompt_length}-token prefill")
+    timing = results["cached"].get("timings", {})
+    if timing.get("cache_n", 0) <= 0 or timing.get("cache_n", 0) + timing.get("prompt_n", 0) != prompt_length:
+        errors.append("cached: prefix reuse was not demonstrated for the full input")
+    for name in ("uncached_1", "uncached_2", "cached"):
+        drafting = results[name].get("timings", {}).get("draft_n", 0) > 0
+        if drafting != mtp:
+            errors.append(f"{name}: MTP activity does not match the requested arm")
+    uncached = output_comparison(results["uncached_1"], results["uncached_2"])
+    cached = output_comparison(results["uncached_2"], results["cached"])
+    if errors:
+        status = "INVALID"
+    elif not uncached["tokens_match"] or not uncached["text_matches"]:
+        status = "INCONCLUSIVE_UNCACHED_DRIFT"
+    elif not cached["tokens_match"] or not cached["text_matches"]:
+        status = "CACHE_PATH_DRIFT"
+    else:
+        status = "PASS"
+    return {"status": status, "errors": errors, "uncached_repeat": uncached,
+            "cached_vs_second_uncached": cached,
+            "note": "Cache-path drift does not distinguish numerical changes from a state-restoration bug."}
+
+
+def repeat_probes(out, tokens, results, mtp):
+    for label, cache_prompt in (("uncached_1", False), ("uncached_2", False), ("cached", True)):
+        body = {"prompt": tokens, "n_predict": 32, "temperature": 0, "seed": 1234,
+                "cache_prompt": cache_prompt, "return_tokens": True, "stream": False}
+        write_json(out / f"{label}-request.json", body)
+        print(f"{out.name}/{label}: {len(tokens)} input tokens; cache_prompt={cache_prompt}", flush=True)
+        response = post("/completion", body)
+        write_json(out / f"{label}-response.json", response)
+        results[label] = response
+        print(json.dumps({"timings": response.get("timings"), "content": response.get("content")}), flush=True)
+        text_result(response)
+    results["verdict"] = repeat_verdict(results, len(tokens), mtp)
+    write_json(out / "repeat-summary.json", results["verdict"])
+    print(json.dumps(results["verdict"], indent=2), flush=True)
+
+
+def stop_server(server):
+    if server is not None and server.poll() is None:
+        server.terminate()
+        try:
+            server.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait(timeout=30)
+
+
+def wait_ready(server):
+    start, next_update = time.monotonic(), 0
+    while True:
+        if server.poll() is not None:
+            raise RuntimeError(f"Server exited during startup: {server.returncode}")
+        elapsed = time.monotonic() - start
+        if elapsed > 600:
+            raise TimeoutError("Startup exceeded 600 seconds")
+        try:
+            with urllib.request.urlopen(URL + "/health", timeout=2) as response:
+                if response.status == 200:
+                    print(f"READY after {elapsed:.1f}s", flush=True)
+                    return
+        except OSError:
+            pass
+        if elapsed >= next_update:
+            print(f"Startup: {elapsed:.0f}s", flush=True)
+            next_update = elapsed + 30
+        time.sleep(2)
+
+
 def lcp(a, b):
     for i, (x, y) in enumerate(zip(a, b)):
         if x != y:
@@ -192,9 +288,13 @@ def main():
     parser.add_argument("--trial-dir", type=pathlib.Path, default=TRIAL)
     parser.add_argument("--model-dir", type=pathlib.Path, default=MODELS)
     parser.add_argument("--run", action="store_true")
+    parser.add_argument("--repeat-ab", action="store_true",
+                        help="Replace cache/vision smoke with uncached/uncached/cached, in fresh MTP-on/off servers")
     args = parser.parse_args()
     command = command_for(args.trial_dir, args.model_dir)
-    print(json.dumps({"command": command, "probes": ["A cold 32K", "A live repeat", "B diversion", "A backing restore", "vision shapes"]}, indent=2), flush=True)
+    print(json.dumps({"command": command, "repeat_ab": args.repeat_ab,
+                      "probes": (["MTP on: uncached / uncached / cached", "MTP off: uncached / uncached / cached"]
+                                 if args.repeat_ab else ["A cold 32K", "A live repeat", "B diversion", "A backing restore", "vision shapes"])}, indent=2), flush=True)
     if not args.run:
         print("Plan only. --run is an isolated trial; production settings are never edited.")
         return 0
@@ -218,7 +318,8 @@ def main():
         if sock.connect_ex(("127.0.0.1", 8189)) == 0:
             raise RuntimeError("Port 8189 is occupied; stop the previous test first")
     subprocess.run(["sudo", "-v"], check=True)
-    out = pathlib.Path(tempfile.mkdtemp(prefix="hip-cache-vision-256k.", dir=args.trial_dir / "trial-results"))
+    prefix = "hip-cache-repeat-ab." if args.repeat_ab else "hip-cache-vision-256k."
+    out = pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=args.trial_dir / "trial-results"))
     write_json(out / "command.json", command)
     write_json(out / "revision.json", {"trial_revision": revision})
     print(f"Results: {out}", flush=True)
@@ -238,48 +339,46 @@ def main():
         monitor.start()
         env, removed = trial_environment()
         write_json(out / "environment-isolation.json", {"removed_variable_names": removed})
-        log = (out / "server.log").open("wb")
-        server = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=env)
-        start, next_update = time.monotonic(), 0
-        while True:
-            if server.poll() is not None:
-                raise RuntimeError(f"Server exited during startup: {server.returncode}")
-            elapsed = time.monotonic() - start
-            if elapsed > 600:
-                raise TimeoutError("Startup exceeded 600 seconds")
-            try:
-                with urllib.request.urlopen(URL + "/health", timeout=2) as response:
-                    if response.status == 200:
-                        break
-            except OSError:
-                pass
-            if elapsed >= next_update:
-                print(f"Startup: {elapsed:.0f}s", flush=True)
-                next_update = elapsed + 30
-            time.sleep(2)
-        print(f"READY after {elapsed:.1f}s", flush=True)
-        with urllib.request.urlopen(URL + "/props", timeout=10) as response:
-            props = json.load(response)
-        write_json(out / "props.json", props)
-        if not props.get("modalities", {}).get("vision") or props.get("default_generation_settings", {}).get("n_ctx") != 262144:
-            raise RuntimeError("Server did not confirm vision plus 262144 context")
-        probes(out, tokens, results)
-        results["verdict"] = evaluate(results)
-        print(json.dumps(results["verdict"], indent=2), flush=True)
-        status = int(results["verdict"]["status"] != "PASS")
+        arms = [("mtp_on", command), ("mtp_off", without_mtp(command))] if args.repeat_ab else [("smoke", command)]
+        for name, arm_command in arms:
+            arm_out = out / name if args.repeat_ab else out
+            arm_out.mkdir(exist_ok=True)
+            arm_results = {} if args.repeat_ab else results
+            if args.repeat_ab:
+                results[name] = arm_results
+            write_json(arm_out / "command.json", arm_command)
+            print(f"Starting {name}", flush=True)
+            log = (arm_out / "server.log").open("wb")
+            server = subprocess.Popen(arm_command, stdout=log, stderr=subprocess.STDOUT, env=env)
+            wait_ready(server)
+            with urllib.request.urlopen(URL + "/props", timeout=10) as response:
+                props = json.load(response)
+            write_json(arm_out / "props.json", props)
+            if not props.get("modalities", {}).get("vision") or props.get("default_generation_settings", {}).get("n_ctx") != 262144:
+                raise RuntimeError("Server did not confirm vision plus 262144 context")
+            if args.repeat_ab:
+                repeat_probes(arm_out, tokens, arm_results, mtp=name == "mtp_on")
+            else:
+                probes(arm_out, tokens, arm_results)
+                arm_results["verdict"] = evaluate(arm_results)
+                print(json.dumps(arm_results["verdict"], indent=2), flush=True)
+            status = max(status, int(arm_results["verdict"]["status"] != "PASS"))
+            stop_server(server)
+            server = None
+            log.close()
+            log = None
+        if args.repeat_ab:
+            results["cross_arm_second_uncached"] = output_comparison(
+                results["mtp_on"]["uncached_2"], results["mtp_off"]["uncached_2"])
+            write_json(out / "comparison.json", {name: value["verdict"] for name, value in results.items()
+                                                 if name in ("mtp_on", "mtp_off")})
     except BaseException as error:
         status = 1
         results["error"] = f"{type(error).__name__}: {error}"
         print("ERROR: " + results["error"], file=sys.stderr, flush=True)
     finally:
         signal.signal(signal.SIGTERM, previous_term)
-        if server is not None and server.poll() is None:
-            server.terminate()
-            try:
-                server.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                server.kill()
-                server.wait()
+        stop_server(server)
         if log is not None:
             log.close()
         stop.set()
