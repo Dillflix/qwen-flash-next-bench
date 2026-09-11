@@ -86,6 +86,19 @@ do not deploy them. Success includes a complete inventory plus verification of
 tensor names, shapes, explicit recipe types, token embedding, and output type.
 No GPU run, quality evaluation, or performance claim is implied by this check.
 
+If quantization completed but post-verification failed, retain the output. To
+recheck it without running the quantizer or writing anything:
+
+```bash
+python3 qwen_strix_quant.py --source "$SOURCE_GGUF" \
+  --output-dir "$OUTPUT_DIR" --verify-only
+```
+
+Shape comparisons accept trailing size-one axes being omitted by the C++ GGUF
+writer (for example `[2560, 1]` becomes `[2560]`). Non-unit axes, axis order,
+recipe types, and protected precision remain checked. A quantizer fallback
+warning is separate: inspect `run.log` to identify the tensor and actual type.
+
 Next qualification: gfx1151-only HIP and Vulkan, matched exact 32K prefill and
 decode, followed by MTP n=3 and quality checks. Full 256K allocation comes after
 the candidate passes these cheaper screens. No production switch is automatic.

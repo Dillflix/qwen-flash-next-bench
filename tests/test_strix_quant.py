@@ -1,4 +1,5 @@
 import copy
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +19,36 @@ def fixture():
 
 
 class StrixQuantTests(unittest.TestCase):
+    def test_trailing_unit_axes_only(self):
+        name = "blk.0.ffn_gate_inp_shexp.weight"
+        before = {name: {"dimensions": [2560, 1], "type": "F32"}}
+        after = {name: {"dimensions": [2560], "type": "F32"}}
+        quant.verify(before, after)
+        after[name]["type"] = "Q8_0"
+        with self.assertRaisesRegex(ValueError, "Protected tensor"):
+            quant.verify(before, after)
+        for shape in ([1, 2560], [1280, 2], [2560, 2]):
+            after[name] = {"dimensions": shape, "type": "F32"}
+            with self.assertRaisesRegex(ValueError, "Output shape"):
+                quant.verify(before, after)
+        self.assertEqual(quant.canonical_shape([2560, 1, 1, 1]), (2560,))
+        self.assertEqual(quant.canonical_shape([1, 1]), (1,))
+        self.assertEqual(quant.canonical_shape([2, 1, 3]), (2, 1, 3))
+
+    def test_verify_only_does_not_launch_quantizer_or_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("sys.argv", ["qwen_strix_quant.py", "--source", "source.gguf",
+                                    "--output-dir", directory, "--verify-only"]), \
+                    patch.object(quant, "checked_tensors", return_value={}), \
+                    patch.object(quant, "verify") as verify, \
+                    patch.object(quant.subprocess, "check_output") as revision, \
+                    patch.object(quant, "run_logged") as run:
+                quant.main()
+                verify.assert_called_once_with({}, {})
+                revision.assert_not_called()
+                run.assert_not_called()
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
     def test_shards(self):
         self.assertEqual(quant.source_files(Path("x-00001-of-00002.gguf")),
                          [Path("x-00001-of-00002.gguf"), Path("x-00002-of-00002.gguf")])

@@ -67,19 +67,27 @@ def checked_tensors(files: list[Path], source: bool) -> dict:
     return tensors
 
 
+def canonical_shape(dimensions: list[int]) -> tuple[int, ...]:
+    """Match ggml_n_dims: omit trailing unit axes, retaining at least one."""
+    shape = list(dimensions)
+    while len(shape) > 1 and shape[-1] == 1:
+        shape.pop()
+    return tuple(shape)
+
+
 def verify(before: dict, after: dict) -> None:
     if before.keys() != after.keys():
         raise ValueError("Output tensor names differ from source")
     rules = read_recipe(RECIPE)
     for name, tensor in after.items():
-        if tensor["dimensions"] != before[name]["dimensions"]:
+        if canonical_shape(tensor["dimensions"]) != canonical_shape(before[name]["dimensions"]):
             raise ValueError(f"Output shape changed: {name}")
         for pattern, qtype, _ in rules:
             if pattern.search(name) and tensor["type"] != qtype:
                 raise ValueError(f"Wrong output type: {name}={tensor['type']}, expected {qtype}")
         if name in {"output.weight", "token_embd.weight"} and tensor["type"] != "Q8_0":
             raise ValueError(f"Expected Q8_0: {name}")
-        protected = (len(tensor["dimensions"]) == 1 or "_norm.weight" in name or
+        protected = (len(canonical_shape(before[name]["dimensions"])) == 1 or "_norm.weight" in name or
                      "ffn_gate_inp.weight" in name or "ssm_conv1d" in name or
                      re.search(r"\.indexer\.(q|k)_proj\.weight$", name))
         if protected and tensor["type"] != before[name]["type"]:
@@ -91,18 +99,27 @@ def main() -> None:
     parser.add_argument("--source", type=Path, required=True, help="F16/BF16 GGUF or its first shard")
     parser.add_argument("--llama-dir", type=Path,
                         default=Path("/srv/llm/src/strix-llama-trial-5f851647"))
-    parser.add_argument("--output-dir", type=Path, required=True, help="Must not already exist")
+    parser.add_argument("--output-dir", type=Path, required=True, help="Must be new unless --verify-only")
     parser.add_argument("--imatrix", type=Path)
     parser.add_argument("--threads", type=int, default=8)
-    parser.add_argument("--run", action="store_true", help="Without this flag, only inspect headers and print plan")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--run", action="store_true", help="Quantize and verify")
+    mode.add_argument("--verify-only", action="store_true", help="Read existing output headers; no quantization or writes")
     args = parser.parse_args()
     if args.threads < 1:
         raise ValueError("--threads must be positive")
     source = args.source.resolve()
     output_dir = args.output_dir.resolve()
-    if output_dir.exists():
+    output = output_dir / "Qwen3.8-Flash-Next-Q5_K-IQ4_NL-PLE-Q8_0.gguf"
+    if output_dir.exists() and not args.verify_only:
         raise ValueError("Output directory already exists; choose a new directory")
     before = checked_tensors(source_files(source), source=True)
+    if args.verify_only:
+        after = checked_tensors([output], source=False)
+        verify(before, after)
+        print(f"Recipe verification PASS: {output}")
+        print("Read-only layout/type check; no weights written. GPU correctness, quality, and performance remain untested.")
+        return
     revision = subprocess.check_output(["git", "-C", str(args.llama_dir), "rev-parse", "HEAD"], text=True).strip()
     if revision != PIN:
         raise ValueError(f"Expected inspected Strix revision {PIN}, found {revision}")
@@ -115,7 +132,6 @@ def main() -> None:
                "--output-tensor-type", "Q8_0", "--token-embedding-type", "Q8_0"]
     if args.imatrix:
         options += ["--imatrix", str(args.imatrix.resolve())]
-    output = output_dir / "Qwen3.8-Flash-Next-Q5_K-IQ4_NL-PLE-Q8_0.gguf"
     command = options + [str(source), str(output), "Q8_0", str(args.threads)]
     print(command_text(command), flush=True)
     print("Calibration: " + ("supplied imatrix" if args.imatrix else "UNCALIBRATED screening candidate"))
@@ -129,7 +145,7 @@ def main() -> None:
     if shutil.disk_usage(parent).free < 145 * 1024**3:
         raise ValueError("At least 145 GiB free output disk space required")
     output_dir.mkdir(exist_ok=False)
-    metadata = {"tool": "qwen_strix_quant.py", "version": "1.0.1", "strix_revision": revision,
+    metadata = {"tool": "qwen_strix_quant.py", "version": "1.0.2", "strix_revision": revision,
                 "source_files": [str(p) for p in source_files(source)],
                 "recipe": RECIPE.read_text(), "calibrated": bool(args.imatrix)}
     dry_dir = output_dir / "dry-run"
