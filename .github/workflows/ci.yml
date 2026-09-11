@@ -22,6 +22,8 @@ jobs:
         run: |
           python -m py_compile qwen_bench.py
           python -m py_compile qwen_quant.py
+          python -m py_compile qwen_strix_quant.py
+          python -m unittest discover -s tests -p 'test_strix_quant.py'
           python -m py_compile qwen_vision.py
           python -m py_compile qwen_rocm.py
           python -m py_compile qwen_inventory.py

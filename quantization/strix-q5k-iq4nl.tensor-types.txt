@@ -1,0 +1,3 @@
+^blk\.[0-9]+\.ffn_(gate|up)_exps\.weight$=Q5_K
+^blk\.[0-9]+\.ffn_down_exps\.weight$=IQ4_NL
+^per_layer_token_embd\.weight$=Q8_0
