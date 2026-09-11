@@ -19,6 +19,11 @@ Do not requantize ROCmFP4 or another low-bit GGUF. The earlier H1 conversion was
 deferred; its source file must not be assumed to exist. This helper accepts an
 F16/BF16/F32 target GGUF (or its first shard), with joined PLE, without the MTP
 block. GGUF file sharding is supported; splitting PLE into 16 tensors is not.
+Model architecture metadata is required in the first shard only; later shards
+may omit it, as the converter normally does. A conflicting architecture on any
+later shard is rejected. If an older helper reports `Not a qwen4exp GGUF` for
+shard 2 after successful conversion, update the helper and rerun the plan using
+the existing first shard; do not repeat conversion for that preflight error.
 Header precision checks cannot detect a file previously dequantized from low bit:
 source provenance must also be known.
 

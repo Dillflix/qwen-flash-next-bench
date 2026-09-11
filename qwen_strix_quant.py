@@ -37,9 +37,13 @@ def source_files(first: Path) -> list[Path]:
 
 def checked_tensors(files: list[Path], source: bool) -> dict:
     tensors = {}
-    for path in files:
+    for index, path in enumerate(files):
         report = inventory(path, include_tensors=True)
-        if report["metadata"].get("general.architecture") != "qwen4exp":
+        # GGUFWriter stores model metadata in the first shard only. Later
+        # shards may omit architecture, but must not declare a different one.
+        architecture = report["metadata"].get("general.architecture")
+        if (index == 0 and architecture != "qwen4exp") or (
+                index > 0 and architecture not in (None, "qwen4exp")):
             raise ValueError(f"Not a qwen4exp GGUF: {path}")
         for tensor in report["tensors"]:
             name = tensor["name"]
@@ -125,7 +129,7 @@ def main() -> None:
     if shutil.disk_usage(parent).free < 145 * 1024**3:
         raise ValueError("At least 145 GiB free output disk space required")
     output_dir.mkdir(exist_ok=False)
-    metadata = {"tool": "qwen_strix_quant.py", "version": "1.0.0", "strix_revision": revision,
+    metadata = {"tool": "qwen_strix_quant.py", "version": "1.0.1", "strix_revision": revision,
                 "source_files": [str(p) for p in source_files(source)],
                 "recipe": RECIPE.read_text(), "calibrated": bool(args.imatrix)}
     dry_dir = output_dir / "dry-run"

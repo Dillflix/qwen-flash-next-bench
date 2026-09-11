@@ -38,6 +38,32 @@ class StrixQuantTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Wrong output type"):
             quant.verify(before, after)
 
+    def test_model_metadata_only_in_first_shard(self):
+        report = fixture()
+        shards = [
+            {"metadata": report["metadata"], "tensors": report["tensors"][:-1]},
+            {"metadata": {}, "tensors": report["tensors"][-1:]},
+        ]
+        with patch.object(quant, "inventory", side_effect=shards):
+            tensors = quant.checked_tensors([Path("first"), Path("second")], source=True)
+        self.assertEqual(len(tensors), 145)
+        self.assertIn("per_layer_token_embd.weight", tensors)
+
+    def test_first_shard_requires_architecture(self):
+        report = fixture()
+        for architecture in (None, "llama"):
+            report["metadata"] = {} if architecture is None else {"general.architecture": architecture}
+            with patch.object(quant, "inventory", return_value=report):
+                with self.assertRaisesRegex(ValueError, "Not a qwen4exp"):
+                    quant.checked_tensors([Path("first")], source=True)
+
+    def test_later_shard_cannot_contradict_architecture(self):
+        first = fixture()
+        later = {"metadata": {"general.architecture": "llama"}, "tensors": []}
+        with patch.object(quant, "inventory", side_effect=[first, later]):
+            with self.assertRaisesRegex(ValueError, "Not a qwen4exp"):
+                quant.checked_tensors([Path("first"), Path("second")], source=True)
+
     def test_rejects_requantization_and_bad_shape(self):
         report = fixture()
         report["tensors"][0]["type"] = "Q5_K"
