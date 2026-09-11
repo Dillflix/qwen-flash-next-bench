@@ -143,8 +143,10 @@ This patch does not change quantization, kernels, acceptance rules, or KV precis
 The payload has a version marker and embedding width. Missing, truncated, or
 incompatible payloads fail explicitly rather than leaving stale state. Start
 fresh processes for the test; do not import old saved slots into the patched
-runtime. The serialized row is 10248 bytes at width 2560 (10240 bytes plus an
-8-byte header), per checkpoint, not another multi-GiB model buffer.
+runtime. The measured model reports hidden-output width 10240: the serialized
+row is 40968 bytes (40960 bytes plus an 8-byte header) per checkpoint, not
+another multi-GiB model buffer. This is the exported hidden width, not the
+model's 2560-wide base embedding.
 
 This is a local candidate repair for the measured gfx1151 deployment, not an
 upstream submission or a proven fix for token divergence. Bad draft state
@@ -181,3 +183,62 @@ records binary hashes, and requires an executed restore-hook log in the MTP-on
 arm. A stale or unused patch cannot pass the diagnostic merely because output
 happens to match. Results still go into one archive, and production restoration
 retains the same conditional behavior described above.
+
+## Occupied backing cache plus near-full inference
+
+The combined smoke passed on the patched runtime, including A/B/A restoration
+and the vision fixture, but occupied only about 1814.767 MiB of the 8192 MiB
+backing cache. It did not run a near-full prompt. The following is a separate
+capacity validation, not another full test matrix:
+
+```bash
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench &&
+git pull --ff-only &&
+python3 -m unittest discover -s tests -p 'test_strix_capacity.py' &&
+python3 qwen_strix_service_smoke.py --capacity-validation --run
+```
+
+Run inside tmux. No rebuild is required if the previously validated MTP state
+patch is installed. The compiled marker is required before stopping any service.
+Omit `--run` for a read-only plan. Do not run other GPU or memory-intensive jobs
+alongside this trial. It uses the same isolated 262144-context, one-slot command:
+target, Q8_0 MTP n=3 and BF16 vision on ROCm1; target/draft F16 KV; PLE SSD direct
+I/O; ordinary weights loaded without mmap; 8192 MiB backing cache and eight
+checkpoints. No production settings are edited.
+
+The sequence is:
+
+1. Issue distinct 256-token conversations, saving actual states, until server
+   logs show at least 95% of the unchanged 8192 MiB limit occupied **and** a
+   capacity eviction. Stop with failure after 64 requests if not demonstrated.
+   This is whole-entry saturation, not a claim that exactly 8192 MiB are used.
+   No dummy memory allocation substitutes for a real backing-cache entry.
+2. Restore a recently saved conversation after eviction. Require identical
+   tokens/text, a cache hit, backing-entry selection and the patched MTP restore
+   hook. Refill, then recheck saturation.
+3. Submit **one exact 253952-token uncached prompt**, with up to 128 generated
+   tokens. Check occupancy again at admission, before prefill. Record actual
+   prefill/decode timings and MTP counters. Check retrieval of three codes at
+   early, middle and late token positions; record exact positions and input
+   hash. This is a narrow retrieval check, not broad quality qualification.
+4. Issue one short new conversation to observe what happens when the near-full
+   state is offered to the backing cache. A state larger than 8 GiB is skipped
+   by this runtime; that is reported separately and **does not prove near-full
+   conversation retention** even if co-resident inference passes. No second
+   expensive long prefill is run.
+
+The long request has a two-hour timeout. Memory/progress is printed every 30
+seconds and sampled every second. A guard terminates the owned trial server
+if available RAM stays below 2 GiB for three samples, swap use increases by more
+than 256 MiB from probe start, or memory monitoring fails. These are conservative
+test limits, not a guarantee against a sudden allocation failure or host OOM.
+Guard termination is a failed/incomplete validation, never a pass.
+
+The archive is `trial-results/hip-cache-full-context.*.tar.gz` and contains
+requests/responses, cache occupancy history, restore comparison, exact-token
+fixture manifest, long-request timings, per-phase memory, server log, binary
+fingerprints and final results. Errors still package collected evidence.
+Production is restarted only if it was active before the trial; if it was
+inactive, it remains inactive. A PASS establishes this bounded test only, not
+maximum concurrency, byte-exact cache utilization, every context position, or
+production endurance.

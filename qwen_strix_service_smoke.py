@@ -3,7 +3,8 @@
 
 Default: print a plan. --run temporarily stops an active production service,
 starts only the pinned trial, and restores the service and archives on exit.
-Does not modify production configuration or fill the backing cache to its cap.
+Does not modify production configuration. --capacity-validation replaces the
+short smoke with occupied backing-cache and near-full-context validation.
 """
 from __future__ import annotations
 
@@ -307,15 +308,23 @@ def main():
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--repeat-ab", action="store_true",
                         help="Replace cache/vision smoke with uncached/uncached/cached, in fresh MTP-on/off servers")
+    parser.add_argument("--capacity-validation", action="store_true",
+                        help="Saturate the backing cache, then run one exact 253952-token prompt")
     parser.add_argument("--require-mtp-state-patch", action="store_true",
                         help="Require the compiled state patch and its execution on the cached MTP request")
     args = parser.parse_args()
-    require_state = getattr(args, "require_mtp_state_patch", False)
-    if require_state and not args.repeat_ab:
-        parser.error("--require-mtp-state-patch requires --repeat-ab")
+    capacity = getattr(args, "capacity_validation", False)
+    require_state = getattr(args, "require_mtp_state_patch", False) or capacity
+    if capacity and args.repeat_ab:
+        parser.error("--capacity-validation and --repeat-ab are mutually exclusive")
+    if require_state and not (args.repeat_ab or capacity):
+        parser.error("--require-mtp-state-patch requires --repeat-ab or --capacity-validation")
     command = command_for(args.trial_dir, args.model_dir)
     print(json.dumps({"command": command, "repeat_ab": args.repeat_ab,
-                      "probes": (["MTP on: uncached / uncached / cached", "MTP off: uncached / uncached / cached"]
+                      "capacity_validation": capacity,
+                      "probes": (["Fill 8 GiB cache to >=95% with capacity eviction", "Verify saturated backing restore",
+                                  "One exact 253952-token prefill and <=128-token decode", "Observe near-full state retention"]
+                                 if capacity else ["MTP on: uncached / uncached / cached", "MTP off: uncached / uncached / cached"]
                                  if args.repeat_ab else ["A cold 32K", "A live repeat", "B diversion", "A backing restore", "vision shapes"])}, indent=2), flush=True)
     if not args.run:
         print("Plan only. --run is an isolated trial; production settings are never edited.")
@@ -335,15 +344,15 @@ def main():
     if require_state and not any(item["mtp_state_marker"] for item in artifacts):
         raise RuntimeError("Compiled MTP state marker missing; run build-strix-mtp-checkpoint.sh first")
     baseline = args.trial_dir / "trial-results/hip-templated-32k.xhe6lmo5/prompt-tokens.json"
-    tokens = json.loads(baseline.read_text())
-    if not isinstance(tokens, list) or len(tokens) != 32768 or not all(type(t) is int for t in tokens):
+    tokens = [] if capacity else json.loads(baseline.read_text())
+    if not capacity and (not isinstance(tokens, list) or len(tokens) != 32768 or not all(type(t) is int for t in tokens)):
         raise ValueError(f"Invalid exact-token baseline: {baseline}")
     with socket.socket() as sock:
         sock.settimeout(2)
         if sock.connect_ex(("127.0.0.1", 8189)) == 0:
             raise RuntimeError("Port 8189 is occupied; stop the previous test first")
     subprocess.run(["sudo", "-v"], check=True)
-    prefix = "hip-cache-repeat-ab." if args.repeat_ab else "hip-cache-vision-256k."
+    prefix = "hip-cache-full-context." if capacity else "hip-cache-repeat-ab." if args.repeat_ab else "hip-cache-vision-256k."
     out = pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=args.trial_dir / "trial-results"))
     write_json(out / "command.json", command)
     write_json(out / "revision.json", {"trial_revision": revision})
@@ -382,7 +391,10 @@ def main():
             write_json(arm_out / "props.json", props)
             if not props.get("modalities", {}).get("vision") or props.get("default_generation_settings", {}).get("n_ctx") != 262144:
                 raise RuntimeError("Server did not confirm vision plus 262144 context")
-            if args.repeat_ab:
+            if capacity:
+                from qwen_strix_capacity import capacity_probes
+                capacity_probes(arm_out, arm_results, server)
+            elif args.repeat_ab:
                 repeat_probes(arm_out, tokens, arm_results, mtp=name == "mtp_on")
                 if require_state and name == "mtp_on":
                     restored = STATE_MARKER.decode() in (arm_out / "server.log").read_text(errors="replace")
