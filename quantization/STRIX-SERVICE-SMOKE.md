@@ -242,3 +242,55 @@ Production is restarted only if it was active before the trial; if it was
 inactive, it remains inactive. A PASS establishes this bounded test only, not
 maximum concurrency, byte-exact cache utilization, every context position, or
 production endurance.
+
+## Near-full backing retention with a 12 GiB limit
+
+The occupied-cache trial `hip-cache-full-context.1zp04ki4` passed with 34 saved
+entries using 8101.794 MiB (98.90% of 8192 MiB) during a 253952-token uncached
+prefill. It retrieved all three codes correctly, at 131.75 prompt tokens/s and
+14.16 decode tokens/s for a short 29-token answer. Minimum available RAM was
+8.86 GiB. The near-full state itself required **10036.763 MiB**, including
+checkpoints, and was skipped by the 8192 MiB cache limit. Those measurements
+establish occupied-cache inference, not retention of that near-full state.
+
+The follow-up isolates that remaining requirement with a **12288 MiB** limit:
+
+```bash
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench &&
+git pull --ff-only &&
+python3 -m unittest discover -s tests -p 'test_strix_capacity.py' &&
+python3 qwen_strix_service_smoke.py --near-full-retention --run
+```
+
+Run inside tmux, without another trial or memory-intensive workload running.
+No rebuild is needed if the tested MTP state patch is installed. All device,
+model, vision, F16, MTP n=3, PLE and checkpoint settings are unchanged. This mode
+does not fill the cache with short conversations first and does not claim to
+validate a fully occupied 12 GiB cache. It changes no production configuration.
+
+There are only three completion requests:
+
+1. One cold exact 253952-token prompt, up to 128 output tokens, with the same
+   early/middle/late retrieval fixture. Require correct codes and active MTP.
+2. One 256-token diversion. Require server logs to demonstrate saving the
+   near-full prompt into the unchanged 12288 MiB cache; an oversized-state skip
+   or changed cache limit aborts before attempting the return.
+3. Return to the identical near-full token array. Require backing-entry
+   selection, the patched MTP restore hook, continued drafting, exact cold/return
+   output token and text equality, and reuse of at least 251904 tokens (at most
+   2048 tokens replayed). The earlier 32K tests replayed only four tokens; this
+   gate leaves room for a near-end checkpoint without allowing a full re-prefill.
+
+The cold request has a two-hour timeout. The return has a **180-second** socket
+timeout and no retry, so a cache miss cannot silently repeat the entire
+half-hour prefill. A timeout or failed reuse check is an incomplete/failed
+retention validation, not a pass; cleanup stops the owned server. The timeout
+does not establish whether a slow return was caused by a miss or state loading:
+inspect the archived server log. Native prefill/decode timings and total request
+wall time are both recorded, since prefill timing alone may omit restoration.
+
+The same available-RAM/swap guard applies while saving and restoring. A cache
+limit is not a preallocation or proof that transient state-copy memory fits.
+Results are packaged in `trial-results/hip-near-full-retention.*.tar.gz`, with
+`retention-summary.json`, raw requests/responses, log, memory samples and
+fingerprints. Production is restarted only if it was active initially.

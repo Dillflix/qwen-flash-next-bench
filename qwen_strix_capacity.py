@@ -1,4 +1,4 @@
-"""Real backing-cache saturation followed by one near-full-context request."""
+"""Occupied backing-cache inference and focused near-full state retention trials."""
 import hashlib
 import json
 import pathlib
@@ -14,6 +14,8 @@ CACHE_RE = re.compile(r'cache state: (\d+) prompts, ([\d.]+) MiB \(limits: ([\d.
 EVICTION = 'making room for prompt cache entry, removing oldest entry'
 MARKER = 'STRIX_CAPACITY_BODY_87A21'
 EXPECTED = ['EMBER-731942', 'CEDAR-482615', 'ORBIT-906273']
+RETENTION_CAP_MIB = 12288
+RESTORE_TIMEOUT = 180
 
 
 def cache_snapshot(log):
@@ -99,7 +101,71 @@ def guard_reason(row, baseline_swap, low_samples):
     return None
 
 
-def capacity_probes(out, results, server):
+def log_since(path, offset):
+    with path.open('rb') as handle:
+        handle.seek(offset)
+        return handle.read().decode(errors='replace')
+
+
+def retention_probes(out, results, request, phase):
+    """One cold long prefill; a cache miss on return gets only 180 seconds."""
+    log = out / 'server.log'
+    phase['name'] = 'near_full_cold'
+    tokens, manifest = fixture('5e918a30d27f_full_context', NEAR_FULL, needles=True)
+    write_json(out / 'near-full-fixture.json', manifest)
+    cold = request('near_full_cold', tokens, False, count=128, timeout=7200)
+    results['near_full_cold'] = cold
+    timing = cold['timings']
+    if timing.get('cache_n') != 0 or timing.get('prompt_n') != NEAR_FULL:
+        raise RuntimeError('Not an exact uncached 253952-token prefill')
+    if timing.get('draft_n', 0) <= 0 or not all(code in cold.get('content', '') for code in EXPECTED):
+        raise RuntimeError('Cold near-full response did not pass retrieval with MTP active')
+
+    phase['name'] = 'near_full_save_and_diversion'
+    offset = log.stat().st_size
+    diversion, _ = fixture('9ba0f714c5d2_post_long', 256)
+    results['diversion'] = request('diversion', diversion, False)
+    diversion_timing = results['diversion']['timings']
+    if diversion_timing.get('cache_n') != 0 or diversion_timing.get('prompt_n') != 256:
+        raise RuntimeError('The intervening conversation was not a distinct uncached 256-token prefill')
+    save_log = log_since(log, offset)
+    saved = cache_snapshot(save_log)
+    results['cache_after_near_full_save'] = saved
+    save_lengths = [int(value) for value in re.findall(r'saving prompt with length (\d+)', save_log)]
+    if ('exceeds cache size limit' in save_log or not saved or saved['cap_MiB'] != RETENTION_CAP_MIB
+            or saved['used_MiB'] <= 0 or saved['used_MiB'] > RETENTION_CAP_MIB
+            or not any(length >= NEAR_FULL for length in save_lengths)):
+        raise RuntimeError('Near-full state retention in the unchanged 12 GiB cache was not demonstrated; not attempting return')
+
+    phase['name'] = 'near_full_backing_restore'
+    offset = log.stat().st_size
+    try:
+        returned = request('near_full_return', tokens, True, count=128, timeout=RESTORE_TIMEOUT)
+    except TimeoutError as error:
+        raise RuntimeError('Near-full restore exceeded 180 seconds; no retry or second cold prefill will be attempted') from error
+    results['near_full_return'] = returned
+    restore_log = log_since(log, offset)
+    comparison = output_comparison(cold, returned)
+    results['near_full_output_comparison'] = comparison
+    timing = returned['timings']
+    selected = 'found better prompt with f_keep' in restore_log
+    state_hook = STATE_MARKER.decode() in restore_log
+    errors = []
+    if not comparison['tokens_match'] or not comparison['text_matches']:
+        errors.append('Restored near-full output differs from the cold output')
+    if (timing.get('cache_n', 0) < NEAR_FULL - 2048
+            or timing.get('cache_n', 0) + timing.get('prompt_n', 0) != NEAR_FULL):
+        errors.append('Near-full reuse was not demonstrated with at most 2048 replayed tokens')
+    if not selected or not state_hook:
+        errors.append('Backing selection and patched MTP state restore were not both observed')
+    if timing.get('draft_n', 0) <= 0:
+        errors.append('MTP drafting was not observed after restoration')
+    results['verdict'] = {'status': 'FAIL' if errors else 'PASS', 'failures': errors,
+        'backing_restore_selection_logged': selected, 'mtp_state_restore_logged': state_hook,
+        'scope': 'One near-full cold/save/diversion/restore sequence with a 12 GiB backing-cache limit; not saturation or endurance validation'}
+
+
+def capacity_probes(out, results, server, *, retention=False):
     log_path = out / 'server.log'
     phase = {'name': 'cache_fill'}
     stop = threading.Event()
@@ -142,15 +208,29 @@ def capacity_probes(out, results, server):
                 'cache_prompt': cache, 'return_tokens': True, 'stream': False}
         write_json(out / f'{label}-request.json', body)
         print(f'{label}: {len(tokens)} input tokens, up to {count} output tokens', flush=True)
+        started = time.monotonic()
         response = post('/completion', body, timeout=timeout)
+        elapsed = time.monotonic() - started
+        results.setdefault('request_wall_seconds', {})[label] = elapsed
         write_json(out / f'{label}-response.json', response)
         if guard['tripped']:
             raise RuntimeError(guard['reason'])
         text_result(response)
-        print(json.dumps({'label': label, 'timings': response.get('timings'), 'content': response.get('content')}), flush=True)
+        print(json.dumps({'label': label, 'wall_seconds': elapsed, 'timings': response.get('timings'),
+                          'content': response.get('content')}), flush=True)
         return response
 
     try:
+        if retention:
+            retention_probes(out, results, request, phase)
+            stop.set()
+            watcher.join(timeout=3)
+            if guard['tripped'] or watcher.is_alive():
+                results.pop('verdict', None)
+                raise RuntimeError(guard['reason'] or 'Memory guard did not stop cleanly')
+            write_json(out / 'retention-summary.json', results)
+            print(json.dumps(results['verdict'], indent=2), flush=True)
+            return
         fill = []
         history = []
         for index in range(64):

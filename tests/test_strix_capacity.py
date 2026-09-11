@@ -47,6 +47,96 @@ class CapacityTests(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             smoke.main()
 
+    def test_retention_plan_uses_12_gib_without_changing_other_modes(self):
+        for flags, cap in ((['--near-full-retention'], '12288'), (['--capacity-validation'], '8192'), ([], '8192')):
+            with mock.patch('sys.argv', ['smoke'] + flags), \
+                    mock.patch.object(smoke.subprocess, 'run') as run, \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(smoke.main(), 0)
+            run.assert_not_called()
+            plan = json.JSONDecoder().raw_decode(output.getvalue())[0]
+            cmd = plan['command']
+            self.assertEqual(cmd[cmd.index('--cache-ram') + 1], cap)
+            self.assertEqual(cmd[cmd.index('--spec-draft-n-max') + 1], '3')
+        for conflict in ('--repeat-ab', '--capacity-validation'):
+            with mock.patch('sys.argv', ['smoke', '--near-full-retention', conflict]), \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                smoke.main()
+
+    def retention_exercise(self, *, oversize=False, cap=12288, cached=253948,
+                           match=True, hook=True, timeout=False, draft=1):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            log = out / 'server.log'
+            log.touch()
+            result, calls = {}, []
+
+            def request(label, tokens, cache, **kwargs):
+                calls.append((label, len(tokens), cache, kwargs))
+                with log.open('a') as sink:
+                    if label == 'diversion':
+                        sink.write('saving prompt with length 253980, total state size = 8810.968 MiB\n')
+                        sink.write(f'cache state: 1 prompts, 10036.763 MiB (limits: {cap}.000 MiB, 262144 tokens)\n')
+                        if oversize:
+                            sink.write('exceeds cache size limit, skipping\n')
+                    if label == 'near_full_return':
+                        sink.write('found better prompt with f_keep\n')
+                        if hook:
+                            sink.write(capacity.STATE_MARKER.decode() + '\n')
+                if timeout and cache:
+                    raise TimeoutError('socket timed out')
+                return {'tokens': [10, 12 if cache and not match else 11],
+                        'content': '\n'.join(capacity.EXPECTED),
+                        'timings': {'cache_n': cached if cache else 0,
+                                    'prompt_n': len(tokens) - cached if cache else len(tokens),
+                                    'predicted_n': 2, 'draft_n': draft if cache else 1}}
+
+            with mock.patch.object(capacity, 'fixture', side_effect=lambda tag, total, **kw: ([1] * total, {})):
+                try:
+                    capacity.retention_probes(out, result, request, {})
+                except RuntimeError as error:
+                    result['exception'] = str(error)
+            return result, calls
+
+    def test_retention_one_cold_then_bounded_backing_return(self):
+        result, calls = self.retention_exercise()
+        self.assertEqual(result['verdict']['status'], 'PASS')
+        self.assertEqual([c[0] for c in calls], ['near_full_cold', 'diversion', 'near_full_return'])
+        self.assertEqual([(c[1], c[2]) for c in calls], [(253952, False), (256, False), (253952, True)])
+        self.assertEqual(calls[0][3]['timeout'], 7200)
+        self.assertEqual(calls[2][3]['timeout'], 180)
+
+    def test_retention_does_not_return_after_skip_or_changed_limit(self):
+        for args in ({'oversize': True}, {'cap': 8192}):
+            result, calls = self.retention_exercise(**args)
+            self.assertIn('not attempting return', result['exception'])
+            self.assertEqual(len(calls), 2)
+
+    def test_retention_rejects_miss_drift_missing_hook_or_no_mtp(self):
+        for args in ({'cached': 0}, {'match': False}, {'hook': False}, {'draft': 0}):
+            result, _ = self.retention_exercise(**args)
+            self.assertEqual(result['verdict']['status'], 'FAIL', args)
+
+    def test_retention_timeout_never_retries(self):
+        result, calls = self.retention_exercise(timeout=True)
+        self.assertIn('no retry', result['exception'])
+        self.assertEqual(len(calls), 3)
+
+    def test_guarded_runner_selects_retention_and_writes_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            results = {}
+            def probe(out, results, request, phase):
+                results['verdict'] = {'status': 'PASS'}
+            with mock.patch.object(capacity, 'read_memory', return_value={'SwapFree_GiB': 8, 'MemAvailable_GiB': 16}), \
+                    mock.patch.object(capacity, 'retention_probes', side_effect=probe) as retention, \
+                    mock.patch.object(capacity, 'fixture') as fixture, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                capacity.capacity_probes(out, results, mock.Mock(), retention=True)
+            retention.assert_called_once()
+            fixture.assert_not_called()
+            self.assertEqual(json.loads((out / 'retention-summary.json').read_text())['verdict']['status'], 'PASS')
+
     def exercise(self, *, admission_full=True, retrieval=True, saturate=True, trip=False):
         with tempfile.TemporaryDirectory() as tmp:
             out = pathlib.Path(tmp)
