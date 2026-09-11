@@ -11,6 +11,18 @@ import qwen_strix_service_smoke as smoke
 
 
 class ServiceSmokeTests(unittest.TestCase):
+    def test_state_marker_across_read_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            server = root / 'llama-server'
+            server.write_bytes(b'server')
+            (root / 'libllama-common.so').write_bytes(b'x' * (1024 * 1024 - 5) + smoke.STATE_MARKER)
+            artifacts = smoke.state_patch_artifacts(server)
+            self.assertEqual(len(artifacts), 2)
+            self.assertFalse(artifacts[0]['mtp_state_marker'])
+            self.assertTrue(artifacts[1]['mtp_state_marker'])
+            self.assertEqual(len(artifacts[1]['sha256']), 64)
+
     def test_mtp_off_removes_draft_options_without_changing_target_or_vision(self):
         on = smoke.command_for(pathlib.Path('/trial'), pathlib.Path('/models'))
         off = smoke.without_mtp(on)

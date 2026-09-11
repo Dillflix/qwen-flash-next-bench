@@ -51,6 +51,7 @@ jobs:
         run: |
           bash -n deployment/run-production.sh
           bash -n run-backing-cache.sh
+          bash -n build-strix-mtp-checkpoint.sh
           LLAMA_MTP_MODE=off LLAMA_STARTUP_PRIME=1 \
             python deployment/prime-production.py --check
           LLAMA_SERVER=/bin/true \
@@ -93,6 +94,26 @@ jobs:
             echo "relative slot-save path unexpectedly passed" >&2
             exit 1
           fi
+
+  strix-mtp-checkpoint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check pinned Strix patch and state serialization
+        run: |
+          git clone https://github.com/halo-box/strix-llama.cpp.git strix
+          git -C strix checkout 5f851647fe5ed795dfd6c0a3fba543114879e874
+          git -C strix apply --check "$GITHUB_WORKSPACE/patches/strix-mtp-checkpoint-state.patch"
+          git -C strix apply "$GITHUB_WORKSPACE/patches/strix-mtp-checkpoint-state.patch"
+          git -C strix apply --reverse --check "$GITHUB_WORKSPACE/patches/strix-mtp-checkpoint-state.patch"
+          python3 tests/run_strix_mtp_state_test.py --source strix --compiler clang++
+          cmake -S strix -B strix/build-ci -G Ninja \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF \
+            -DGGML_HIP=OFF -DGGML_VULKAN=OFF -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_TESTS=OFF
+          cmake --build strix/build-ci --parallel 2 --target llama-server
+          grep -aFq 'MTP checkpoint carry restored:' strix/build-ci/bin/libllama-common.so
 
   rocmfpx-integration-patches:
     runs-on: ubuntu-latest

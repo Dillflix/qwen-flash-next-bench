@@ -129,3 +129,55 @@ cross-arm comparison of the second uncached responses is recorded separately
 in `results.json`; passing per-arm tests is not a general MTP equivalence or
 quality certification. Cache-path drift alone still cannot distinguish floating
 point/batch-shape effects from incomplete checkpoint restoration.
+
+## Candidate repair: MTP checkpoint carry state
+
+The pinned MTP driver keeps `pending_h` outside the target/draft KV contexts.
+Its `get_state`/`set_state` methods were inherited no-ops, even though the server
+calls these hooks when it saves and restores prompt checkpoints. The candidate
+patch saves the deferred hidden row and restores it with the contexts. It clears
+batch-local verification rows and indices from the abandoned continuation;
+the next `process()` rebuilds them. Draft sampling already resets on each draft.
+This patch does not change quantization, kernels, acceptance rules, or KV precision.
+
+The payload has a version marker and embedding width. Missing, truncated, or
+incompatible payloads fail explicitly rather than leaving stale state. Start
+fresh processes for the test; do not import old saved slots into the patched
+runtime. The serialized row is 10248 bytes at width 2560 (10240 bytes plus an
+8-byte header), per checkpoint, not another multi-GiB model buffer.
+
+This is a local candidate repair for the measured gfx1151 deployment, not an
+upstream submission or a proven fix for token divergence. Bad draft state
+alone should normally be rejected by correct target verification. The same
+focused A/B diagnostic is still required after the patch.
+
+After publication, inside tmux with no Strix trial server running:
+
+```bash
+cd /srv/llm/src/llama-qwen4exp/qwen-flash-next-bench &&
+git pull --ff-only &&
+python3 -m unittest discover -s tests -p 'test_strix_service_smoke.py' &&
+bash ./build-strix-mtp-checkpoint.sh &&
+python3 qwen_strix_service_smoke.py --repeat-ab --require-mtp-state-patch --run
+```
+
+The build helper checks the exact source revision and refuses to rebuild while
+a matching trial server is running. It applies only
+`patches/strix-mtp-checkpoint-state.patch`, runs a CPU-only regression fixture
+compiled with the existing cached C++ compiler, and incrementally rebuilds the
+trial's existing `build-hip10-dual` server. It reuses the CMake cache rather than
+changing HIP, compiler, architecture, or kernel options. Running it twice is
+safe: an already-applied patch is detected. Unrelated source edits are not reset.
+The old `/srv/llm/src/ROCmFPX-qwen4exp` production build is not modified.
+
+The test fixture compiles the actual patched methods extracted from
+`common/speculative.cpp`, and checks bitwise round-trip (including signed zero),
+sequence isolation, stale-state clearing, and malformed payload rejection.
+It does not instantiate real model contexts or prove GPU correctness. CI also
+applies the patch to the pin and builds the CPU server.
+
+`--require-mtp-state-patch` checks the compiled marker before stopping production,
+records binary hashes, and requires an executed restore-hook log in the MTP-on
+arm. A stale or unused patch cannot pass the diagnostic merely because output
+happens to match. Results still go into one archive, and production restoration
+retains the same conditional behavior described above.

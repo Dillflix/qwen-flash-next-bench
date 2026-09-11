@@ -1,0 +1,62 @@
+#include <cstdint>
+#include <cstring>
+#include <stdexcept>
+#include <vector>
+#include <iostream>
+
+using llama_seq_id = int32_t;
+static void require(bool ok) { if (!ok) throw std::runtime_error("test assertion failed"); }
+#define GGML_ASSERT(x) require(x)
+#define GGML_ABORT(...) throw std::runtime_error("invalid checkpoint")
+#define SPC_DBG(...) ((void)0)
+
+struct base {
+    virtual bool get_state(llama_seq_id, std::vector<uint8_t> &) const = 0;
+    virtual void set_state(llama_seq_id, const std::vector<uint8_t> &) = 0;
+    virtual ~base() = default;
+};
+
+struct driver : base {
+    uint32_t n_seq = 2;
+    int32_t n_embd = 4;
+    bool chain_heads = true;
+    std::vector<std::vector<float>> pending_h{{1.25f, -2.5f, 3.75f, -0.0f}, {5, 6, 7, 8}};
+    std::vector<std::vector<float>> verify_h{{1, 2, 3, 4}, {5, 6, 7, 8}};
+    std::vector<int32_t> verify_h_rows{1, 1}, i_batch_beg{0, 1}, i_batch_end{0, 1}, i_last{0, 1};
+    std::vector<std::vector<float>> chain_h{{9, 10}, {11, 12}};
+
+// INSERT_ACTUAL_METHODS
+};
+
+int main() {
+    driver d;
+    const auto expected = d.pending_h[0];
+    std::vector<uint8_t> data;
+    require(d.get_state(0, data));
+    require(data.size() == 8 + expected.size() * sizeof(float));
+    d.pending_h[0].assign(4, 99);
+    d.set_state(0, data);
+    require(std::memcmp(d.pending_h[0].data(), expected.data(), expected.size() * sizeof(float)) == 0);
+    require(d.pending_h[1][0] == 5 && d.verify_h_rows[1] == 1 && d.chain_h[1].size() == 2);
+    require(d.verify_h[0].empty() && d.verify_h_rows[0] == 0 && d.chain_h[0].empty());
+    require(d.i_batch_beg[0] == -1 && d.i_batch_end[0] == -1 && d.i_last[0] == -1);
+    std::vector<uint8_t> again;
+    require(d.get_state(0, again) && again == data);
+    for (int failure = 0; failure < 4; ++failure) {
+        auto bad = data;
+        if (failure == 0) bad.clear();
+        if (failure == 1) bad.pop_back();
+        if (failure == 2) bad[0] ^= 1;
+        if (failure == 3) bad[4] ^= 1;
+        bool rejected = false;
+        try { d.set_state(0, bad); } catch (const std::runtime_error &) { rejected = true; }
+        require(rejected);
+        require(std::memcmp(d.pending_h[0].data(), expected.data(), expected.size() * sizeof(float)) == 0);
+    }
+    require(!d.get_state(-1, again) && again.empty());
+    d.set_state(2, data);
+    d.chain_heads = false;
+    d.chain_h.clear();
+    d.set_state(0, data);
+    std::cout << "MTP state round-trip, stale-state clearing, sequence isolation, invalid data: PASS\n";
+}

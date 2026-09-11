@@ -30,6 +30,23 @@ TRIAL = pathlib.Path("/srv/llm/src/strix-llama-trial-5f851647")
 MODELS = pathlib.Path("/srv/llm/models/qwen-flash-next")
 SERVICE = "qwen-flash-next.service"
 URL = "http://127.0.0.1:8189"
+STATE_MARKER = b"MTP checkpoint carry restored:"
+
+
+def state_patch_artifacts(server_path):
+    server = pathlib.Path(server_path)
+    found = []
+    for path in (server, server.parent / "libllama-common.so", server.parent / "libllama-server-impl.so"):
+        if not path.is_file():
+            continue
+        digest, tail, marked = hashlib.sha256(), b"", False
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+                marked = marked or STATE_MARKER in tail + chunk
+                tail = chunk[-len(STATE_MARKER):]
+        found.append({"path": str(path), "sha256": digest.hexdigest(), "mtp_state_marker": marked})
+    return found
 
 
 def command_for(trial, models):
@@ -290,7 +307,12 @@ def main():
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--repeat-ab", action="store_true",
                         help="Replace cache/vision smoke with uncached/uncached/cached, in fresh MTP-on/off servers")
+    parser.add_argument("--require-mtp-state-patch", action="store_true",
+                        help="Require the compiled state patch and its execution on the cached MTP request")
     args = parser.parse_args()
+    require_state = getattr(args, "require_mtp_state_patch", False)
+    if require_state and not args.repeat_ab:
+        parser.error("--require-mtp-state-patch requires --repeat-ab")
     command = command_for(args.trial_dir, args.model_dir)
     print(json.dumps({"command": command, "repeat_ab": args.repeat_ab,
                       "probes": (["MTP on: uncached / uncached / cached", "MTP off: uncached / uncached / cached"]
@@ -309,6 +331,9 @@ def main():
             raise FileNotFoundError(f"Missing {flag} file: {path}")
     if not os.access(command[0], os.X_OK):
         raise FileNotFoundError(f"Missing/non-executable server: {command[0]}")
+    artifacts = state_patch_artifacts(command[0])
+    if require_state and not any(item["mtp_state_marker"] for item in artifacts):
+        raise RuntimeError("Compiled MTP state marker missing; run build-strix-mtp-checkpoint.sh first")
     baseline = args.trial_dir / "trial-results/hip-templated-32k.xhe6lmo5/prompt-tokens.json"
     tokens = json.loads(baseline.read_text())
     if not isinstance(tokens, list) or len(tokens) != 32768 or not all(type(t) is int for t in tokens):
@@ -322,6 +347,7 @@ def main():
     out = pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=args.trial_dir / "trial-results"))
     write_json(out / "command.json", command)
     write_json(out / "revision.json", {"trial_revision": revision})
+    write_json(out / "binary-fingerprint.json", artifacts)
     print(f"Results: {out}", flush=True)
     server = log = monitor = None
     restore = False
@@ -358,6 +384,14 @@ def main():
                 raise RuntimeError("Server did not confirm vision plus 262144 context")
             if args.repeat_ab:
                 repeat_probes(arm_out, tokens, arm_results, mtp=name == "mtp_on")
+                if require_state and name == "mtp_on":
+                    restored = STATE_MARKER.decode() in (arm_out / "server.log").read_text(errors="replace")
+                    arm_results["verdict"]["mtp_state_restore_logged"] = restored
+                    if not restored:
+                        arm_results["verdict"]["status"] = "INVALID"
+                        arm_results["verdict"].setdefault("errors", []).append("Patched MTP state restore was not observed")
+                    write_json(arm_out / "repeat-summary.json", arm_results["verdict"])
+                    print(json.dumps(arm_results["verdict"], indent=2), flush=True)
             else:
                 probes(arm_out, tokens, arm_results)
                 arm_results["verdict"] = evaluate(arm_results)
