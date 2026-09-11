@@ -1,5 +1,8 @@
 # Qwen3.8-Flash-Next topology benchmark harness
 
+For the validated gfx1151-only Strix deployment and reversible migration of the
+existing systemd service, see [Strix production](deployment/STRIX-PRODUCTION.md).
+
 This package runs repeatable `llama-server` comparisons for the Strix Halo + RX 7900 XT system. It is preconfigured for the existing fork, Vulkan and ROCm 10 builds, the PLE16 Vulkan-safe model, the original joined-PLE model, and the Q8 MTP sidecar.
 
 The important default is intentionally small: `smoke` compares APU-only Vulkan with the representative 88/12 contiguous layer split. Larger strategy, MTP, context, and backend sweeps are opt-in.
